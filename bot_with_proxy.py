@@ -217,7 +217,7 @@ def estimate_fees(notional):
     finra_fee = min(notional * 0.000145, 7.27)
     return round(sec_fee + finra_fee, 4)
 
-def ask_claude(prompt, system="You are a trading AI. Respond with ONLY valid JSON. No markdown.", max_tokens=800):
+def ask_claude(prompt, system="You are a trading AI. Respond with ONLY a short valid JSON object under 500 characters. No markdown, no explanations, no extra text.", max_tokens=600):
     with httpx.Client(timeout=60) as http:
         res = http.post(
             "https://api.anthropic.com/v1/messages",
@@ -229,7 +229,7 @@ def ask_claude(prompt, system="You are a trading AI. Respond with ONLY valid JSO
         if not res.is_success: raise Exception(f"{res.status_code}: {res.text}")
         return res.json()["content"][0]["text"]
 
-def ask_grok(prompt, system="You are a trading AI. Respond with ONLY valid JSON. No markdown.", max_tokens=800):
+def ask_grok(prompt, system="You are a trading AI. Respond with ONLY a short valid JSON object under 500 characters. No markdown, no explanations, no extra text.", max_tokens=600):
     with httpx.Client(timeout=60) as http:
         res = http.post(
             "https://api.x.ai/v1/chat/completions",
@@ -286,7 +286,7 @@ def parse_json_list(raw):
         obj = parse_json(raw)
         return [obj] if obj else []
 
-def ask_with_retry(ask_fn, prompt, system, retries=2):
+def ask_with_retry(ask_fn, prompt, system, retries=3):
     """Call AI with retry on JSON parse failure"""
     for attempt in range(retries + 1):
         try:
@@ -295,14 +295,16 @@ def ask_with_retry(ask_fn, prompt, system, retries=2):
             if result:
                 return result
             if attempt < retries:
-                log(f"⚠️ JSON parse failed attempt {attempt+1}, retrying...")
+                log(f"⚠️ JSON parse failed attempt {attempt+1}, raw preview: {raw[:150]}")
                 time.sleep(2)
+            else:
+                log(f"⚠️ All retries failed. Raw: {raw[:300]}")
         except Exception as e:
             if attempt < retries:
                 log(f"⚠️ API error attempt {attempt+1}: {e}, retrying...")
                 time.sleep(3)
             else:
-                raise
+                log(f"❌ Final error: {e}")
     return None
 
 def is_market_open():
