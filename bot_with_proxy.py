@@ -2230,6 +2230,9 @@ def run_autopilot(positions, pos_symbols, cash, equity):
 
 def run_watch_mode(cash, equity, positions, pos_symbols):
     """
+    LEGACY — No longer called in normal operation.
+    New system: both AIs sleep together, bot monitors alone.
+    Kept as emergency fallback only.
     Dynamic watch mode — single AI (Claude) monitors until cash hits active threshold.
     If cash crosses active threshold mid-watch, Claude calls Grok immediately.
 
@@ -2570,11 +2573,20 @@ def run_cycle():
         run_low_cash_cycle(positions, pos_symbols, cash, equity, features)
         return
 
-    # TIER 3: Between sleep and active — Claude watch mode only
+    # TIER 3: Between sleep and active — both AIs sleep, bot monitors alone
     if sleep_threshold <= cash < active_threshold:
-        log(f"👁️ WATCH MODE (${cash:.2f}) — Claude solo until ${active_threshold:.2f}")
-        shared_state["watch_mode_active"] = True
-        run_watch_mode(cash, equity, positions, pos_symbols)
+        log(f"😴 BOT AUTONOMOUS (${cash:.2f}) — Both AIs sleeping until cash >= ${active_threshold:.2f}")
+        log(f"   Bot monitoring {len(positions)} positions | Zero AI calls")
+        shared_state["watch_mode_active"] = False
+        shared_state["ai_sleeping"]       = True
+        if not shared_state.get("sleep_reason"):
+            shared_state["sleep_reason"] = f"cash ${cash:.2f} below threshold ${active_threshold:.2f}"
+        # Bot just runs autonomous monitor — no AI calls at all
+        fires = run_autonomous_monitor(positions, pos_symbols, cash, equity)
+        if fires > 0:
+            log(f"   Bot executed {fires} autonomous exit(s)")
+        log(f"   Next wake: cash >= ${active_threshold:.2f} | 2+ stops | 4pm review | 8:30am research")
+        log(f"   API saved: 0 calls used vs 5 normal")
         return
 
     # Cash is sufficient for full collaboration
@@ -3312,7 +3324,7 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
         return 0
 
     stops_fired = 0
-    log(f"🤖 AUTONOMOUS MONITOR — {len(positions)} positions | AIs sleeping")
+    log(f"🤖 BOT AUTONOMOUS — {len(positions)} positions | Both AIs sleeping | 0 API calls")
 
     for pos in positions:
         symbol        = pos["symbol"]
@@ -3521,7 +3533,7 @@ def trading_loop():
                     eq_check   = float(acct_check["equity"])
                     thresh_check = get_cash_thresholds(eq_check)
                     if cash_check < thresh_check["active"]:
-                        ai_sleep("premarket research done — insufficient cash to trade")
+                        ai_sleep("premarket research done — both AIs sleeping, bot takes over")
                 except: pass
 
             elif mode in ("opening", "prime", "power_hour"):
@@ -3577,9 +3589,9 @@ def trading_loop():
                     thresh_ah = get_cash_thresholds(eq_ah)
                     pos_ah    = alpaca("GET", "/v2/positions")
                     if cash_ah < thresh_ah["active"] and pos_ah:
-                        ai_sleep("afterhours review done — bot monitoring overnight positions")
+                        ai_sleep("afterhours done — both AIs sleeping, bot guards overnight")
                     elif not pos_ah and cash_ah < thresh_ah["active"]:
-                        ai_sleep("afterhours done — no positions, insufficient cash")
+                        ai_sleep("afterhours done — no positions, both AIs sleeping")
                 except: pass
 
         except Exception as e:
