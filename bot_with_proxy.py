@@ -132,6 +132,14 @@ shared_state = {
     "tomorrows_plan":       None,
     "next_buy_target":      None,
     "spy_trend":            "neutral",
+    # ── Hourly trend scan storage ──────────────────────────
+    "trend_scan_results":   [],      # Latest scan findings stored for AI review
+    "trend_scan_time":      None,    # When last scan ran
+    "trend_alerts":         [],      # High-priority alerts (may wake AIs)
+    "last_equity":          55.0,    # Track equity changes
+    "last_cash":            0.0,     # Track cash changes
+    "deposit_detected":     False,   # Flag when new deposit found
+    "deposit_amount":       0.0,     # How much was deposited
     # ── AI Sleep/Wake System ──
     "ai_sleeping":          False,   # True = both AIs asleep, bot runs autonomous
     "sleep_reason":         None,    # Why they went to sleep
@@ -2902,6 +2910,288 @@ Both AIs agree on this plan. Plain text 200 words."""
 
 
 
+
+# ══════════════════════════════════════════════════════════════
+# HOURLY TREND SCAN + DEPOSIT DETECTION
+# Runs every hour while AIs sleep — pure Alpaca data, zero AI cost
+# Stores findings for AI to read when they wake up
+# ══════════════════════════════════════════════════════════════
+
+def run_trend_scan(equity, cash):
+    """
+    Hourly autonomous trend scan — no AI needed.
+    Uses only Alpaca data (allowed domain).
+    Detects: volume spikes, momentum surges, new IPOs, extraordinary moves.
+    Stores results for AI review on next wake.
+    May wake AIs early if something extraordinary is found.
+    """
+    log("=" * 55)
+    log("🔍 HOURLY TREND SCAN — Bot autonomous, zero AI calls")
+    log("=" * 55)
+
+    findings     = []
+    alerts       = []
+    scan_time    = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    try:
+        headers = {"APCA-API-KEY-ID": ALPACA_KEY,
+                   "APCA-API-SECRET-KEY": ALPACA_SECRET}
+
+        # ── SCAN 1: Biggest gainers right now ────────────────
+        log("📈 Scanning biggest gainers...")
+        try:
+            url = f"{DATA_URL}/v1beta1/screener/stocks/movers?top=20&market_type=stocks"
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.ok:
+                gainers = res.json().get("gainers", [])
+                for g in gainers[:10]:
+                    sym = g.get("symbol","")
+                    pct = float(g.get("percent_change", 0))
+                    if pct > 5.0:
+                        finding = {
+                            "type":      "big_gainer",
+                            "symbol":    sym,
+                            "change":    pct,
+                            "scan_time": scan_time,
+                            "note":      f"+{pct:.1f}% today — strong momentum",
+                            "priority":  "HIGH" if pct > 10 else "MEDIUM",
+                        }
+                        findings.append(finding)
+                        log(f"   📈 {sym}: +{pct:.1f}% {'⚡ EXTRAORDINARY' if pct > 10 else ''}")
+                        if pct > 10:
+                            alerts.append({
+                                "type":    "extraordinary_gainer",
+                                "symbol":  sym,
+                                "change":  pct,
+                                "message": f"{sym} up +{pct:.1f}% — consider waking AIs",
+                            })
+        except Exception as e:
+            log(f"   ⚠️ Gainers scan failed: {e}")
+
+        # ── SCAN 2: New IPO detection ─────────────────────────
+        log("🆕 Scanning for new IPOs and emerging stocks...")
+        try:
+            end   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            start = (datetime.now(timezone.utc) - timedelta(days=190)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # Get fresh asset list
+            assets_res = requests.get(
+                f"{BASE_URL}/v2/assets?status=active&asset_class=us_equity",
+                headers=headers, timeout=10
+            )
+            if assets_res.ok:
+                assets = assets_res.json()
+                candidates = [
+                    a["symbol"] for a in assets
+                    if a.get("tradable") and a.get("marginable")
+                    and not a.get("symbol","").endswith(("W","R","U","P"))
+                    and len(a.get("symbol","")) <= 5
+                ]
+                import random
+                sample = random.sample(candidates, min(150, len(candidates)))
+                new_ipos = []
+                for sym in sample:
+                    try:
+                        url = (f"{DATA_URL}/v2/stocks/{sym}/bars"
+                               f"?timeframe=1Day&start={start}&end={end}"
+                               f"&limit=200&feed=iex")
+                        r   = requests.get(url, headers=headers, timeout=4)
+                        if r.ok:
+                            bars = r.json().get("bars", [])
+                            if 20 <= len(bars) <= 180:
+                                avg_vol    = sum(b["v"] for b in bars) / len(bars)
+                                last_price = bars[-1]["c"]
+                                mom_3d = round((bars[-1]["c"]-bars[-4]["c"])/bars[-4]["c"]*100,2) if len(bars)>=4 else 0
+                                mom_5d = round((bars[-1]["c"]-bars[-6]["c"])/bars[-6]["c"]*100,2) if len(bars)>=6 else 0
+                                if avg_vol > 500000 and 5 <= last_price <= 300:
+                                    new_ipos.append({
+                                        "symbol":   sym,
+                                        "days_old": len(bars),
+                                        "price":    last_price,
+                                        "avg_vol":  round(avg_vol),
+                                        "mom_3d":   mom_3d,
+                                        "mom_5d":   mom_5d,
+                                    })
+                                    if len(new_ipos) >= 10:
+                                        break
+                    except: continue
+
+                # Sort by momentum
+                new_ipos.sort(key=lambda x: -abs(x["mom_5d"]))
+                for ipo in new_ipos[:5]:
+                    sym    = ipo["symbol"]
+                    mom    = ipo["mom_5d"]
+                    days   = ipo["days_old"]
+                    finding = {
+                        "type":      "new_ipo",
+                        "symbol":    sym,
+                        "days_old":  days,
+                        "mom_5d":    mom,
+                        "price":     ipo["price"],
+                        "scan_time": scan_time,
+                        "note":      f"{days}d old stock, 5d momentum={mom:+.1f}%",
+                        "priority":  "HIGH" if abs(mom) > 8 else "MEDIUM",
+                    }
+                    findings.append(finding)
+                    log(f"   🆕 {sym}: {days}d old | mom={mom:+.1f}% | ${ipo['price']:.2f}")
+
+        except Exception as e:
+            log(f"   ⚠️ IPO scan failed: {e}")
+
+        # ── SCAN 3: Volume spike detection ───────────────────
+        log("📊 Scanning for volume spikes in universe...")
+        try:
+            volume_alerts = []
+            for sym in RULES["universe"]:
+                bars = get_bars(sym, days=30)
+                if len(bars) >= 20:
+                    avg_vol    = sum(b["v"] for b in bars[-20:-1]) / 19
+                    today_vol  = bars[-1]["v"]
+                    vol_ratio  = round(today_vol / avg_vol, 1) if avg_vol > 0 else 0
+                    price_chg  = round((bars[-1]["c"]-bars[-2]["c"])/bars[-2]["c"]*100,2)
+                    if vol_ratio >= 3.0:
+                        volume_alerts.append({
+                            "symbol":    sym,
+                            "vol_ratio": vol_ratio,
+                            "price_chg": price_chg,
+                        })
+                        finding = {
+                            "type":      "volume_spike",
+                            "symbol":    sym,
+                            "vol_ratio": vol_ratio,
+                            "price_chg": price_chg,
+                            "scan_time": scan_time,
+                            "note":      f"Volume {vol_ratio}x average | price {price_chg:+.1f}%",
+                            "priority":  "HIGH" if vol_ratio >= 5.0 else "MEDIUM",
+                        }
+                        findings.append(finding)
+                        log(f"   📊 {sym}: vol {vol_ratio}x avg | price {price_chg:+.1f}%")
+                        if vol_ratio >= 5.0:
+                            alerts.append({
+                                "type":    "volume_spike",
+                                "symbol":  sym,
+                                "vol_ratio": vol_ratio,
+                                "message": f"{sym} volume {vol_ratio}x normal — possible catalyst",
+                            })
+        except Exception as e:
+            log(f"   ⚠️ Volume scan failed: {e}")
+
+        # ── SCAN 4: Technical breakouts ───────────────────────
+        log("📐 Scanning for technical breakouts in universe...")
+        try:
+            for sym in RULES["universe"]:
+                bars = get_bars(sym, days=60)
+                ind  = compute_indicators(bars)
+                if not ind: continue
+                breakout_signals = []
+                # Price crossed above SMA20 (bullish cross)
+                if (ind["sma20"] and len(bars) >= 2 and
+                    bars[-2]["c"] < ind["sma20"] and bars[-1]["c"] > ind["sma20"]):
+                    breakout_signals.append("crossed above SMA20")
+                # RSI recovering from oversold
+                if ind["rsi"] and 30 <= ind["rsi"] <= 45:
+                    breakout_signals.append(f"RSI recovering {ind['rsi']}")
+                # MACD turning positive
+                if ind["macd"] and ind["macd"] > 0 and len(bars) >= 2:
+                    prev_bars = get_bars(sym, days=62)
+                    prev_ind  = compute_indicators(prev_bars[:-1]) if len(prev_bars) > 1 else None
+                    if prev_ind and prev_ind.get("macd", 0) < 0:
+                        breakout_signals.append("MACD just turned positive")
+                if len(breakout_signals) >= 2:
+                    finding = {
+                        "type":      "technical_breakout",
+                        "symbol":    sym,
+                        "signals":   breakout_signals,
+                        "scan_time": scan_time,
+                        "note":      f"Breakout signals: {', '.join(breakout_signals)}",
+                        "priority":  "MEDIUM",
+                    }
+                    findings.append(finding)
+                    log(f"   📐 {sym}: {', '.join(breakout_signals)}")
+        except Exception as e:
+            log(f"   ⚠️ Breakout scan failed: {e}")
+
+    except Exception as e:
+        log(f"❌ Trend scan error: {e}")
+
+    # ── Store results for AI review ───────────────────────────
+    shared_state["trend_scan_results"] = findings
+    shared_state["trend_scan_time"]    = scan_time
+    shared_state["trend_alerts"]       = alerts
+
+    high_priority = [f for f in findings if f.get("priority") == "HIGH"]
+    log(f"🔍 Scan complete: {len(findings)} findings "
+        f"({len(high_priority)} high priority) | {len(alerts)} alerts")
+    log(f"   Stored for AI review on next wake")
+
+    if findings:
+        syms = list(set(f["symbol"] for f in findings))
+        log(f"   Stocks flagged: {syms}")
+
+    # ── Check if extraordinary finding should wake AIs ────────
+    extraordinary = [a for a in alerts
+                     if a.get("type") == "extraordinary_gainer"
+                     and a.get("change", 0) > 15]
+    if extraordinary and is_market_open():
+        log(f"🚨 EXTRAORDINARY FINDING — waking AIs early!")
+        for a in extraordinary:
+            log(f"   {a['symbol']}: {a['message']}")
+        ai_wake(f"extraordinary market move detected: "
+                f"{', '.join(a['symbol'] for a in extraordinary)}")
+        return True  # Signal that AIs were woken
+
+    return False
+
+def detect_deposit(current_equity, current_cash):
+    """
+    Detect if a new deposit has been made.
+    Compares current equity/cash to last known values.
+    A deposit shows as sudden cash increase not explained by trades.
+    """
+    last_equity = shared_state.get("last_equity", current_equity)
+    last_cash   = shared_state.get("last_cash", current_cash)
+
+    equity_jump = current_equity - last_equity
+    cash_jump   = current_cash - last_cash
+
+    # A deposit = cash increase significantly larger than any trade profit
+    # Filter out normal trade P&L fluctuations (< $5)
+    if cash_jump >= 10.0 and equity_jump >= 10.0:
+        log(f"💵 DEPOSIT DETECTED!")
+        log(f"   Cash: ${last_cash:.2f} → ${current_cash:.2f} (+${cash_jump:.2f})")
+        log(f"   Equity: ${last_equity:.2f} → ${current_equity:.2f} (+${equity_jump:.2f})")
+
+        shared_state["deposit_detected"] = True
+        shared_state["deposit_amount"]   = cash_jump
+
+        # Recalculate thresholds with new equity
+        new_thresholds = get_cash_thresholds(current_equity)
+        log(f"   New thresholds — watch=${new_thresholds['watch']:.2f} "
+            f"active=${new_thresholds['active']:.2f}")
+
+        # Check if deposit pushes cash above active threshold
+        if current_cash >= new_thresholds["active"]:
+            log(f"   Cash ${current_cash:.2f} >= active threshold "
+                f"${new_thresholds['active']:.2f} — WAKING AIs!")
+            ai_wake(f"deposit of ${cash_jump:.2f} detected — "
+                    f"new buying power ${current_cash:.2f} available")
+            return True, cash_jump
+
+        else:
+            log(f"   Deposit noted — need ${new_thresholds['active']-current_cash:.2f} "
+                f"more to reach active threshold")
+            # Add to alerts for AI to see on next scheduled wake
+            shared_state["trend_alerts"].append({
+                "type":    "deposit",
+                "amount":  cash_jump,
+                "message": f"New deposit ${cash_jump:.2f} — total cash ${current_cash:.2f}",
+            })
+
+    # Update last known values
+    shared_state["last_equity"] = current_equity
+    shared_state["last_cash"]   = current_cash
+    return False, 0
+
 # ══════════════════════════════════════════════════════════════
 # TRADING BRIEF SYSTEM
 # AIs write a full brief before sleeping.
@@ -2925,6 +3215,19 @@ def generate_trading_brief(equity, cash, positions, pool,
     log("=" * 55)
     log("📋 GENERATING TRADING BRIEF — AIs writing instructions for bot")
     log("=" * 55)
+
+    # Include trend scan findings in brief context
+    scan_results  = shared_state.get("trend_scan_results", [])
+    scan_deposits = [a for a in shared_state.get("trend_alerts",[])
+                     if a.get("type") == "deposit"]
+    scan_high_pri = [f for f in scan_results if f.get("priority") == "HIGH"]
+    scan_summary  = ", ".join([f"{f['symbol']}({f['type']})" for f in scan_high_pri[:5]])
+    deposit_note  = f"New deposits: +${sum(d.get('amount',0) for d in scan_deposits):.2f}" if scan_deposits else ""
+
+    if scan_summary:
+        log(f"   Bot found while sleeping: {scan_summary}")
+    if deposit_note:
+        log(f"   {deposit_note}")
 
     pos_summary = []
     for p in positions:
@@ -2958,7 +3261,12 @@ Market: {market_ctx}
 News: {news[:200]}
 Indicators: {chart_section[:400]}
 
+BOT FOUND WHILE YOU SLEPT (hourly trend scan):
+High priority findings: {scan_summary if scan_summary else "none"}
+{deposit_note}
+
 Write YOUR PART of the trading brief (account rules + position notes).
+Include any trend scan findings in your watchlist if relevant.
 Be specific — the bot follows this EXACTLY with no AI to ask.
 
 JSON (keep under 600 chars):
@@ -3255,6 +3563,12 @@ def ai_sleep(reason="trades executed — waiting for cash threshold"):
     # Store current exit strategies so bot can execute them while AIs sleep
     shared_state["sleeping_strategies"] = dict(shared_state["position_exits"])
 
+    # Clear old scan results so next wake gets fresh data
+    shared_state["trend_scan_results"] = []
+    shared_state["trend_alerts"]       = []
+    shared_state["deposit_detected"]   = False
+    shared_state["stops_fired_today"]  = 0
+
     log(f"😴 AIs going to SLEEP — {reason}")
     log(f"   Bot running autonomously with stored strategies")
     log(f"   Positions covered: {list(shared_state['sleeping_strategies'].keys()) or 'none'}")
@@ -3279,7 +3593,22 @@ def ai_wake(reason):
                 slept_mins = (datetime.now() - datetime.fromisoformat(sleep_time)).seconds // 60
                 log(f"🌅 AIs WAKING UP — {reason}")
                 log(f"   Slept for {slept_mins} minutes")
-                log(f"   Bot executed {shared_state['stops_fired_today']} stop/TP autonomously while sleeping")
+                log(f"   Bot executed {shared_state['stops_fired_today']} stop/TP autonomously")
+
+                # Show what bot found during sleep
+                scan_results = shared_state.get("trend_scan_results", [])
+                alerts       = shared_state.get("trend_alerts", [])
+                deposits     = [a for a in alerts if a.get("type") == "deposit"]
+                high_pri     = [f for f in scan_results if f.get("priority") == "HIGH"]
+
+                if scan_results:
+                    log(f"   Trend scan found {len(scan_results)} items "
+                        f"({len(high_pri)} high priority)")
+                    for f in high_pri[:3]:
+                        log(f"   ⭐ [{f['type']}] {f['symbol']}: {f['note'][:60]}")
+                if deposits:
+                    total_dep = sum(d.get("amount",0) for d in deposits)
+                    log(f"   💵 New deposits while sleeping: +${total_dep:.2f}")
             except:
                 log(f"🌅 AIs WAKING UP — {reason}")
         else:
@@ -3456,10 +3785,21 @@ def trading_loop():
     last_premarket  = None
     last_afterhours = None
 
-    # ── Background cash monitor (no AI needed) ───────────────
-    cash_check_interval = 60   # Check cash every 60 seconds silently
+    # ── Background monitors (no AI needed) ──────────────────
+    cash_check_interval = 60    # Check cash every 60 seconds
+    trend_scan_interval = 3600  # Trend scan every 60 minutes
     last_cash_check     = 0
     last_known_cash     = 0
+    last_trend_scan     = 0     # Run first scan 1 hour after start
+
+    # Initialize deposit tracking
+    try:
+        init_acct = alpaca("GET", "/v2/account")
+        shared_state["last_equity"] = float(init_acct["equity"])
+        shared_state["last_cash"]   = float(init_acct["cash"])
+        log(f"💵 Deposit tracker initialized: equity=${shared_state['last_equity']:.2f} "
+            f"cash=${shared_state['last_cash']:.2f}")
+    except: pass
 
     while True:
         try:
