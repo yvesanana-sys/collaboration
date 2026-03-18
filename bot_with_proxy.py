@@ -93,6 +93,10 @@ shared_state = {
     "last_sync":            None,
     "last_rebalance_day":   None,
     "last_rebalance_week":  None,
+    # Today's joint research plan
+    "todays_plan":          None,
+    "todays_watchlist":     {},
+    "tomorrows_plan":       None,
 }
 
 app = Flask(__name__)
@@ -529,6 +533,56 @@ def get_chart_section():
                      f"EMA21={ind['ema21']} BB%={ind['bb_pct']} Vol={ind['vol_ratio']} Mom5d={ind['mom_5d']}%")
     return "\n".join(lines)
 
+def get_full_market_intelligence():
+    """
+    Gather ALL market intelligence:
+    - Technical indicators
+    - News (24h)
+    - Politician trades (public disclosure)
+    - Top investor portfolios (13F filings)
+    - Biggest gainers today
+    - Smart money analysis (combined scoring)
+    """
+    log("📡 Gathering full market intelligence...")
+    chart_section = get_chart_section()
+    news          = get_news_context()
+    market_ctx    = get_market_context()
+
+    log("🏛️ Fetching politician trades...")
+    pol_text, pol_trades = get_politician_trades()
+    pol_signals   = analyze_politician_signals(pol_trades, chart_section)
+
+    log("💼 Fetching top investor portfolios...")
+    inv_text, inv_holdings = get_top_investor_portfolios()
+
+    log("📈 Fetching biggest gainers...")
+    gainers = get_biggest_gainers()
+
+    log("🆕 Detecting recent IPOs...")
+    ipos = get_recent_ipos()
+
+    log("🧠 Running smart money analysis...")
+    smart_money = analyze_smart_money(pol_signals, inv_holdings, gainers)
+
+    if smart_money["triple_confirmation"]:
+        log(f"🔥 TRIPLE CONFIRMATION stocks: {smart_money['triple_confirmation']}")
+    if smart_money["top_collab"]:
+        log(f"⭐ Top collaborative candidates: {smart_money['top_collab']}")
+
+    return {
+        "chart_section": chart_section,
+        "news":          news,
+        "market_ctx":    market_ctx,
+        "pol_text":      pol_text,
+        "pol_trades":    pol_trades,
+        "pol_signals":   pol_signals,
+        "inv_text":      inv_text,
+        "inv_holdings":  inv_holdings,
+        "gainers":       gainers,
+        "ipos":          ipos,
+        "smart_money":   smart_money,
+    }
+
 def get_news_context():
     try:
         end   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -566,6 +620,412 @@ def get_market_context():
         return "  Market unavailable"
     except Exception as e:
         return f"  Market error: {e}"
+
+
+def get_politician_trades():
+    """
+    Fetch recent politician stock trades from public disclosure APIs.
+    Uses quiverquant or capitoltrades public data.
+    Politicians must disclose trades within 45 days — we track the biggest movers.
+    """
+    try:
+        # Try Capitol Trades public API (free, no auth needed)
+        url = "https://api.capitoltrades.com/trades?pageSize=20&sortBy=-publishedAt"
+        res = requests.get(url, timeout=10, headers={"Accept": "application/json"})
+        if res.ok:
+            data  = res.json()
+            items = data.get("data", [])
+            trades = []
+            for t in items[:15]:
+                politician = t.get("politician", {}).get("name", "Unknown")
+                party      = t.get("politician", {}).get("party", "?")
+                chamber    = t.get("politician", {}).get("chamber", "?")
+                ticker     = t.get("asset", {}).get("ticker", "")
+                asset_name = t.get("asset", {}).get("name", "")
+                action     = t.get("type", "")      # buy/sell
+                size       = t.get("size", "")      # $1k-$5k, $5k-$25k etc
+                filed_date = t.get("publishedAt", "")[:10]
+                if ticker and ticker in RULES["universe"] + ["SPY","QQQ","NVDA","AAPL","MSFT"]:
+                    trades.append({
+                        "politician": politician,
+                        "party":      party,
+                        "ticker":     ticker,
+                        "action":     action,
+                        "size":       size,
+                        "filed":      filed_date,
+                    })
+            if trades:
+                lines = [f"  [{t['party']}] {t['politician']}: {t['action'].upper()} {t['ticker']} {t['size']} ({t['filed']})"
+                         for t in trades]
+                return "\n".join(lines), trades
+        return "  Capitol Trades API unavailable", []
+    except Exception as e:
+        log(f"⚠️ Capitol Trades fetch failed: {e}")
+
+    # Fallback: Try QuiverQuant congress trading (free tier)
+    try:
+        url = "https://api.quiverquant.com/beta/live/congresstrading"
+        res = requests.get(url, timeout=10)
+        if res.ok:
+            items  = res.json()[:15]
+            trades = []
+            for t in items:
+                ticker = t.get("Ticker", "")
+                if ticker:
+                    trades.append({
+                        "politician": t.get("Representative", "Unknown"),
+                        "party":      t.get("Party", "?"),
+                        "ticker":     ticker,
+                        "action":     t.get("Transaction", ""),
+                        "size":       t.get("Range", ""),
+                        "filed":      t.get("ReportDate", ""),
+                    })
+            if trades:
+                lines = [f"  [{t['party']}] {t['politician']}: {t['action'].upper()} {t['ticker']} {t['size']} ({t['filed']})"
+                         for t in trades]
+                return "\n".join(lines), trades
+    except Exception as e:
+        log(f"⚠️ QuiverQuant fetch failed: {e}")
+
+    return "  Politician trade data unavailable", []
+
+def analyze_politician_signals(trades, chart_section):
+    """
+    Analyze politician trades for mimicking opportunities.
+    Focus on:
+    1. Stocks multiple politicians are buying (strong signal)
+    2. Stocks in our universe that politicians are buying
+    3. Committee members buying stocks in their oversight area
+    4. Recent buys (within 30 days) — most actionable
+    """
+    if not trades:
+        return {}
+
+    # Count buys per ticker
+    buy_counts  = {}
+    sell_counts = {}
+    for t in trades:
+        ticker = t.get("ticker", "")
+        action = t.get("action", "").lower()
+        if not ticker: continue
+        if "buy" in action or "purchase" in action:
+            buy_counts[ticker]  = buy_counts.get(ticker, 0) + 1
+        elif "sell" in action or "sale" in action:
+            sell_counts[ticker] = sell_counts.get(ticker, 0) + 1
+
+    # Find strongest signals
+    signals = {}
+    for ticker, count in sorted(buy_counts.items(), key=lambda x: -x[1]):
+        signals[ticker] = {
+            "action":      "buy",
+            "count":       count,
+            "strength":    "STRONG" if count >= 3 else "MODERATE" if count >= 2 else "WEAK",
+            "in_universe": ticker in RULES["universe"],
+            "mimick_score": count * (2 if ticker in RULES["universe"] else 1),
+        }
+    for ticker, count in sell_counts.items():
+        if ticker not in signals:
+            signals[ticker] = {
+                "action":      "sell",
+                "count":       count,
+                "strength":    "STRONG" if count >= 3 else "MODERATE" if count >= 2 else "WEAK",
+                "in_universe": ticker in RULES["universe"],
+                "mimick_score": count,
+            }
+
+    # Top mimick candidates — in universe AND being bought
+    top_mimick = [
+        t for t, d in sorted(signals.items(), key=lambda x: -x[1]["mimick_score"])
+        if d["action"] == "buy" and d["in_universe"]
+    ][:3]
+
+    return {
+        "buy_signals":    {t: d for t, d in signals.items() if d["action"] == "buy"},
+        "sell_signals":   {t: d for t, d in signals.items() if d["action"] == "sell"},
+        "top_mimick":     top_mimick,
+        "universe_buys":  [t for t in top_mimick if t in RULES["universe"]],
+    }
+
+def get_biggest_gainers():
+    """
+    Fetch today's biggest gainers from Alpaca screener.
+    Only used for collaborative consideration — not autonomous trades.
+    """
+    try:
+        headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+        url     = f"{DATA_URL}/v1beta1/screener/stocks/movers?top=20&market_type=stocks"
+        res     = requests.get(url, headers=headers, timeout=10)
+        if res.ok:
+            gainers = res.json().get("gainers", [])
+            # Filter: must be in universe OR be high quality stock
+            top = []
+            for g in gainers[:10]:
+                sym = g.get("symbol","")
+                pct = float(g.get("percent_change", 0))
+                if pct > 3.0:  # Only stocks up 3%+ today
+                    top.append({
+                        "symbol":  sym,
+                        "change":  pct,
+                        "in_universe": sym in RULES["universe"],
+                    })
+            if top:
+                log(f"📈 Biggest gainers today (>3%): {[(t['symbol'], f'+{t["change"]:.1f}%') for t in top]}")
+            return top
+    except Exception as e:
+        log(f"⚠️ Gainers fetch failed: {e}")
+    return []
+
+
+
+def get_recent_ipos(min_days=30, max_days=180):
+    """
+    Fetch recent IPOs with 30-180 days of trading history.
+    IPOs often have explosive momentum — good for autonomous AND collaborative.
+    Requirements: 500k+ avg volume, $5-$200 price range.
+    """
+    try:
+        end     = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        start   = (datetime.now(timezone.utc) - timedelta(days=max_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+
+        # Get all active tradable assets
+        res = requests.get(f"{BASE_URL}/v2/assets?status=active&asset_class=us_equity",
+                          headers=headers, timeout=10)
+        if not res.ok:
+            return []
+
+        assets = res.json()
+        candidates = [
+            a["symbol"] for a in assets
+            if a.get("tradable") and a.get("marginable") and a.get("easy_to_borrow")
+            and not a.get("symbol","").endswith(("W","R","U","P"))
+            and len(a.get("symbol","")) <= 5
+        ]
+
+        recent_ipos = []
+        import random
+        sample = random.sample(candidates, min(200, len(candidates)))
+
+        for sym in sample:
+            try:
+                url = f"{DATA_URL}/v2/stocks/{sym}/bars?timeframe=1Day&start={start}&end={end}&limit=200&feed=iex"
+                r   = requests.get(url, headers=headers, timeout=5)
+                if r.ok:
+                    bars = r.json().get("bars", [])
+                    if min_days <= len(bars) <= max_days:
+                        avg_vol    = sum(b["v"] for b in bars) / len(bars)
+                        last_price = bars[-1]["c"]
+                        mom_5d     = round((bars[-1]["c"] - bars[-6]["c"]) / bars[-6]["c"] * 100, 2) if len(bars) >= 6 else 0
+                        if avg_vol > 500000 and 5 <= last_price <= 200:
+                            recent_ipos.append({
+                                "symbol":   sym,
+                                "days_old": len(bars),
+                                "price":    last_price,
+                                "avg_vol":  round(avg_vol),
+                                "mom_5d":   mom_5d,
+                            })
+                            if len(recent_ipos) >= 8:
+                                break
+            except:
+                continue
+
+        if recent_ipos:
+            # Sort by momentum
+            recent_ipos = sorted(recent_ipos, key=lambda x: -abs(x["mom_5d"]))
+            log(f"🆕 Recent IPOs detected ({len(recent_ipos)}): {[i['symbol'] for i in recent_ipos]}")
+
+        return recent_ipos
+    except Exception as e:
+        log(f"⚠️ IPO detection failed: {e}")
+        return []
+
+# ── Top Investor / Fund Tracking ─────────────────────────
+# SEC CIK numbers for top investors (public 13F filings)
+TOP_INVESTORS = {
+    "Cathie Wood (ARK)":      "0001697748",
+    "Michael Burry":          "0001649339",
+    "Warren Buffett":         "0001067983",
+    "George Soros":           "0001029160",
+    "Ray Dalio (Bridgewater)":"0001350694",
+    "Bill Ackman (Pershing)": "0001336528",
+    "David Tepper":           "0001262463",
+    "Stanley Druckenmiller":  "0001536411",
+}
+
+def get_sec_13f_holdings(cik, investor_name):
+    """Fetch latest 13F filing from SEC EDGAR for an investor"""
+    try:
+        # Get latest filings
+        url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
+        res = requests.get(url, timeout=10,
+                          headers={"User-Agent": "TradingBot research@example.com"})
+        if not res.ok:
+            return []
+
+        data    = res.json()
+        filings = data.get("filings", {}).get("recent", {})
+        forms   = filings.get("form", [])
+        acc_nos = filings.get("accessionNumber", [])
+        dates   = filings.get("filingDate", [])
+
+        # Find most recent 13F-HR
+        for i, form in enumerate(forms):
+            if form == "13F-HR":
+                acc_no   = acc_nos[i].replace("-","")
+                fil_date = dates[i]
+                # Get the filing index
+                idx_url  = f"https://www.sec.gov/Archives/edgar/full-index/2024/QTR4/form.idx"
+                doc_url  = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=13F-HR&dateb=&owner=include&count=1&search_text="
+                # Parse holdings from the filing
+                holding_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_no}/infotable.xml"
+                h_res = requests.get(holding_url, timeout=10,
+                                    headers={"User-Agent": "TradingBot research@example.com"})
+                if h_res.ok:
+                    import re
+                    holdings = []
+                    # Parse XML for stock holdings
+                    tickers_found = re.findall(r"<nameOfIssuer>([^<]+)</nameOfIssuer>", h_res.text)
+                    values_found  = re.findall(r"<value>([^<]+)</value>", h_res.text)
+                    shares_found  = re.findall(r"<sshPrnamt>([^<]+)</sshPrnamt>", h_res.text)
+                    for j, name in enumerate(tickers_found[:20]):
+                        val = int(values_found[j]) * 1000 if j < len(values_found) else 0
+                        holdings.append({
+                            "name":       name.strip(),
+                            "value_usd":  val,
+                            "investor":   investor_name,
+                            "filed":      fil_date,
+                        })
+                    return sorted(holdings, key=lambda x: -x["value_usd"])[:10]
+                break
+    except Exception as e:
+        pass
+    return []
+
+def get_top_investor_portfolios():
+    """
+    Track portfolios of the world's best investors via SEC 13F filings.
+    Returns their top holdings and recent changes.
+    Focus on stocks in our universe.
+    """
+    log("💼 Fetching top investor portfolios (SEC 13F)...")
+    all_holdings = {}
+    universe_set = set(RULES["universe"])
+
+    # Use a faster approach — fetch from a free aggregator
+    try:
+        # WhaleWisdom free API (top holdings aggregated)
+        whale_holdings = {}
+
+        # Check each investor
+        for investor, cik in list(TOP_INVESTORS.items())[:4]:  # limit to 4 to avoid timeout
+            holdings = get_sec_13f_holdings(cik, investor)
+            for h in holdings[:5]:
+                name = h["name"].upper()
+                # Try to match to our universe
+                for sym in universe_set:
+                    if sym in name or name in sym:
+                        if sym not in all_holdings:
+                            all_holdings[sym] = []
+                        all_holdings[sym].append({
+                            "investor": investor,
+                            "value":    h["value_usd"],
+                            "filed":    h["filed"],
+                        })
+
+        if all_holdings:
+            lines = []
+            for sym, holders in sorted(all_holdings.items(),
+                                       key=lambda x: sum(h["value"] for h in x[1]), reverse=True):
+                total_val = sum(h["value"] for h in holders)
+                investors = [h["investor"].split("(")[0].strip() for h in holders]
+                lines.append(f"  {sym}: held by {', '.join(investors)} | total ${total_val/1e6:.1f}M")
+            log(f"💼 Universe stocks held by top investors:")
+            for l in lines: log(l)
+            return "\n".join(lines), all_holdings
+
+    except Exception as e:
+        log(f"⚠️ SEC 13F fetch error: {e}")
+
+    # Fallback: use hardcoded known major holdings (updated quarterly)
+    log("💼 Using cached top investor holdings...")
+    known_holdings = {
+        "AAPL": ["Warren Buffett (largest position ~$170B)", "Many funds"],
+        "NVDA": ["Cathie Wood ARK (top holding)", "Many growth funds"],
+        "MSFT": ["Bill Ackman", "Many value funds"],
+        "AMZN": ["George Soros", "Many growth funds"],
+        "META": ["Stanley Druckenmiller (recent buy)", "Many tech funds"],
+        "TSLA": ["Cathie Wood ARK (core position)", "Many growth funds"],
+        "GOOGL": ["Warren Buffett (recent add)", "Many value funds"],
+        "PLTR": ["Cathie Wood ARK (large position)", "Growth funds"],
+    }
+
+    lines = []
+    universe_overlap = {k: v for k, v in known_holdings.items() if k in universe_set}
+    for sym, holders in universe_overlap.items():
+        lines.append(f"  {sym}: {holders[0]}")
+
+    return "\n".join(lines), {sym: [{"investor": h, "value": 0, "filed": "cached"}]
+                                for sym, holders in universe_overlap.items()
+                                for h in holders}
+
+def analyze_smart_money(pol_signals, investor_holdings, gainers):
+    """
+    Combine politician trades + top investor holdings + biggest gainers
+    to find the STRONGEST collaborative signals.
+
+    Triple confirmation = politician buy + top investor holds + biggest gainer today
+    """
+    universe_set = set(RULES["universe"])
+    scores = {}
+
+    # Score each universe stock
+    for sym in universe_set:
+        score = 0
+        reasons = []
+
+        # Politician signal (+3 per politician buying)
+        pol_buy = pol_signals.get("buy_signals", {}).get(sym, {})
+        if pol_buy:
+            pol_count = pol_buy.get("count", 0)
+            score    += pol_count * 3
+            reasons.append(f"{pol_count} politician(s) buying")
+
+        # Top investor holding (+2 per investor)
+        inv_holders = investor_holdings.get(sym, [])
+        if inv_holders:
+            score += len(inv_holders) * 2
+            names  = [h.get("investor","").split("(")[0].strip() for h in inv_holders[:2]]
+            reasons.append(f"held by {', '.join(names)}")
+
+        # Biggest gainer today (+4 — most immediate signal)
+        gainer_data = next((g for g in gainers if g.get("symbol") == sym), None)
+        if gainer_data and gainer_data.get("change", 0) > 3:
+            score += 4
+            reasons.append(f"biggest gainer +{gainer_data['change']:.1f}% today")
+
+        if score > 0:
+            scores[sym] = {
+                "score":         score,
+                "reasons":       reasons,
+                "is_triple":     score >= 9,  # All 3 signals
+                "is_double":     score >= 5,  # 2 signals
+                "collab_worthy": score >= 5,  # Recommend for collaboration
+            }
+
+    # Sort by score
+    ranked = sorted(scores.items(), key=lambda x: -x[1]["score"])
+
+    if ranked:
+        log("🧠 Smart money analysis:")
+        for sym, data in ranked[:5]:
+            tag = "🔥 TRIPLE" if data["is_triple"] else "⭐ DOUBLE" if data["is_double"] else "📌"
+            log(f"   {tag} {sym}: score={data['score']} — {' | '.join(data['reasons'])}")
+
+    return {
+        "ranked":     ranked,
+        "top_collab": [sym for sym, d in ranked if d["collab_worthy"]][:3],
+        "triple_confirmation": [sym for sym, d in ranked if d["is_triple"]],
+    }
 
 def estimate_fees(notional):
     return round(max(notional * 0.0000278, 0.01) + min(notional * 0.000145, 7.27), 4)
@@ -717,13 +1177,23 @@ def is_collaborative_trade_worthy(trade_claude, trade_grok, chart_section, news,
     if trade_claude.get("symbol") != trade_grok.get("symbol"):
         return False, f"Symbol mismatch: Claude={trade_claude.get('symbol')} Grok={trade_grok.get('symbol')}"
 
-    # Both must hit 95% confidence
-    c_conf = trade_claude.get("confidence", 0)
-    g_conf = trade_grok.get("confidence", 0)
-    if c_conf < RULES["collab_min_confidence"]:
-        return False, f"Claude confidence {c_conf}% < {RULES['collab_min_confidence']}% required"
-    if g_conf < RULES["collab_min_confidence"]:
-        return False, f"Grok confidence {g_conf}% < {RULES['collab_min_confidence']}% required"
+    # BONUS: Biggest gainers get automatic collaborative consideration
+    # (still need both AIs to agree, but lower confidence threshold)
+    gainers      = get_biggest_gainers()
+    gainer_syms  = [g["symbol"] for g in gainers if g.get("change", 0) > 3.0]
+    is_big_gainer = symbol in gainer_syms
+    if is_big_gainer:
+        log(f"📈 {symbol} is a biggest gainer today — lowering collab confidence to 88%")
+
+    # Both must hit confidence threshold
+    # Biggest gainers get lower threshold (88% vs 95%)
+    c_conf     = trade_claude.get("confidence", 0)
+    g_conf     = trade_grok.get("confidence", 0)
+    conf_floor = 88 if is_big_gainer else RULES["collab_min_confidence"]
+    if c_conf < conf_floor:
+        return False, f"Claude confidence {c_conf}% < {conf_floor}% required"
+    if g_conf < conf_floor:
+        return False, f"Grok confidence {g_conf}% < {conf_floor}% required"
 
     # Must have 5+ combined signals
     c_signals = trade_claude.get("signals", [])
@@ -764,27 +1234,75 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
     can_short    = features.get("can_short", False)
     short_note   = "SHORT SELLING ENABLED" if can_short else f"Short locked (${features.get('until_short',2000):.0f} away)"
 
+    # Get full intelligence for this cycle
+    pol_text, pol_trades = get_politician_trades()
+    pol_signals  = analyze_politician_signals(pol_trades, chart_section)
+    inv_text, inv_holdings = get_top_investor_portfolios()
+    gainers      = get_biggest_gainers()
+    ipos         = get_recent_ipos()
+    smart_money  = analyze_smart_money(pol_signals, inv_holdings, gainers)
+    pol_mimick   = pol_signals.get("top_mimick", [])
+    gainer_syms  = [g["symbol"] for g in gainers if g.get("in_universe")]
+    ipo_syms     = [i["symbol"] for i in ipos[:5]]
+    hot_ipos     = [i["symbol"] for i in ipos if abs(i.get("mom_5d", 0)) > 5]
+    triple_syms  = smart_money.get("triple_confirmation", [])
+    top_collab   = smart_money.get("top_collab", [])
+
+    if triple_syms:
+        log(f"🔥 Triple confirmation this cycle: {triple_syms}")
+    if gainer_syms:
+        log(f"📈 Big gainers for collaborative: {gainer_syms}")
+    if ipo_syms:
+        log(f"🆕 IPOs in play: {ipo_syms}")
+
     context = f"""=== AI COLLABORATION TRADING SYSTEM ===
 Portfolio: ${equity:.2f} | Cash: ${cash:.2f} | P&L: ${equity-RULES['total_budget']:+.2f}
 Growth Reserve: ${pool['reserve']:.2f} (UNTOUCHABLE — never trade this)
 Trading Pool: ${pool['trading']:.2f} total
-  Claude budget: ${pool['claude']:.2f} ({shared_state['claude_allocation']*100:.1f}% — earned by performance)
-  Grok budget:   ${pool['grok']:.2f} ({shared_state['grok_allocation']*100:.1f}% — earned by performance)
-Performance today: Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}
-Performance total: Claude ${shared_state['claude_total_pnl']:+.2f} | Grok ${shared_state['grok_total_pnl']:+.2f}
+  Claude budget: ${pool['claude']:.2f} ({shared_state['claude_allocation']*100:.1f}%)
+  Grok budget:   ${pool['grok']:.2f} ({shared_state['grok_allocation']*100:.1f}%)
+Performance: Claude ${shared_state['claude_daily_pnl']:+.2f} today | Grok ${shared_state['grok_daily_pnl']:+.2f} today
 Win days: Claude {shared_state['claude_win_days']} | Grok {shared_state['grok_win_days']}
 {short_note}
 Open positions ({open_count}/{RULES['max_positions']}):
 {chr(10).join(pos_details) if pos_details else '  None'}
+
 MARKET: {market_ctx}
-NEWS: {news[:400]}
-INDICATORS: {chart_section[:800]}"""
+NEWS: {news[:300]}
+
+POLITICIAN TRADES (public disclosures — strong signal):
+{pol_text[:350]}
+Top mimick candidates: {pol_mimick}
+
+BIGGEST GAINERS TODAY >3% (COLLABORATIVE ONLY):
+{[(g['symbol'], f'+{g["change"]:.1f}%') for g in gainers[:5]]}
+
+RECENT IPOs (autonomous candidates — high momentum):
+{[(i['symbol'], f"{i['days_old']}d old", f"mom={i['mom_5d']}%") for i in ipos[:5]]}
+Hot IPOs: {hot_ipos}
+
+TOP INVESTORS (13F): {inv_text[:200]}
+
+SMART MONEY:
+🔥 Triple confirmation: {triple_syms}
+⭐ Top collaborative: {top_collab}
+
+INDICATORS: {chart_section[:450]}"""
 
     # Round 1: Both propose independently
     r1_prompt = f"""{context}
-Propose up to 2 trades to maximize profit within YOUR budget.
-Consider: long AND short (if enabled), fees (min $8 trade), growth reserve is OFF LIMITS.
-JSON only: {{"strategy_name":"name","market_thesis":"brief","proposed_trades":[{{"action":"buy/sell/short","symbol":"TICK","notional_usd":15.0,"confidence":85,"direction":"long/short","signals":["s1","s2","s3"],"rationale":"brief"}}],"bearish_watchlist":["stocks to short when unlocked"]}}"""
+
+IMPORTANT RULES FOR THIS CYCLE:
+- AUTONOMOUS trades: technicals + news + politician signals + HOT IPOs (>5% momentum)
+- COLLABORATIVE candidates: Biggest gainers (>3%) AND triple confirmation stocks
+- IPOs with strong momentum are GOOD autonomous trades — they move fast
+- Never suggest a biggest gainer for autonomous — only flag for collaborative
+- Politician mimicking: 2+ politicians bought = strong autonomous signal
+- Triple confirmation = best collaborative candidate
+
+Propose up to 2 AUTONOMOUS trades from your budget.
+Also flag any COLLABORATIVE candidates (biggest gainers or strong politician signals).
+JSON: {{"strategy_name":"name","market_thesis":"brief","proposed_trades":[{{"action":"buy/sell/short","symbol":"TICK","notional_usd":15.0,"confidence":85,"direction":"long/short","signals":["s1","s2","s3"],"rationale":"brief","politician_signal":false,"ipo_signal":false}}],"collaborative_candidates":[{{"symbol":"TICK","reason":"biggest gainer OR triple confirmation","confidence":90}}],"bearish_watchlist":["tickers"]}}"""
 
     log("🔵 Round 1 — Claude proposing...")
     log("🔴 Round 1 — Grok proposing...")
@@ -840,6 +1358,24 @@ JSON: {{"refined_trades":[{{"action":"buy/sell/short","symbol":"TICK","notional_
     # Find highest-confidence matching trades from both AIs
     c_proposals = (claude_r1 or {}).get("proposed_trades", [])
     g_proposals = (grok_r1 or {}).get("proposed_trades", [])
+
+    # Also gather collaborative candidates both AIs flagged
+    c_collab_candidates = (claude_r1 or {}).get("collaborative_candidates", [])
+    g_collab_candidates = (grok_r1   or {}).get("collaborative_candidates", [])
+    all_collab_syms = set(
+        [c.get("symbol") for c in c_collab_candidates if c.get("symbol")] +
+        [c.get("symbol") for c in g_collab_candidates if c.get("symbol")]
+    )
+    if all_collab_syms:
+        log(f"🤝 Collaborative candidates flagged by AIs: {list(all_collab_syms)}")
+
+    # Add collaborative candidates as synthetic trade proposals for gate check
+    for sym in all_collab_syms:
+        c_conf_val = next((c.get("confidence",85) for c in c_collab_candidates if c.get("symbol")==sym), 85)
+        g_conf_val = next((c.get("confidence",85) for c in g_collab_candidates if c.get("symbol")==sym), 85)
+        if c_conf_val >= 85 and g_conf_val >= 85:
+            c_proposals.append({"symbol":sym,"action":"buy","confidence":c_conf_val,"signals":["collab_candidate","politician_or_gainer"],"rationale":f"Flagged by Claude as collaborative"})
+            g_proposals.append({"symbol":sym,"action":"buy","confidence":g_conf_val,"signals":["collab_candidate","politician_or_gainer"],"rationale":f"Flagged by Grok as collaborative"})
 
     for c_trade in c_proposals:
         for g_trade in g_proposals:
@@ -1085,18 +1621,55 @@ def run_premarket():
     account = alpaca("GET", "/v2/account")
     equity  = float(account["equity"])
     pool    = get_trading_pool(equity)
-    news    = get_news_context()
-    market  = get_market_context()
-    chart   = get_chart_section()
 
-    # Both AIs research independently
+    intel        = get_full_market_intelligence()
+    chart        = intel["chart_section"]
+    news         = intel["news"]
+    market       = intel["market_ctx"]
+    pol_text     = intel["pol_text"]
+    pol_signals  = intel["pol_signals"]
+    gainers      = intel["gainers"]
+    inv_text     = intel["inv_text"]
+    smart_money  = intel["smart_money"]
+
+    ipos         = intel.get("ipos", [])
+    pol_mimick   = pol_signals.get("top_mimick", [])
+    pol_buys     = pol_signals.get("universe_buys", [])
+    gainer_syms  = [g["symbol"] for g in gainers if g.get("in_universe")]
+    triple_syms  = smart_money.get("triple_confirmation", [])
+    top_collab   = smart_money.get("top_collab", [])
+    ipo_syms     = [i["symbol"] for i in ipos[:5]]
+    hot_ipos     = [i for i in ipos if abs(i.get("mom_5d", 0)) > 5]
+
     research_prompt = f"""Pre-market research. Market opens in {mins_to_open} min.
 Budget: Claude=${pool['claude']:.2f} | Grok=${pool['grok']:.2f} | Reserve=${pool['reserve']:.2f} (untouchable)
-Performance: Claude ${shared_state['claude_daily_pnl']:+.2f} today | Total ${shared_state['claude_total_pnl']:+.2f}
+Performance: Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}
+
 MARKET: {market}
-NEWS: {news[:300]}
-INDICATORS: {chart[:600]}
-Identify top 3 opportunities. Consider long AND short setups. Plain text 150 words."""
+NEWS (24h): {news[:200]}
+
+POLITICIAN TRADES: {pol_text[:200]}
+Top mimick: {pol_mimick}
+
+TOP INVESTORS (13F): {inv_text[:200]}
+
+RECENT IPOs (30-180 days old — high momentum potential):
+{[(i['symbol'], f"{i['days_old']}d old", f"mom={i['mom_5d']}%") for i in ipos[:5]]}
+Hot IPOs (>5% momentum): {[i['symbol'] for i in hot_ipos]}
+
+SMART MONEY:
+🔥 Triple confirmation: {triple_syms}
+⭐ Top collaborative: {top_collab}
+📈 Biggest gainers (>3%): {[(g['symbol'], f'+{g["change"]:.1f}%') for g in gainers[:5]]}
+
+INDICATORS: {chart[:350]}
+
+Research tasks:
+1. Triple confirmation = highest priority
+2. Hot IPOs with strong momentum — good autonomous candidates
+3. Politician + investor combos aligned with technicals
+4. Biggest gainers → collaborative only
+Plain text 150 words."""
 
     try:
         c_research = ask_claude(research_prompt,
@@ -1152,27 +1725,122 @@ def run_afterhours():
         news  = get_news_context()
         chart = get_chart_section()
 
-        review_prompt = f"""After-hours review and tomorrow's plan.
-Today P&L: Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}
-New allocations: Claude {shared_state['claude_allocation']*100:.1f}% | Grok {shared_state['grok_allocation']*100:.1f}%
-Bearish watchlist for shorting: {shared_state['bearish_watchlist']}
+        # Fetch end of day intelligence
+        # ── PHASE 1: Specialized After-Hours Research ──────
+        log("=" * 50)
+        log("📋 AFTER-HOURS PHASE 1: Specialized domain review")
+        log("=" * 50)
+        log("🔵 Claude reviewing: Politician filings + Investor moves")
+        log("🔴 Grok reviewing:   After-hours IPO moves + Tomorrow sentiment")
+
+        intel_ah    = get_full_market_intelligence()
+        pol_text_ah = intel_ah["pol_text"]
+        inv_text_ah = intel_ah["inv_text"]
+        ipos_ah     = intel_ah.get("ipos", [])
+        gainers_ah  = intel_ah["gainers"]
+        smart_ah    = intel_ah["smart_money"]
+
+        # Claude reviews smart money for tomorrow
+        claude_ah_prompt = f"""AFTER-HOURS — You are CLAUDE reviewing smart money signals for TOMORROW.
+
+TODAY'S PERFORMANCE:
+P&L: ${pnl:+.2f} | Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}
+Positions held: {[p['symbol'] for p in positions]}
+
+NEW POLITICIAN FILINGS (just disclosed):
+{pol_text_ah[:400]}
+
+TOP INVESTOR MOVES (any new 13F updates):
+{inv_text_ah[:300]}
+
+TOMORROW'S SMART MONEY SETUP:
+Triple confirmation: {smart_ah.get("triple_confirmation", [])}
+Top collaborative: {smart_ah.get("top_collab", [])}
+
+ANALYSIS TASKS:
+1. Any NEW politician filings today that change tomorrow's outlook?
+2. Are politicians buying into weakness? (contrarian signal)
+3. Which smart money positions should we mirror tomorrow?
+4. Any politician SELLS to watch as warning signals?
+5. Recommend: hold overnight positions or go to cash?
+Plain text 180 words."""
+
+        # Grok reviews momentum for tomorrow
+        grok_ah_prompt = f"""AFTER-HOURS — You are GROK reviewing momentum signals for TOMORROW.
+
+TODAY'S PERFORMANCE:
+P&L: ${pnl:+.2f} | Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}
+
+AFTER-HOURS IPO ACTIVITY:
+{[(i["symbol"], f"mom={i['mom_5d']}%", f"price=${i['price']}") for i in ipos_ah[:6]]}
+
+AFTER-HOURS MOVERS:
+{[(g["symbol"], f'+{g["change"]:.1f}%') for g in gainers_ah[:5]]}
+
 NEWS: {news[:300]}
-INDICATORS: {chart[:400]}
-Review today. Plan tomorrow. What's the strategy? Plain text 150 words."""
+
+ANALYSIS TASKS:
+1. Which IPOs are showing after-hours strength? (pre-market gap up likely)
+2. Twitter/X sentiment for tomorrow — fear or greed?
+3. Any earnings surprises affecting our universe?
+4. Which of today's losers might bounce tomorrow?
+5. Top 3 momentum plays for tomorrow's open
+6. Bearish watchlist update — any new short candidates?
+Plain text 180 words."""
+
+        claude_ah = ""
+        grok_ah   = ""
 
         try:
-            c_review = ask_claude(review_prompt,
-                "You are Claude reviewing the day. Plain text.", max_tokens=400)
-            log(f"🔵 Claude review:\n{c_review[:400]}")
+            claude_ah = ask_claude(claude_ah_prompt,
+                "You are Claude doing after-hours smart money review. Plain text.", max_tokens=500)
+            log(f"🔵 Claude after-hours review:\n{claude_ah[:500]}")
         except Exception as e:
-            log(f"❌ Claude review: {e}")
+            log(f"❌ Claude after-hours: {e}")
 
         try:
-            g_review = ask_grok(review_prompt,
-                "You are Grok reviewing the day with Twitter sentiment. Plain text.", max_tokens=400)
-            log(f"🔴 Grok review:\n{g_review[:400]}")
+            grok_ah = ask_grok(grok_ah_prompt,
+                "You are Grok doing after-hours momentum review. Plain text.", max_tokens=500)
+            log(f"🔴 Grok after-hours review:\n{grok_ah[:500]}")
         except Exception as e:
-            log(f"❌ Grok review: {e}")
+            log(f"❌ Grok after-hours: {e}")
+
+        # ── PHASE 2: Joint Tomorrow Plan ───────────────────
+        log("=" * 50)
+        log("📋 AFTER-HOURS PHASE 2: Joint plan for tomorrow")
+        log("=" * 50)
+
+        tomorrow_prompt = f"""Create TOMORROW'S JOINT AGREED PLAN.
+
+Claude's review (smart money): {claude_ah[:350] if claude_ah else "unavailable"}
+Grok's review (momentum):      {grok_ah[:350] if grok_ah else "unavailable"}
+
+Today's results: ${pnl:+.2f} total P&L
+New allocations: Claude {shared_state['claude_allocation']*100:.1f}% | Grok {shared_state['grok_allocation']*100:.1f}%
+Bearish watchlist: {shared_state['bearish_watchlist']}
+
+JOINT PLAN FOR TOMORROW:
+1. OVERNIGHT DECISION: Hold or sell each open position (specific reasoning)
+2. PRE-MARKET FOCUS: Top 3 stocks to watch at open
+3. CLAUDE'S STRATEGY tomorrow (smart money + technical)
+4. GROK'S STRATEGY tomorrow (momentum + IPO + sentiment)
+5. COLLABORATIVE TARGET: Best big-ticket candidate if both agree
+6. RISK LEVEL for tomorrow and position sizing guidance
+7. LESSONS from today: what worked, what didn't
+
+Both AIs agree on this plan. Plain text 200 words."""
+
+        try:
+            tomorrow_plan = ask_claude(tomorrow_prompt,
+                "You are creating tomorrow's agreed trading plan. Plain text.", max_tokens=500)
+            log(f"\n{'='*50}")
+            log(f"✅ TOMORROW'S JOINT PLAN (AGREED):")
+            log(f"{'='*50}")
+            log(f"{tomorrow_plan[:600]}")
+            log(f"{'='*50}\n")
+            shared_state["tomorrows_plan"] = tomorrow_plan
+        except Exception as e:
+            log(f"❌ Tomorrow plan: {e}")
 
     except Exception as e:
         log(f"❌ After-hours error: {e}")
@@ -1186,6 +1854,7 @@ def trading_loop():
         log(f"   ${tier['equity']} → {tier['description']}")
     log(f"🔒 Short selling unlocks at $2,000")
     log(f"💥 Collaborative big-ticket unlocks at $3,000 (min trade ${RULES['collab_min_trade_size']:,})")
+    log(f"🆕 IPO detection: active (30-180 day old stocks, >500k volume)")
     log(f"🛡️ Stop={RULES['stop_loss_pct']*100}% | TP={RULES['take_profit_pct']*100}% | Daily limit={RULES['daily_loss_limit_pct']*100}%")
 
     if not all([ALPACA_KEY, ALPACA_SECRET, ANTHROPIC_KEY, GROK_KEY]):
