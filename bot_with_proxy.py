@@ -35,6 +35,14 @@ RULES = {
     "collab_min_trade_size":   1000,   # Min trade size when collaborative active
     "collab_max_trade_pct":    0.40,   # Max 40% of collab pool per trade
     "interval_minutes":        5,
+    # ── Cash threshold tiers ──
+    "cash_sleep_threshold":    8,    # Below this → no AI calls at all
+    "cash_watch_threshold":    20,   # Below this → single AI watch mode
+    "cash_active_threshold":   20,   # Above this → full collaboration resumes
+    # ── AI failover ──
+    "failover_max_retries":    3,    # Retries before switching to backup AI
+    "autopilot_rsi_buy":       35,   # RSI below this = buy signal in autopilot
+    "autopilot_rsi_sell":      70,   # RSI above this = sell signal in autopilot
     # Feature unlock thresholds
     "short_sell_threshold":  2000,
     "options_threshold":     5000,
@@ -98,6 +106,15 @@ shared_state = {
     "todays_watchlist":     {},
     "tomorrows_plan":       None,
     "next_buy_target":      None,
+    # AI health status
+    "claude_healthy":       True,
+    "grok_healthy":         True,
+    "claude_fail_count":    0,
+    "grok_fail_count":      0,
+    "last_claude_fail":     None,
+    "last_grok_fail":       None,
+    "failover_mode":        None,   # None/claude_only/grok_only/autopilot
+    "watch_mode_active":    False,
 }
 
 app = Flask(__name__)
@@ -141,6 +158,10 @@ def stats():
             "grok_weekly_pnl":   shared_state["grok_weekly_pnl"],
             "claude_total_pnl":  shared_state["claude_total_pnl"],
             "grok_total_pnl":    shared_state["grok_total_pnl"],
+            "claude_healthy":    shared_state["claude_healthy"],
+            "grok_healthy":      shared_state["grok_healthy"],
+            "failover_mode":     shared_state["failover_mode"],
+            "watch_mode_active": shared_state["watch_mode_active"],
             "can_short":         features["can_short"],
             "short_progress":    features["short_progress_pct"],
             "autonomy_mode":     shared_state["autonomy_mode"],
@@ -1296,10 +1317,29 @@ JSON: {{"strategy_name":"name","market_thesis":"brief","proposed_trades":[{{"act
 
     log("🔵 Round 1 — Claude proposing...")
     log("🔴 Round 1 — Grok proposing...")
-    claude_r1 = ask_with_retry(ask_claude, r1_prompt,
-        "You are Claude, disciplined quant trader. ONLY valid JSON under 500 chars.")
-    grok_r1   = ask_with_retry(ask_grok,   r1_prompt,
-        "You are Grok, momentum trader with Twitter access. ONLY valid JSON under 500 chars.")
+
+    c_ok = shared_state["claude_healthy"]
+    g_ok = shared_state["grok_healthy"]
+
+    if c_ok:
+        claude_r1 = safe_ask_claude(r1_prompt,
+            "You are Claude, disciplined quant trader. ONLY valid JSON under 500 chars.")
+    else:
+        log("⚠️ Claude unhealthy — skipping Round 1 for Claude")
+        claude_r1 = None
+
+    if g_ok:
+        grok_r1 = safe_ask_grok(r1_prompt,
+            "You are Grok, momentum trader with Twitter access. ONLY valid JSON under 500 chars.")
+    else:
+        log("⚠️ Grok unhealthy — skipping Round 1 for Grok")
+        grok_r1 = None
+
+    # Single AI failover — one AI runs solo
+    if claude_r1 and not grok_r1:
+        log("⚠️ FAILOVER: Grok down — Claude running solo this cycle")
+    elif grok_r1 and not claude_r1:
+        log("⚠️ FAILOVER: Claude down — Grok running solo this cycle")
 
     if claude_r1:
         log(f"🔵 Claude: '{claude_r1.get('strategy_name','')}' | {len(claude_r1.get('proposed_trades',[]))} trades")
@@ -1535,6 +1575,240 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
             except Exception as e: log(f"❌ Sell {symbol}: {e}")
 
 
+
+def safe_ask_claude(prompt, system, retries=3):
+    """Claude with health tracking — marks unhealthy on repeated failures"""
+    try:
+        result = ask_with_retry(ask_claude, prompt, system, retries=retries)
+        if result:
+            shared_state["claude_healthy"]    = True
+            shared_state["claude_fail_count"] = 0
+        else:
+            shared_state["claude_fail_count"] += 1
+            if shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
+                shared_state["claude_healthy"]  = False
+                shared_state["last_claude_fail"] = datetime.now().isoformat()
+                log(f"⚠️ Claude marked UNHEALTHY after {shared_state['claude_fail_count']} failures")
+        return result
+    except Exception as e:
+        shared_state["claude_fail_count"] += 1
+        if shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
+            shared_state["claude_healthy"]   = False
+            shared_state["last_claude_fail"] = datetime.now().isoformat()
+            log(f"❌ Claude UNHEALTHY: {e}")
+        return None
+
+def safe_ask_grok(prompt, system, retries=3):
+    """Grok with health tracking — marks unhealthy on repeated failures"""
+    try:
+        result = ask_with_retry(ask_grok, prompt, system, retries=retries)
+        if result:
+            shared_state["grok_healthy"]    = True
+            shared_state["grok_fail_count"] = 0
+        else:
+            shared_state["grok_fail_count"] += 1
+            if shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
+                shared_state["grok_healthy"]  = False
+                shared_state["last_grok_fail"] = datetime.now().isoformat()
+                log(f"⚠️ Grok marked UNHEALTHY after {shared_state['grok_fail_count']} failures")
+        return result
+    except Exception as e:
+        shared_state["grok_fail_count"] += 1
+        if shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
+            shared_state["grok_healthy"]   = False
+            shared_state["last_grok_fail"] = datetime.now().isoformat()
+            log(f"❌ Grok UNHEALTHY: {e}")
+        return None
+
+def check_ai_health():
+    """Check and log current AI health status. Try to recover unhealthy AIs."""
+    now = datetime.now()
+    # Auto-recover after 30 minutes
+    for ai in ["claude", "grok"]:
+        last_fail = shared_state.get(f"last_{ai}_fail")
+        if last_fail and not shared_state[f"{ai}_healthy"]:
+            fail_time = datetime.fromisoformat(last_fail)
+            if (now - fail_time).seconds >= 1800:  # 30 min
+                shared_state[f"{ai}_healthy"]    = True
+                shared_state[f"{ai}_fail_count"] = 0
+                log(f"🔄 {ai.title()} auto-recovered after 30 min — retrying")
+
+    c_ok = shared_state["claude_healthy"]
+    g_ok = shared_state["grok_healthy"]
+
+    if c_ok and g_ok:
+        mode = None
+        log(f"✅ Both AIs healthy — full collaboration mode")
+    elif c_ok and not g_ok:
+        mode = "claude_only"
+        log(f"⚠️ FAILOVER: Grok down — Claude running solo")
+    elif g_ok and not c_ok:
+        mode = "grok_only"
+        log(f"⚠️ FAILOVER: Claude down — Grok running solo")
+    else:
+        mode = "autopilot"
+        log(f"🆘 FAILOVER: Both AIs down — AUTOPILOT MODE ACTIVE")
+
+    shared_state["failover_mode"] = mode
+    return c_ok, g_ok, mode
+
+def run_autopilot(positions, pos_symbols, cash, equity):
+    """
+    Rule-based autopilot — fires when BOTH AIs are unavailable.
+    Uses pure technical signals only — no AI calls needed.
+    Conservative: only acts on very clear signals.
+
+    BUY signal:  RSI < 35 AND MACD positive AND price > SMA20
+    SELL signal: RSI > 70 OR stop-loss hit OR take-profit hit
+    """
+    log("🤖 AUTOPILOT MODE — Pure technical rules, no AI calls")
+    log(f"   Rules: BUY if RSI<{RULES['autopilot_rsi_buy']} + MACD+ | SELL if RSI>{RULES['autopilot_rsi_sell']}")
+
+    # Check exits first
+    for pos in positions:
+        symbol  = pos["symbol"]
+        pnl_pct = float(pos["unrealized_plpc"])
+        if pnl_pct >= RULES["take_profit_pct"]:
+            log(f"🎯 AUTOPILOT take-profit: {symbol} +{pnl_pct*100:.1f}%")
+            try:
+                alpaca("DELETE", f"/v2/positions/{symbol}")
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                log(f"✅ AUTOPILOT SOLD {symbol}")
+            except Exception as e: log(f"❌ {e}")
+        elif pnl_pct <= -RULES["stop_loss_pct"]:
+            log(f"🛑 AUTOPILOT stop-loss: {symbol} {pnl_pct*100:.1f}%")
+            try:
+                alpaca("DELETE", f"/v2/positions/{symbol}")
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                log(f"✅ AUTOPILOT SOLD {symbol}")
+            except Exception as e: log(f"❌ {e}")
+
+    # Only look for buys if we have enough cash
+    if cash < RULES["cash_active_threshold"]:
+        log(f"⏳ AUTOPILOT: Cash ${cash:.2f} below threshold — monitoring only")
+        return
+
+    # Scan universe for clear technical buy signals
+    open_count = len(alpaca("GET", "/v2/positions"))
+    if open_count >= RULES["max_positions"]:
+        log(f"⏳ AUTOPILOT: Max positions reached — holding")
+        return
+
+    best_signal = None
+    best_score  = 0
+
+    for sym in RULES["universe"]:
+        if sym in pos_symbols: continue
+        bars = get_bars(sym)
+        ind  = compute_indicators(bars)
+        if not ind: continue
+
+        score = 0
+        signals = []
+
+        # RSI oversold
+        if ind["rsi"] and ind["rsi"] < RULES["autopilot_rsi_buy"]:
+            score += 3; signals.append(f"RSI={ind['rsi']} oversold")
+
+        # MACD positive
+        if ind["macd"] and ind["macd"] > 0:
+            score += 2; signals.append(f"MACD={ind['macd']} positive")
+
+        # Price above SMA20 (uptrend)
+        if ind["sma20"] and ind["close"] > ind["sma20"]:
+            score += 1; signals.append(f"price>${ind['sma20']} SMA20")
+
+        # 5-day momentum positive
+        if ind["mom_5d"] and ind["mom_5d"] > 0:
+            score += 1; signals.append(f"mom5d={ind['mom_5d']}%")
+
+        if score >= 5 and score > best_score:  # Need 5+ for autopilot buy
+            best_score  = score
+            best_signal = {"symbol": sym, "score": score, "signals": signals, "ind": ind}
+
+    if best_signal:
+        sym      = best_signal["symbol"]
+        notional = min(cash * 0.40, cash - 5)  # Conservative 40% of cash
+        if notional >= 8:
+            log(f"🤖 AUTOPILOT BUY: {sym} score={best_score} signals={best_signal['signals']}")
+            try:
+                order = alpaca("POST", "/v2/orders", {
+                    "symbol": sym, "notional": str(round(notional, 2)),
+                    "side": "buy", "type": "market", "time_in_force": "day",
+                })
+                log(f"✅ AUTOPILOT BUY {sym} ${notional:.2f} | {order['id'][:8]}...")
+                shared_state["claude_positions"].append(sym)  # Assign to Claude by default
+            except Exception as e: log(f"❌ Autopilot buy {sym}: {e}")
+    else:
+        log(f"🤖 AUTOPILOT: No clear buy signals found — holding cash safely")
+
+def run_watch_mode(cash, equity, positions, pos_symbols):
+    """
+    Single AI watch mode — fires when cash is $8-$20.
+    Only Claude monitors prices and manages existing positions.
+    NO new buy decisions — just price watching and exit management.
+    Saves API calls by using only 1 AI.
+    """
+    log(f"👁️ WATCH MODE (Cash: ${cash:.2f}) — Claude monitoring prices only")
+    log(f"   Will resume full collaboration when cash >= ${RULES['cash_active_threshold']}")
+
+    # Auto stop-loss / take-profit first (no AI needed)
+    check_exit_conditions(positions)
+    positions   = alpaca("GET", "/v2/positions")
+    pos_symbols = [p["symbol"] for p in positions]
+
+    if not positions:
+        log(f"👁️ Watch mode: No positions to monitor — waiting for cash to rebuild")
+        return
+
+    # Claude does a quick price check on held positions only — 1 API call
+    pos_summary = [
+        f"{p['symbol']}: {round(float(p['unrealized_plpc'])*100,2):+.2f}% "
+        f"(${round(float(p['unrealized_pl']),2):+.2f})"
+        for p in positions
+    ]
+
+    watch_prompt = f"""WATCH MODE — Cash too low for new trades (${cash:.2f}).
+Monitor these open positions and decide if any need immediate action:
+{chr(10).join(pos_summary)}
+
+Only recommend SELL if:
+1. Position showing clear deterioration (approaching stop-loss)
+2. Strong negative news just broke for this stock
+3. Better to take small loss now than bigger loss later
+
+If all positions look stable — say HOLD.
+Next buy target when cash recovers: {shared_state.get('next_buy_target','TBD')}
+
+JSON: {{"action":"hold/sell","sell_symbol":"TICKER or none","reason":"brief","price_check":"all good/concern on TICKER","cash_recovery_eta":"brief guess"}}"""
+
+    decision = safe_ask_claude(watch_prompt,
+        "You are Claude in watch mode — conservative price monitoring only. ONLY valid JSON.")
+
+    if decision:
+        action      = decision.get("action","hold").lower()
+        sell_symbol = decision.get("sell_symbol","none").upper()
+        reason      = decision.get("reason","")
+        price_check = decision.get("price_check","")
+
+        log(f"👁️ Claude watch: action={action} | {price_check}")
+
+        if action == "sell" and sell_symbol != "NONE" and sell_symbol in pos_symbols:
+            log(f"👁️ Claude recommends sell {sell_symbol}: {reason}")
+            try:
+                alpaca("DELETE", f"/v2/positions/{sell_symbol}")
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != sell_symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != sell_symbol]
+                log(f"✅ WATCH MODE SOLD {sell_symbol} — freeing cash")
+            except Exception as e: log(f"❌ Watch sell {sell_symbol}: {e}")
+        else:
+            log(f"👁️ Watch mode: HOLD — waiting for cash > ${RULES['cash_active_threshold']}")
+
+    # Log API savings
+    log(f"💰 Watch mode saved ~2 API calls (Grok idle) | Next full cycle when cash > ${RULES['cash_active_threshold']}")
+
 def run_low_cash_cycle(positions, pos_symbols, cash, equity, features):
     """
     Low cash mode — fires when buying power is too low to open new positions.
@@ -1743,24 +2017,42 @@ def run_cycle():
     pos_symbols = [p["symbol"] for p in positions]
     open_count  = len(positions)
 
-    # ── CASH MODE DETECTION ──────────────────────────────────
-    min_trade    = 8.0
-    has_cash     = cash >= min_trade
-    has_positions = open_count > 0
+    # ── AI HEALTH CHECK ─────────────────────────────────────
+    c_ok, g_ok, failover_mode = check_ai_health()
 
-    if not has_cash and not has_positions:
-        log("⚠️ No cash and no positions — fully flat. Waiting for next cycle.")
+    # ── CASH MODE DETECTION ──────────────────────────────────
+    sleep_threshold  = RULES["cash_sleep_threshold"]
+    watch_threshold  = RULES["cash_watch_threshold"]
+    active_threshold = RULES["cash_active_threshold"]
+    has_positions    = open_count > 0
+
+    # TIER 1: No cash at all AND no positions — fully flat
+    if cash < sleep_threshold and not has_positions:
+        log(f"😴 CASH SLEEP (${cash:.2f} < ${sleep_threshold}) — No AI calls, fully flat")
         return
 
-    if not has_cash and has_positions:
-        log(f"💸 LOW CASH MODE (${cash:.2f}) — Switching to profit-taking focus")
-        log(f"   Positions open: {pos_symbols}")
-        log(f"   Strategy: find best exit on current positions, prepare for reentry")
+    # TIER 2: No cash but has positions — profit-taking mode
+    if cash < sleep_threshold and has_positions:
+        log(f"💸 LOW CASH MODE (${cash:.2f}) — Profit-taking focus")
         run_low_cash_cycle(positions, pos_symbols, cash, equity, features)
         return
 
-    if has_cash and cash < min_trade * 2:
-        log(f"⚠️ VERY LOW CASH (${cash:.2f}) — Only executing highest confidence trades")
+    # TIER 3: Watch threshold — single AI monitoring only
+    if sleep_threshold <= cash < watch_threshold:
+        log(f"👁️ WATCH MODE (${cash:.2f}) — Single AI (Claude) monitoring")
+        log(f"   Full collaboration resumes at ${active_threshold}")
+        shared_state["watch_mode_active"] = True
+        run_watch_mode(cash, equity, positions, pos_symbols)
+        return
+
+    # Full mode — cash is sufficient
+    shared_state["watch_mode_active"] = False
+
+    # TIER 4: Both AIs down — autopilot
+    if failover_mode == "autopilot":
+        log(f"🆘 AUTOPILOT MODE — Both AIs down, using pure technical rules")
+        run_autopilot(positions, pos_symbols, cash, equity)
+        return
 
     log("📡 Fetching news + market...")
     news       = get_news_context()
