@@ -35,14 +35,39 @@ RULES = {
     "collab_min_trade_size":   1000,   # Min trade size when collaborative active
     "collab_max_trade_pct":    0.40,   # Max 40% of collab pool per trade
     "interval_minutes":        5,
-    # ── Cash threshold tiers ──
-    "cash_sleep_threshold":    8,    # Below this → no AI calls at all
-    "cash_watch_threshold":    20,   # Below this → single AI watch mode
-    "cash_active_threshold":   20,   # Above this → full collaboration resumes
+    # ── Exit Strategy Options ──
+    # Strategy A: Fixed take-profit (fast, predictable)
+    "exit_A_take_profit":      0.07,   # 7% fixed take-profit
+    "exit_A_stop_loss":        0.04,   # 4% hard stop
+    "exit_A_time_stop_days":   None,   # No time stop
+    # Strategy B: Trailing stop (lets winners run)
+    "exit_B_trail_default":    0.05,   # 5% trail below peak
+    "exit_B_trail_volatile":   0.08,   # 8% trail for TSLA/MSTR/COIN
+    "exit_B_trail_stable":     0.03,   # 3% trail for AAPL/MSFT
+    "exit_B_trail_activates":  0.03,   # Trailing activates at +3% profit
+    "exit_B_stop_loss":        0.04,   # Same hard stop
+    "exit_B_time_stop_days":   3,      # Sell if no +3% after 3 days
+    # Volatile stocks (wider trail needed)
+    "volatile_stocks": ["TSLA","MSTR","COIN","RKLB","SOFI","AMD"],
+    # Stable stocks (tighter trail)
+    "stable_stocks":   ["AAPL","MSFT","GOOGL","AMZN","META"],
+    # ── Cash threshold tiers (BASE — scales dynamically with equity) ──
+    "cash_sleep_threshold":    8,    # Absolute minimum — never changes
+    "cash_watch_base_pct":     0.04, # Watch mode = 4% of equity (min $20)
+    "cash_active_base_pct":    0.05, # Full collab = 5% of equity (min $20)
+    # ── Dynamic threshold scaling by equity ──
+    # As account grows, watch/active thresholds scale proportionally
+    # $55   account → watch=$20,  active=$20  (floor)
+    # $500  account → watch=$25,  active=$30
+    # $1000 account → watch=$50,  active=$60
+    # $5000 account → watch=$200, active=$250
+    "threshold_floor":         20,   # Minimum watch threshold ever
+    "threshold_equity_pct":    0.05, # 5% of equity = watch threshold
+    "threshold_active_mult":   1.2,  # Active = watch × 1.2
     # ── AI failover ──
-    "failover_max_retries":    3,    # Retries before switching to backup AI
-    "autopilot_rsi_buy":       35,   # RSI below this = buy signal in autopilot
-    "autopilot_rsi_sell":      70,   # RSI above this = sell signal in autopilot
+    "failover_max_retries":    3,
+    "autopilot_rsi_buy":       35,
+    "autopilot_rsi_sell":      70,
     # Feature unlock thresholds
     "short_sell_threshold":  2000,
     "options_threshold":     5000,
@@ -106,11 +131,19 @@ shared_state = {
     "todays_watchlist":     {},
     "tomorrows_plan":       None,
     "next_buy_target":      None,
+    "spy_trend":            "neutral",
+    # Exit strategy tracking per position
+    # Format: {"TICKER": {"strategy":"A/B","peak_price":0,"entry_date":"","entry_price":0}}
+    "position_exits":       {},
     # AI health status
     "claude_healthy":       True,
     "grok_healthy":         True,
     "claude_fail_count":    0,
     "grok_fail_count":      0,
+    "claude_fail_reason":   None,   # credits_exhausted/network_error/auth_error
+    "grok_fail_reason":     None,
+    "claude_credits_ok":    True,   # False = needs manual top-up
+    "grok_credits_ok":      True,
     "last_claude_fail":     None,
     "last_grok_fail":       None,
     "failover_mode":        None,   # None/claude_only/grok_only/autopilot
@@ -158,11 +191,16 @@ def stats():
             "grok_weekly_pnl":   shared_state["grok_weekly_pnl"],
             "claude_total_pnl":  shared_state["claude_total_pnl"],
             "grok_total_pnl":    shared_state["grok_total_pnl"],
-            "claude_healthy":    shared_state["claude_healthy"],
-            "grok_healthy":      shared_state["grok_healthy"],
-            "failover_mode":     shared_state["failover_mode"],
-            "watch_mode_active": shared_state["watch_mode_active"],
-            "can_short":         features["can_short"],
+            "claude_healthy":     shared_state["claude_healthy"],
+            "claude_credits_ok":  shared_state["claude_credits_ok"],
+            "claude_fail_reason": shared_state["claude_fail_reason"],
+            "grok_healthy":       shared_state["grok_healthy"],
+            "grok_credits_ok":    shared_state["grok_credits_ok"],
+            "grok_fail_reason":   shared_state["grok_fail_reason"],
+            "failover_mode":      shared_state["failover_mode"],
+            "watch_mode_active":  shared_state["watch_mode_active"],
+            "cash_thresholds":    get_cash_thresholds(equity),
+            "can_short":          features["can_short"],
             "short_progress":    features["short_progress_pct"],
             "autonomy_mode":     shared_state["autonomy_mode"],
             "claude_owns":       shared_state["claude_positions"],
@@ -1140,27 +1178,249 @@ def get_market_mode():
     return "sleep", 60
 
 # ── Exit Conditions ──────────────────────────────────────
+
+def get_trail_pct(symbol):
+    """Get volatility-adjusted trailing stop percentage for a stock"""
+    if symbol in RULES["volatile_stocks"]:
+        return RULES["exit_B_trail_volatile"]   # 8% for volatile
+    elif symbol in RULES["stable_stocks"]:
+        return RULES["exit_B_trail_stable"]     # 3% for stable
+    return RULES["exit_B_trail_default"]        # 5% default
+
+def assign_exit_strategy(symbol, strategy, entry_price, confidence=80, rationale=""):
+    """
+    Assign exit strategy to a position when it's opened.
+    Strategy A = fixed take-profit (fast trades, news-driven)
+    Strategy B = trailing stop (momentum/trend plays, let winners run)
+    """
+    trail_pct = get_trail_pct(symbol)
+    shared_state["position_exits"][symbol] = {
+        "strategy":    strategy,
+        "entry_price": entry_price,
+        "peak_price":  entry_price,   # Tracks highest price seen
+        "entry_date":  datetime.now().strftime("%Y-%m-%d"),
+        "trail_pct":   trail_pct,
+        "confidence":  confidence,
+        "rationale":   rationale[:100],
+    }
+    if strategy == "A":
+        log(f"📋 {symbol} exit strategy: A (fixed {RULES['exit_A_take_profit']*100:.0f}% TP) — {rationale[:60]}")
+    else:
+        log(f"📋 {symbol} exit strategy: B (trailing {trail_pct*100:.0f}% stop, {RULES['exit_B_time_stop_days']}d time) — {rationale[:60]}")
+
+def decide_exit_strategy_solo(symbol, trade_data, bars, ind):
+    """
+    Single AI decides exit strategy autonomously.
+    Called when one AI is making an autonomous trade.
+    Claude uses technical signals, Grok uses momentum signals.
+    """
+    # Heuristic rules (fast, no API call needed for autonomous trades)
+    signals_str = " ".join(trade_data.get("signals", []))
+
+    # Strategy B signals (trailing — let it run)
+    b_signals = [
+        ind and ind.get("mom_5d", 0) and abs(ind["mom_5d"]) > 3,  # Strong momentum
+        "ipo" in signals_str.lower(),                               # IPO momentum
+        "momentum" in signals_str.lower(),                         # Momentum play
+        "breakout" in signals_str.lower(),                         # Breakout
+        trade_data.get("ipo_signal", False),                       # IPO flag
+        ind and ind.get("vol_ratio", 1) > 1.5,                    # High volume
+    ]
+
+    # Strategy A signals (fixed — take profit quickly)
+    a_signals = [
+        "news" in signals_str.lower(),          # News-driven (can reverse fast)
+        "politician" in signals_str.lower(),    # Politician signal
+        "earnings" in signals_str.lower(),      # Earnings play (take quick profit)
+        trade_data.get("politician_signal", False),
+    ]
+
+    b_count = sum(1 for s in b_signals if s)
+    a_count = sum(1 for s in a_signals if s)
+
+    if b_count >= 2:
+        return "B", f"momentum signals ({b_count} B-signals) → let it run"
+    elif a_count >= 2:
+        return "A", f"news/event driven ({a_count} A-signals) → take quick profit"
+    else:
+        # Default: high confidence = B (trust the signal), low = A (take what you can)
+        conf = trade_data.get("confidence", 80)
+        if conf >= 88:
+            return "B", f"high confidence {conf}% → trailing stop"
+        else:
+            return "A", f"moderate confidence {conf}% → fixed take-profit"
+
+def decide_exit_strategy_collaborative(symbol, claude_view, grok_view):
+    """
+    Both AIs must AGREE on exit strategy for collaborative trades.
+    If they disagree → default to safer Strategy A.
+    """
+    c_strategy = claude_view.get("exit_strategy","A").upper()
+    g_strategy = grok_view.get("exit_strategy","A").upper()
+    c_reason   = claude_view.get("exit_rationale","")
+    g_reason   = grok_view.get("exit_rationale","")
+
+    if c_strategy == g_strategy:
+        log(f"🤝 {symbol} exit strategy AGREED: {c_strategy}")
+        log(f"   Claude: {c_reason[:60]}")
+        log(f"   Grok:   {g_reason[:60]}")
+        return c_strategy, f"both agreed: {c_reason[:40]}"
+    else:
+        log(f"⚠️ {symbol} exit strategy DISAGREED: Claude={c_strategy} Grok={g_strategy}")
+        log(f"   Defaulting to Strategy A (safer) — no consensus")
+        return "A", f"no consensus (C={c_strategy} G={g_strategy}) → fixed TP"
+
+def get_spy_trend():
+    """
+    Check SPY trend vs 50-day SMA.
+    Only buy when market is in uptrend — dramatically improves win rate.
+    Returns: "bull" / "bear" / "neutral"
+    """
+    try:
+        bars = get_bars("SPY", days=60)
+        if len(bars) >= 50:
+            closes  = [b["c"] for b in bars]
+            sma50   = sum(closes[-50:]) / 50
+            current = closes[-1]
+            change  = round((current - closes[-6]) / closes[-6] * 100, 2) if len(closes) >= 6 else 0
+            if current > sma50 * 1.01:
+                return "bull", current, sma50, change
+            elif current < sma50 * 0.99:
+                return "bear", current, sma50, change
+            else:
+                return "neutral", current, sma50, change
+    except Exception as e:
+        log(f"⚠️ SPY trend check failed: {e}")
+    return "neutral", 0, 0, 0
+
+def get_dynamic_take_profit(notional, pnl_pct, position_value):
+    """
+    Dynamic take-profit that lets winners run further on larger positions.
+    Small position:  take at 7% (original)
+    Medium position: take at 10%
+    Large position:  take at 15%
+    This lets big positions compound without cutting them too early.
+    """
+    if position_value >= 100:
+        return 0.15   # 15% for large positions
+    elif position_value >= 50:
+        return 0.10   # 10% for medium positions
+    else:
+        return RULES["take_profit_pct"]  # 7% default for small
+
+def smart_sell(symbol, reason, pos):
+    """Execute a smart limit sell, fall back to market"""
+    try:
+        snap_url = f"{DATA_URL}/v2/stocks/{symbol}/quotes/latest"
+        headers  = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+        try:
+            snap_res = requests.get(snap_url, headers=headers, timeout=5)
+            if snap_res.ok:
+                quote     = snap_res.json().get("quote", {})
+                bid_price = float(quote.get("bp", 0))
+                ask_price = float(quote.get("ap", 0))
+                if bid_price > 0 and ask_price > 0:
+                    sell_price = round((bid_price + ask_price) / 2, 2)
+                    qty        = pos["qty"]
+                    order = alpaca("POST", "/v2/orders", {
+                        "symbol": symbol, "qty": str(qty),
+                        "side": "sell", "type": "limit",
+                        "limit_price": str(sell_price),
+                        "time_in_force": "day",
+                    })
+                    log(f"✅ LIMIT SELL {symbol} {qty} @ ${sell_price} — {reason}")
+                    return True
+        except: pass
+        # Fallback to market
+        alpaca("DELETE", f"/v2/positions/{symbol}")
+        log(f"✅ MARKET SELL {symbol} — {reason}")
+        return True
+    except Exception as e:
+        log(f"❌ Sell {symbol}: {e}")
+        return False
+
 def check_exit_conditions(positions):
+    """
+    Strategy-aware exit system.
+    Each position uses whichever strategy was assigned at entry:
+    Strategy A: Fixed 7% take-profit + 4% stop + no time limit
+    Strategy B: Trailing stop + 4% hard stop + 3-day time stop
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+
     for pos in positions:
-        symbol  = pos["symbol"]
-        pnl_pct = float(pos["unrealized_plpc"])
-        owner   = "Claude" if symbol in shared_state["claude_positions"] else "Grok"
-        if pnl_pct >= RULES["take_profit_pct"]:
-            log(f"🎯 [{owner}] Take profit {symbol} (+{pnl_pct*100:.1f}%)")
-            try:
-                alpaca("DELETE", f"/v2/positions/{symbol}")
+        symbol       = pos["symbol"]
+        pnl_pct      = float(pos["unrealized_plpc"])
+        pnl_usd      = float(pos["unrealized_pl"])
+        current_price = float(pos["current_price"])
+        owner        = "Claude" if symbol in shared_state["claude_positions"] else "Grok"
+
+        # Get exit config for this position
+        exit_cfg  = shared_state["position_exits"].get(symbol, {})
+        strategy  = exit_cfg.get("strategy", "A")
+        entry_price = exit_cfg.get("entry_price", current_price)
+        entry_date  = exit_cfg.get("entry_date", today)
+        trail_pct   = exit_cfg.get("trail_pct", RULES["exit_B_trail_default"])
+
+        # ── UNIVERSAL: Hard stop-loss (both strategies) ───────
+        if pnl_pct <= -RULES["exit_A_stop_loss"]:
+            log(f"🛑 [{owner}] STOP LOSS {symbol} ({pnl_pct*100:.1f}%) strategy={strategy}")
+            if smart_sell(symbol, "stop loss", pos):
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
-                log(f"✅ SOLD {symbol} profit")
-            except Exception as e: log(f"❌ {e}")
-        elif pnl_pct <= -RULES["stop_loss_pct"]:
-            log(f"🛑 [{owner}] Stop loss {symbol} ({pnl_pct*100:.1f}%)")
-            try:
-                alpaca("DELETE", f"/v2/positions/{symbol}")
-                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
-                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
-                log(f"✅ SOLD {symbol} stop")
-            except Exception as e: log(f"❌ {e}")
+                shared_state["position_exits"].pop(symbol, None)
+            continue
+
+        # ── STRATEGY A: Fixed take-profit ────────────────────
+        if strategy == "A":
+            if pnl_pct >= RULES["exit_A_take_profit"]:
+                log(f"🎯 [A] [{owner}] FIXED TP {symbol} +{pnl_pct*100:.1f}% >= {RULES['exit_A_take_profit']*100:.0f}% | +${pnl_usd:.2f}")
+                if smart_sell(symbol, "strategy A take-profit", pos):
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+            else:
+                log(f"   [A] {symbol}: {pnl_pct*100:+.2f}% → target {RULES['exit_A_take_profit']*100:.0f}% | holding")
+
+        # ── STRATEGY B: Trailing stop + time stop ────────────
+        elif strategy == "B":
+            # Update peak price
+            if current_price > exit_cfg.get("peak_price", entry_price):
+                old_peak = exit_cfg.get("peak_price", entry_price)
+                shared_state["position_exits"][symbol]["peak_price"] = current_price
+                log(f"   [B] {symbol}: New peak ${current_price:.2f} (was ${old_peak:.2f}) | trailing stop = ${current_price*(1-trail_pct):.2f}")
+
+            peak_price   = shared_state["position_exits"][symbol].get("peak_price", current_price)
+            trail_stop   = peak_price * (1 - trail_pct)
+            profit_at_peak = (peak_price - entry_price) / entry_price
+
+            # Trailing activates only once position is +3% profitable
+            trail_active = profit_at_peak >= RULES["exit_B_trail_activates"]
+
+            if trail_active and current_price <= trail_stop:
+                log(f"🎯 [B] [{owner}] TRAILING STOP {symbol} | "
+                    f"peak=${peak_price:.2f} trail=${trail_stop:.2f} current=${current_price:.2f} | "
+                    f"+{pnl_pct*100:.1f}% | +${pnl_usd:.2f}")
+                if smart_sell(symbol, f"strategy B trailing stop (peak ${peak_price:.2f})", pos):
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+
+            # Time stop — sell if stuck after N days
+            elif RULES["exit_B_time_stop_days"]:
+                try:
+                    days_held = (datetime.now() - datetime.strptime(entry_date, "%Y-%m-%d")).days
+                    if days_held >= RULES["exit_B_time_stop_days"] and pnl_pct < RULES["exit_B_trail_activates"]:
+                        log(f"⏰ [B] [{owner}] TIME STOP {symbol} | "
+                            f"{days_held} days held, only {pnl_pct*100:+.2f}% — freeing capital")
+                        if smart_sell(symbol, f"strategy B time stop ({days_held} days)", pos):
+                            shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                            shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                            shared_state["position_exits"].pop(symbol, None)
+                    else:
+                        status = f"trailing active, peak=${peak_price:.2f} stop=${trail_stop:.2f}" if trail_active else f"waiting for +3% to activate trail (currently {pnl_pct*100:+.2f}%)"
+                        log(f"   [B] {symbol}: {status} | {days_held}d held")
+                except: pass
 
 # ── Collaboration Engine ─────────────────────────────────
 
@@ -1304,12 +1564,14 @@ INDICATORS: {chart_section[:450]}"""
     r1_prompt = f"""{context}
 
 IMPORTANT RULES FOR THIS CYCLE:
+- SPY TREND: {shared_state.get('spy_trend','neutral').upper()} {'— DO NOT suggest new buys, exits only' if shared_state.get('spy_trend') == 'bear' else '— Full trading active'}
 - AUTONOMOUS trades: technicals + news + politician signals + HOT IPOs (>5% momentum)
 - COLLABORATIVE candidates: Biggest gainers (>3%) AND triple confirmation stocks
 - IPOs with strong momentum are GOOD autonomous trades — they move fast
 - Never suggest a biggest gainer for autonomous — only flag for collaborative
 - Politician mimicking: 2+ politicians bought = strong autonomous signal
 - Triple confirmation = best collaborative candidate
+- LIMIT ORDERS: Bot uses limit orders at bid/ask midpoint for better entry price
 
 Propose up to 2 AUTONOMOUS trades from your budget.
 Also flag any COLLABORATIVE candidates (biggest gainers or strong politician signals).
@@ -1525,17 +1787,88 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
             if notional < 8:
                 log(f"⚠️ ${notional:.2f} too small for {symbol}"); continue
             try:
-                order = alpaca("POST", "/v2/orders", {
-                    "symbol": symbol, "notional": str(round(notional, 2)),
-                    "side": "buy", "type": "market", "time_in_force": "day",
-                })
-                log(f"✅ REAL BUY [{owner}] {symbol} ${notional:.2f} | conf={conf}% | fee≈${fee_est:.3f} | {order['id'][:8]}...")
+                # ── SMART ENTRY: Limit order below market for better fill ──
+                # Get current price and set limit slightly below ask
+                snap_url = f"{DATA_URL}/v2/stocks/{symbol}/quotes/latest"
+                snap_headers = {
+                    "APCA-API-KEY-ID": ALPACA_KEY,
+                    "APCA-API-SECRET-KEY": ALPACA_SECRET
+                }
+                limit_price = None
+                try:
+                    snap_res = requests.get(snap_url, headers=snap_headers, timeout=5)
+                    if snap_res.ok:
+                        quote     = snap_res.json().get("quote", {})
+                        ask_price = float(quote.get("ap", 0))
+                        bid_price = float(quote.get("bp", 0))
+                        if ask_price > 0 and bid_price > 0:
+                            # Set limit at midpoint between bid and ask
+                            # This gets a better fill than market while still executing
+                            mid_price   = round((ask_price + bid_price) / 2, 2)
+                            limit_price = mid_price
+                            spread_pct  = round((ask_price - bid_price) / ask_price * 100, 3)
+                            log(f"   📊 {symbol} bid=${bid_price} ask=${ask_price} "
+                                f"spread={spread_pct}% → limit=${limit_price}")
+                except Exception as eq:
+                    log(f"   ⚠️ Quote fetch failed for {symbol}: {eq} — using market order")
+
+                # Use limit order if we got a price, otherwise fall back to market
+                if limit_price and limit_price > 0:
+                    # Convert notional to shares for limit order
+                    shares = round(notional / limit_price, 6)
+                    if shares > 0:
+                        order = alpaca("POST", "/v2/orders", {
+                            "symbol":        symbol,
+                            "qty":           str(shares),
+                            "side":          "buy",
+                            "type":          "limit",
+                            "limit_price":   str(limit_price),
+                            "time_in_force": "day",  # Cancels if not filled by close
+                        })
+                        log(f"✅ LIMIT BUY [{owner}] {symbol} {shares} shares @ ${limit_price} "
+                            f"(~${notional:.2f}) | conf={conf}% | {order['id'][:8]}...")
+                    else:
+                        raise Exception("Calculated 0 shares")
+                else:
+                    # Fallback to market order
+                    order = alpaca("POST", "/v2/orders", {
+                        "symbol": symbol, "notional": str(round(notional, 2)),
+                        "side": "buy", "type": "market", "time_in_force": "day",
+                    })
+                    log(f"✅ MARKET BUY [{owner}] {symbol} ${notional:.2f} | "
+                        f"conf={conf}% | fee≈${fee_est:.3f} | {order['id'][:8]}...")
+
                 remaining_cash -= notional; new_positions += 1
                 if owner == "claude" and symbol not in shared_state["claude_positions"]:
                     shared_state["claude_positions"].append(symbol)
                 elif owner == "grok" and symbol not in shared_state["grok_positions"]:
                     shared_state["grok_positions"].append(symbol)
                 pos_symbols.append(symbol)
+
+                # ── ASSIGN EXIT STRATEGY ──────────────────
+                # Get current price for entry tracking
+                try:
+                    bars = get_bars(symbol, days=10)
+                    ind  = compute_indicators(bars) if bars else None
+                    entry_px = limit_price if limit_price else (ind["close"] if ind else notional/10)
+                    is_collab = trade.get("is_collab", False)
+
+                    if is_collab:
+                        # Collaborative trades: use strategy stored in trade data
+                        # (agreed by both AIs in Round 3)
+                        strat   = trade.get("exit_strategy", "A")
+                        rationale = trade.get("exit_rationale", "collaborative trade")
+                    else:
+                        # Autonomous trades: AI decides based on signals
+                        strat, rationale = decide_exit_strategy_solo(
+                            symbol, trade, bars, ind
+                        )
+                    assign_exit_strategy(symbol, strat, entry_px,
+                                        trade.get("confidence", 80), rationale)
+                except Exception as ex:
+                    log(f"⚠️ Exit strategy assign failed: {ex} — defaulting to A")
+                    assign_exit_strategy(symbol, "A", notional/10, 80, "default")
+
             except Exception as e: log(f"❌ Buy {symbol}: {e}")
 
         elif action == "short":
@@ -1576,81 +1909,201 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
 
 
 
+def classify_ai_error(error_str):
+    """
+    Classify what kind of failure this is.
+    Credit exhaustion needs different handling than a timeout.
+    """
+    e = str(error_str).lower()
+    if any(x in e for x in ["credit", "billing", "quota", "insufficient_quota",
+                              "rate_limit", "429", "payment", "balance", "overloaded"]):
+        return "credits_exhausted"
+    if any(x in e for x in ["timeout", "connection", "network", "resolve", "unreachable"]):
+        return "network_error"
+    if any(x in e for x in ["401", "403", "invalid_api_key", "authentication"]):
+        return "auth_error"
+    return "unknown_error"
+
 def safe_ask_claude(prompt, system, retries=3):
-    """Claude with health tracking — marks unhealthy on repeated failures"""
+    """
+    Claude with full health tracking.
+    Detects: credit exhaustion, network errors, auth errors.
+    On credits exhausted → immediately hands off to Grok (no retries).
+    On network error → retries then marks unhealthy.
+    Auto-recovers after 30 min for network errors.
+    Credit exhaustion needs manual top-up — logs clear warning.
+    """
     try:
         result = ask_with_retry(ask_claude, prompt, system, retries=retries)
         if result:
             shared_state["claude_healthy"]    = True
             shared_state["claude_fail_count"] = 0
+            shared_state["claude_fail_reason"] = None
         else:
             shared_state["claude_fail_count"] += 1
             if shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
-                shared_state["claude_healthy"]  = False
+                shared_state["claude_healthy"]   = False
                 shared_state["last_claude_fail"] = datetime.now().isoformat()
-                log(f"⚠️ Claude marked UNHEALTHY after {shared_state['claude_fail_count']} failures")
+                log(f"⚠️ Claude UNHEALTHY — Grok taking over")
         return result
     except Exception as e:
-        shared_state["claude_fail_count"] += 1
-        if shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
+        error_type = classify_ai_error(str(e))
+        shared_state["claude_fail_count"]  += 1
+        shared_state["claude_fail_reason"]  = error_type
+
+        if error_type == "credits_exhausted":
+            # Immediate handoff — no point retrying
+            shared_state["claude_healthy"]    = False
+            shared_state["claude_credits_ok"] = False
+            shared_state["last_claude_fail"]  = datetime.now().isoformat()
+            log(f"💳 CLAUDE CREDITS EXHAUSTED — Immediate handoff to Grok")
+            log(f"   ACTION REQUIRED: Top up Anthropic API credits at console.anthropic.com")
+            log(f"   Grok will handle ALL trading until Claude credits are restored")
+        elif error_type == "auth_error":
             shared_state["claude_healthy"]   = False
             shared_state["last_claude_fail"] = datetime.now().isoformat()
-            log(f"❌ Claude UNHEALTHY: {e}")
+            log(f"🔑 CLAUDE AUTH ERROR — Check ANTHROPIC_KEY in Railway variables")
+        else:
+            if shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
+                shared_state["claude_healthy"]   = False
+                shared_state["last_claude_fail"] = datetime.now().isoformat()
+                log(f"❌ Claude UNHEALTHY ({error_type}) — Grok taking over")
         return None
 
 def safe_ask_grok(prompt, system, retries=3):
-    """Grok with health tracking — marks unhealthy on repeated failures"""
+    """
+    Grok with full health tracking.
+    Same logic as Claude — detects credit exhaustion vs network errors.
+    On credits exhausted → immediately hands off to Claude (no retries).
+    """
     try:
         result = ask_with_retry(ask_grok, prompt, system, retries=retries)
         if result:
             shared_state["grok_healthy"]    = True
             shared_state["grok_fail_count"] = 0
+            shared_state["grok_fail_reason"] = None
         else:
             shared_state["grok_fail_count"] += 1
             if shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
-                shared_state["grok_healthy"]  = False
+                shared_state["grok_healthy"]   = False
                 shared_state["last_grok_fail"] = datetime.now().isoformat()
-                log(f"⚠️ Grok marked UNHEALTHY after {shared_state['grok_fail_count']} failures")
+                log(f"⚠️ Grok UNHEALTHY — Claude taking over")
         return result
     except Exception as e:
-        shared_state["grok_fail_count"] += 1
-        if shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
+        error_type = classify_ai_error(str(e))
+        shared_state["grok_fail_count"]  += 1
+        shared_state["grok_fail_reason"]  = error_type
+
+        if error_type == "credits_exhausted":
+            shared_state["grok_healthy"]    = False
+            shared_state["grok_credits_ok"] = False
+            shared_state["last_grok_fail"]  = datetime.now().isoformat()
+            log(f"💳 GROK CREDITS EXHAUSTED — Immediate handoff to Claude")
+            log(f"   ACTION REQUIRED: Top up xAI API credits at console.x.ai")
+            log(f"   Claude will handle ALL trading until Grok credits are restored")
+        elif error_type == "auth_error":
             shared_state["grok_healthy"]   = False
             shared_state["last_grok_fail"] = datetime.now().isoformat()
-            log(f"❌ Grok UNHEALTHY: {e}")
+            log(f"🔑 GROK AUTH ERROR — Check GROK_KEY in Railway variables")
+        else:
+            if shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
+                shared_state["grok_healthy"]   = False
+                shared_state["last_grok_fail"] = datetime.now().isoformat()
+                log(f"❌ Grok UNHEALTHY ({error_type}) — Claude taking over")
         return None
 
 def check_ai_health():
-    """Check and log current AI health status. Try to recover unhealthy AIs."""
+    """
+    Check AI health. Handle 3 failure types differently:
+    - credits_exhausted: No auto-recovery (needs manual top-up)
+    - network_error:     Auto-recover after 30 min
+    - auth_error:        No auto-recovery (needs key fix)
+    """
     now = datetime.now()
-    # Auto-recover after 30 minutes
+
     for ai in ["claude", "grok"]:
-        last_fail = shared_state.get(f"last_{ai}_fail")
+        last_fail   = shared_state.get(f"last_{ai}_fail")
+        fail_reason = shared_state.get(f"{ai}_fail_reason")
+        credits_ok  = shared_state.get(f"{ai}_credits_ok", True)
+
         if last_fail and not shared_state[f"{ai}_healthy"]:
             fail_time = datetime.fromisoformat(last_fail)
-            if (now - fail_time).seconds >= 1800:  # 30 min
+            mins_down = (now - fail_time).seconds // 60
+
+            if fail_reason == "credits_exhausted":
+                # No auto-recovery — needs manual top-up
+                log(f"💳 {ai.title()} credits exhausted ({mins_down} min down) — MANUAL TOP-UP NEEDED")
+                log(f"   {'console.anthropic.com' if ai == 'claude' else 'console.x.ai'}")
+                continue
+
+            elif fail_reason == "auth_error":
+                log(f"🔑 {ai.title()} auth error ({mins_down} min down) — Check API key in Railway")
+                continue
+
+            elif (now - fail_time).seconds >= 1800:  # 30 min for network errors
                 shared_state[f"{ai}_healthy"]    = True
                 shared_state[f"{ai}_fail_count"] = 0
-                log(f"🔄 {ai.title()} auto-recovered after 30 min — retrying")
+                shared_state[f"{ai}_fail_reason"] = None
+                log(f"🔄 {ai.title()} auto-recovered after {mins_down} min — retrying")
 
     c_ok = shared_state["claude_healthy"]
     g_ok = shared_state["grok_healthy"]
+    c_reason = shared_state.get("claude_fail_reason","")
+    g_reason = shared_state.get("grok_fail_reason","")
 
     if c_ok and g_ok:
         mode = None
-        log(f"✅ Both AIs healthy — full collaboration mode")
+        log(f"✅ Both AIs healthy — full collaboration")
     elif c_ok and not g_ok:
         mode = "claude_only"
-        log(f"⚠️ FAILOVER: Grok down — Claude running solo")
+        log(f"⚠️ FAILOVER: Grok down ({g_reason}) — Claude running solo")
+        if g_reason == "credits_exhausted":
+            log(f"   💳 Top up xAI credits → console.x.ai to restore Grok")
     elif g_ok and not c_ok:
         mode = "grok_only"
-        log(f"⚠️ FAILOVER: Claude down — Grok running solo")
+        log(f"⚠️ FAILOVER: Claude down ({c_reason}) — Grok running solo")
+        if c_reason == "credits_exhausted":
+            log(f"   💳 Top up Anthropic credits → console.anthropic.com to restore Claude")
     else:
         mode = "autopilot"
-        log(f"🆘 FAILOVER: Both AIs down — AUTOPILOT MODE ACTIVE")
+        log(f"🆘 BOTH AIs down — AUTOPILOT MODE")
+        log(f"   Claude: {c_reason} | Grok: {g_reason}")
 
     shared_state["failover_mode"] = mode
     return c_ok, g_ok, mode
+
+
+def get_cash_thresholds(equity):
+    """
+    Dynamic cash thresholds that scale with account size.
+    Bigger account = higher bar before both AIs activate.
+    This prevents wasting API calls on tiny trades relative to account size.
+
+    Scaling:
+      Sleep threshold:  Always $8 (absolute minimum tradeable)
+      Watch threshold:  max($20, equity × 5%)
+      Active threshold: watch × 1.2
+
+    Examples:
+      $55   equity → sleep=$8  watch=$20  active=$20  (floor)
+      $500  equity → sleep=$8  watch=$25  active=$30
+      $1,000 equity → sleep=$8  watch=$50  active=$60
+      $2,000 equity → sleep=$8  watch=$100 active=$120
+      $5,000 equity → sleep=$8  watch=$250 active=$300
+      $10,000 equity → sleep=$8 watch=$500 active=$600
+    """
+    sleep_thresh  = RULES["cash_sleep_threshold"]  # Always $8
+    watch_thresh  = max(
+        RULES["threshold_floor"],
+        round(equity * RULES["threshold_equity_pct"], 2)
+    )
+    active_thresh = round(watch_thresh * RULES["threshold_active_mult"], 2)
+
+    return {
+        "sleep":  sleep_thresh,
+        "watch":  watch_thresh,
+        "active": active_thresh,
+    }
 
 def run_autopilot(positions, pos_symbols, cash, equity):
     """
@@ -1746,68 +2199,114 @@ def run_autopilot(positions, pos_symbols, cash, equity):
 
 def run_watch_mode(cash, equity, positions, pos_symbols):
     """
-    Single AI watch mode — fires when cash is $8-$20.
-    Only Claude monitors prices and manages existing positions.
-    NO new buy decisions — just price watching and exit management.
-    Saves API calls by using only 1 AI.
-    """
-    log(f"👁️ WATCH MODE (Cash: ${cash:.2f}) — Claude monitoring prices only")
-    log(f"   Will resume full collaboration when cash >= ${RULES['cash_active_threshold']}")
+    Dynamic watch mode — single AI (Claude) monitors until cash hits active threshold.
+    If cash crosses active threshold mid-watch, Claude calls Grok immediately.
 
-    # Auto stop-loss / take-profit first (no AI needed)
+    Thresholds scale with equity:
+      $55   account → watch=$20,  active=$24
+      $500  account → watch=$25,  active=$30
+      $1,000 account → watch=$50,  active=$60
+      $5,000 account → watch=$250, active=$300
+    """
+    thresholds    = get_cash_thresholds(equity)
+    watch_thresh  = thresholds["watch"]
+    active_thresh = thresholds["active"]
+
+    log(f"👁️ WATCH MODE (Cash: ${cash:.2f} | Equity: ${equity:.2f})")
+    log(f"   Thresholds — watch=${watch_thresh:.2f} | active=${active_thresh:.2f}")
+    log(f"   Claude monitoring solo until cash >= ${active_thresh:.2f}")
+
+    # Auto stop-loss / take-profit first (no AI call needed)
     check_exit_conditions(positions)
     positions   = alpaca("GET", "/v2/positions")
     pos_symbols = [p["symbol"] for p in positions]
 
-    if not positions:
-        log(f"👁️ Watch mode: No positions to monitor — waiting for cash to rebuild")
+    # Refresh cash after potential sells
+    account     = alpaca("GET", "/v2/account")
+    current_cash = float(account["cash"])
+
+    # ── CHECK: Has cash crossed active threshold? ──────────
+    if current_cash >= active_thresh:
+        log(f"💡 Cash ${current_cash:.2f} crossed active threshold ${active_thresh:.2f}!")
+        log(f"   Waking Grok — resuming full collaboration NOW")
+        # Return to caller — run_cycle will see cash >= active and run full session
+        shared_state["watch_mode_active"] = False
         return
 
-    # Claude does a quick price check on held positions only — 1 API call
+    if not positions:
+        log(f"👁️ Watch mode: No positions — waiting for cash to hit ${active_thresh:.2f}")
+        return
+
+    # ── CLAUDE SOLO WATCH — 1 API call ────────────────────
     pos_summary = [
-        f"{p['symbol']}: {round(float(p['unrealized_plpc'])*100,2):+.2f}% "
-        f"(${round(float(p['unrealized_pl']),2):+.2f})"
+        f"  {p['symbol']}: {round(float(p['unrealized_plpc'])*100,2):+.2f}% "
+        f"(${round(float(p['unrealized_pl']),2):+.2f}) "
+        f"owner={'Claude' if p['symbol'] in shared_state['claude_positions'] else 'Grok'}"
         for p in positions
     ]
 
-    watch_prompt = f"""WATCH MODE — Cash too low for new trades (${cash:.2f}).
-Monitor these open positions and decide if any need immediate action:
+    watch_prompt = f"""WATCH MODE — Cash ${current_cash:.2f} (need ${active_thresh:.2f} to wake Grok).
+Account equity: ${equity:.2f}
+
+OPEN POSITIONS:
 {chr(10).join(pos_summary)}
 
-Only recommend SELL if:
-1. Position showing clear deterioration (approaching stop-loss)
-2. Strong negative news just broke for this stock
-3. Better to take small loss now than bigger loss later
+TASKS (conservative — 1 API call only):
+1. Any position showing deterioration? (approaching -4% stop-loss)
+2. Any position ready to take profit? (near +7%)
+3. Estimate when cash might recover (from dividends, sells, or deposits)
+4. What is the top priority buy when Grok wakes at ${active_thresh:.2f}?
 
-If all positions look stable — say HOLD.
-Next buy target when cash recovers: {shared_state.get('next_buy_target','TBD')}
+SELL only if:
+  - Position clearly failing and stop-loss imminent
+  - Selling now saves more than waiting for auto-stop
 
-JSON: {{"action":"hold/sell","sell_symbol":"TICKER or none","reason":"brief","price_check":"all good/concern on TICKER","cash_recovery_eta":"brief guess"}}"""
+JSON: {{"action":"hold/sell","sell_symbol":"TICKER or none",
+"sell_reason":"brief","positions_health":"good/concern",
+"concern_symbol":"TICKER or none",
+"priority_buy_at_wakeup":"{shared_state.get('next_buy_target','best signal')}",
+"estimated_cash_recovery":"brief"}}"""
 
     decision = safe_ask_claude(watch_prompt,
-        "You are Claude in watch mode — conservative price monitoring only. ONLY valid JSON.")
+        "You are Claude in conservative watch mode. ONLY valid JSON under 400 chars.")
 
     if decision:
-        action      = decision.get("action","hold").lower()
-        sell_symbol = decision.get("sell_symbol","none").upper()
-        reason      = decision.get("reason","")
-        price_check = decision.get("price_check","")
+        action       = decision.get("action","hold").lower()
+        sell_symbol  = decision.get("sell_symbol","none").upper()
+        health       = decision.get("positions_health","good")
+        concern      = decision.get("concern_symbol","none")
+        priority_buy = decision.get("priority_buy_at_wakeup","")
+        cash_eta     = decision.get("estimated_cash_recovery","")
 
-        log(f"👁️ Claude watch: action={action} | {price_check}")
+        log(f"👁️ Claude watch: health={health} | action={action}")
+        if concern and concern != "NONE":
+            log(f"⚠️ Concern flagged: {concern} — monitoring closely")
+        if priority_buy:
+            log(f"📋 Priority buy when Grok wakes: {priority_buy}")
+            shared_state["next_buy_target"] = priority_buy
+        if cash_eta:
+            log(f"⏱️ Cash recovery estimate: {cash_eta}")
 
         if action == "sell" and sell_symbol != "NONE" and sell_symbol in pos_symbols:
-            log(f"👁️ Claude recommends sell {sell_symbol}: {reason}")
+            log(f"👁️ Claude watch sell: {sell_symbol} — {decision.get('sell_reason','')}")
             try:
                 alpaca("DELETE", f"/v2/positions/{sell_symbol}")
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != sell_symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != sell_symbol]
-                log(f"✅ WATCH MODE SOLD {sell_symbol} — freeing cash")
+                log(f"✅ WATCH SOLD {sell_symbol}")
+
+                # Recheck cash — might have crossed active threshold
+                account2 = alpaca("GET", "/v2/account")
+                new_cash  = float(account2["cash"])
+                if new_cash >= active_thresh:
+                    log(f"🚀 Cash ${new_cash:.2f} now >= ${active_thresh:.2f} — WAKING GROK!")
+                    log(f"   Resuming full collaboration next cycle")
+                    shared_state["watch_mode_active"] = False
             except Exception as e: log(f"❌ Watch sell {sell_symbol}: {e}")
         else:
-            log(f"👁️ Watch mode: HOLD — waiting for cash > ${RULES['cash_active_threshold']}")
+            log(f"👁️ Watch: HOLD — next full collab at ${active_thresh:.2f} cash")
 
-    # Log API savings
-    log(f"💰 Watch mode saved ~2 API calls (Grok idle) | Next full cycle when cash > ${RULES['cash_active_threshold']}")
+    log(f"💰 API saved: 1 call used vs 5 normal | Cash: ${current_cash:.2f} / ${active_thresh:.2f} to wake Grok")
 
 def run_low_cash_cycle(positions, pos_symbols, cash, equity, features):
     """
@@ -2020,39 +2519,57 @@ def run_cycle():
     # ── AI HEALTH CHECK ─────────────────────────────────────
     c_ok, g_ok, failover_mode = check_ai_health()
 
-    # ── CASH MODE DETECTION ──────────────────────────────────
-    sleep_threshold  = RULES["cash_sleep_threshold"]
-    watch_threshold  = RULES["cash_watch_threshold"]
-    active_threshold = RULES["cash_active_threshold"]
+    # ── DYNAMIC CASH THRESHOLDS ──────────────────────────────
+    thresholds       = get_cash_thresholds(equity)
+    sleep_threshold  = thresholds["sleep"]
+    watch_threshold  = thresholds["watch"]
+    active_threshold = thresholds["active"]
     has_positions    = open_count > 0
 
-    # TIER 1: No cash at all AND no positions — fully flat
+    log(f"💵 Cash thresholds — sleep=${sleep_threshold} watch=${watch_threshold:.2f} active=${active_threshold:.2f}")
+
+    # TIER 1: No cash AND no positions — fully flat
     if cash < sleep_threshold and not has_positions:
         log(f"😴 CASH SLEEP (${cash:.2f} < ${sleep_threshold}) — No AI calls, fully flat")
         return
 
     # TIER 2: No cash but has positions — profit-taking mode
     if cash < sleep_threshold and has_positions:
-        log(f"💸 LOW CASH MODE (${cash:.2f}) — Profit-taking focus")
+        log(f"💸 LOW CASH (${cash:.2f}) — Profit-taking focus")
         run_low_cash_cycle(positions, pos_symbols, cash, equity, features)
         return
 
-    # TIER 3: Watch threshold — single AI monitoring only
-    if sleep_threshold <= cash < watch_threshold:
-        log(f"👁️ WATCH MODE (${cash:.2f}) — Single AI (Claude) monitoring")
-        log(f"   Full collaboration resumes at ${active_threshold}")
+    # TIER 3: Between sleep and active — Claude watch mode only
+    if sleep_threshold <= cash < active_threshold:
+        log(f"👁️ WATCH MODE (${cash:.2f}) — Claude solo until ${active_threshold:.2f}")
         shared_state["watch_mode_active"] = True
         run_watch_mode(cash, equity, positions, pos_symbols)
         return
 
-    # Full mode — cash is sufficient
+    # Cash is sufficient for full collaboration
     shared_state["watch_mode_active"] = False
 
     # TIER 4: Both AIs down — autopilot
     if failover_mode == "autopilot":
-        log(f"🆘 AUTOPILOT MODE — Both AIs down, using pure technical rules")
+        log(f"🆘 AUTOPILOT — Both AIs down, pure technical rules")
         run_autopilot(positions, pos_symbols, cash, equity)
         return
+
+    # ── SPY TREND FILTER ─────────────────────────────────────
+    spy_trend, spy_price, spy_sma50, spy_change = get_spy_trend()
+    log(f"📈 SPY trend: {spy_trend.upper()} | price=${spy_price:.2f} vs SMA50=${spy_sma50:.2f} | 5d={spy_change:+.2f}%")
+
+    if spy_trend == "bear":
+        log(f"🐻 BEAR MARKET FILTER — SPY below SMA50")
+        log(f"   New buys paused. Managing existing positions only.")
+        log(f"   Existing stops and take-profits still active.")
+        # Still run check_exit_conditions but skip new buys
+        # We signal this to collaborative_session via shared_state
+        shared_state["spy_trend"] = "bear"
+    else:
+        shared_state["spy_trend"] = spy_trend
+        if spy_trend == "bull":
+            log(f"🐂 BULL MARKET — Full trading active")
 
     log("📡 Fetching news + market...")
     news       = get_news_context()
