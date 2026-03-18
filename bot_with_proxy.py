@@ -97,6 +97,7 @@ shared_state = {
     "todays_plan":          None,
     "todays_watchlist":     {},
     "tomorrows_plan":       None,
+    "next_buy_target":      None,
 }
 
 app = Flask(__name__)
@@ -1484,6 +1485,9 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
         max_for_owner = pool["claude"] if owner == "claude" else pool["grok"] if owner == "grok" else pool["trading"]
 
         if action == "buy":
+            if remaining_cash < 8:
+                log(f"⚠️ No buying power (${remaining_cash:.2f}) — skipping {symbol}")
+                continue
             if new_positions >= RULES["max_positions"]:
                 log(f"⚠️ Max positions — skip {symbol}"); continue
             if symbol in pos_symbols:
@@ -1541,6 +1545,162 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                 pos_symbols.remove(symbol)
             except Exception as e: log(f"❌ Sell {symbol}: {e}")
 
+
+def run_low_cash_cycle(positions, pos_symbols, cash, equity, features):
+    """
+    Low cash mode — fires when buying power is too low to open new positions.
+
+    Strategy:
+    1. Both AIs analyze ALL open positions for best exit opportunities
+    2. Find the position with best profit to lock in OR weakest to cut
+    3. Sell the best candidate to free up cash
+    4. Prepare next-buy strategy for when cash is available
+    5. Never panic sell — only sell if it makes strategic sense
+    """
+    log("=" * 50)
+    log("💸 LOW CASH CYCLE — Profit-taking + next strategy mode")
+    log("=" * 50)
+
+    pos_details = []
+    for p in positions:
+        pnl_pct  = round(float(p["unrealized_plpc"]) * 100, 2)
+        pnl_usd  = round(float(p["unrealized_pl"]), 2)
+        owner    = "Claude" if p["symbol"] in shared_state["claude_positions"] else                    "Grok" if p["symbol"] in shared_state["grok_positions"] else "Shared"
+        pos_details.append({
+            "symbol":   p["symbol"],
+            "owner":    owner,
+            "pnl_pct":  pnl_pct,
+            "pnl_usd":  pnl_usd,
+            "qty":      p["qty"],
+            "price":    float(p["current_price"]),
+            "value":    round(float(p["market_value"]), 2),
+        })
+        log(f"   [{owner}] {p['symbol']}: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) value=${float(p['market_value']):.2f}")
+
+    # Get quick market check
+    try:
+        market_ctx    = get_market_context()
+        news          = get_news_context()
+        chart_section = get_chart_section()
+    except Exception as e:
+        log(f"⚠️ Data fetch error: {e}")
+        market_ctx = news = chart_section = "unavailable"
+
+    # Ask both AIs what to sell and what to prepare for
+    low_cash_prompt = f"""LOW CASH SITUATION — Buying power too low to open new trades.
+Current cash: ${cash:.2f} (need $8+ to trade)
+Total equity: ${equity:.2f}
+
+OPEN POSITIONS (must choose wisely):
+{chr(10).join([f"  [{p['owner']}] {p['symbol']}: {p['pnl_pct']:+.2f}% (${p['pnl_usd']:+.2f}) value=${p['value']:.2f}" for p in pos_details])}
+
+MARKET: {market_ctx}
+NEWS: {news[:200]}
+INDICATORS: {chart_section[:400]}
+
+DECISION FRAMEWORK:
+1. Should we sell anything to free up cash? Only if:
+   a) Position is at or near take-profit target (>5% gain) — lock it in
+   b) Position is showing weakness and likely to drop more
+   c) A much better opportunity exists that needs the capital
+2. If all positions look good — HOLD, do not panic sell
+3. What is the NEXT buy target once cash is available?
+4. Which position has the best risk/reward to keep holding?
+
+Respond ONLY with JSON:
+{{"sell_recommendation": "symbol or none","sell_reason": "brief","hold_recommendation": ["symbols to keep"],"next_buy_target": "symbol","next_buy_reason": "brief","action": "sell/hold","urgency": "high/medium/low"}}"""
+
+    claude_decision = None
+    grok_decision   = None
+
+    try:
+        claude_decision = ask_with_retry(ask_claude, low_cash_prompt,
+            "You are Claude managing low cash situation. ONLY valid JSON under 500 chars.")
+        if claude_decision:
+            log(f"🔵 Claude low-cash: action={claude_decision.get('action')} sell={claude_decision.get('sell_recommendation')} next={claude_decision.get('next_buy_target')}")
+    except Exception as e:
+        log(f"❌ Claude low-cash: {e}")
+
+    try:
+        grok_decision = ask_with_retry(ask_grok, low_cash_prompt,
+            "You are Grok managing low cash situation. ONLY valid JSON under 500 chars.")
+        if grok_decision:
+            log(f"🔴 Grok low-cash: action={grok_decision.get('action')} sell={grok_decision.get('sell_recommendation')} next={grok_decision.get('next_buy_target')}")
+    except Exception as e:
+        log(f"❌ Grok low-cash: {e}")
+
+    # ── DECISION LOGIC ──────────────────────────────────────
+    # Only sell if BOTH AIs agree on same symbol
+    c_sell = (claude_decision or {}).get("sell_recommendation", "none").upper()
+    g_sell = (grok_decision   or {}).get("sell_recommendation", "none").upper()
+    c_action = (claude_decision or {}).get("action", "hold").lower()
+    g_action = (grok_decision   or {}).get("action", "hold").lower()
+
+    # Check if any position hit take-profit or stop-loss automatically
+    sold_something = False
+    for p in pos_details:
+        if p["pnl_pct"] >= RULES["take_profit_pct"] * 100:
+            log(f"🎯 [{p['owner']}] Auto take-profit: {p['symbol']} at +{p['pnl_pct']:.1f}%")
+            try:
+                alpaca("DELETE", f"/v2/positions/{p['symbol']}")
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != p["symbol"]]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != p["symbol"]]
+                log(f"✅ SOLD {p['symbol']} — profit locked")
+                sold_something = True
+            except Exception as e:
+                log(f"❌ Sell {p['symbol']}: {e}")
+
+        elif p["pnl_pct"] <= -RULES["stop_loss_pct"] * 100:
+            log(f"🛑 [{p['owner']}] Auto stop-loss: {p['symbol']} at {p['pnl_pct']:.1f}%")
+            try:
+                alpaca("DELETE", f"/v2/positions/{p['symbol']}")
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != p["symbol"]]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != p["symbol"]]
+                log(f"✅ SOLD {p['symbol']} — loss cut")
+                sold_something = True
+            except Exception as e:
+                log(f"❌ Sell {p['symbol']}: {e}")
+
+    # If both AIs agree to sell same symbol AND it's not already auto-sold
+    if c_sell == g_sell and c_sell != "NONE" and c_sell in pos_symbols and not sold_something:
+        log(f"🤝 Both AIs agree: SELL {c_sell} to free up cash")
+        log(f"   Claude reason: {(claude_decision or {}).get('sell_reason','')}")
+        log(f"   Grok reason:   {(grok_decision   or {}).get('sell_reason','')}")
+        try:
+            alpaca("DELETE", f"/v2/positions/{c_sell}")
+            shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != c_sell]
+            shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != c_sell]
+            log(f"✅ SOLD {c_sell} — cash freed up for better opportunity")
+            sold_something = True
+        except Exception as e:
+            log(f"❌ Sell {c_sell}: {e}")
+
+    elif c_action == "hold" and g_action == "hold":
+        log(f"🤝 Both AIs agree: HOLD all positions — not worth selling yet")
+        log(f"   Best position: {max(pos_details, key=lambda x: x['pnl_pct'])['symbol'] if pos_details else 'none'}")
+
+    elif c_sell != g_sell and c_sell != "NONE" and g_sell != "NONE":
+        log(f"⚠️ AIs disagree on what to sell (Claude={c_sell} Grok={g_sell}) — HOLDING")
+        log(f"   Will wait for clearer signal or auto stop-loss/take-profit")
+
+    # ── NEXT STRATEGY LOG ───────────────────────────────────
+    c_next = (claude_decision or {}).get("next_buy_target", "")
+    g_next = (grok_decision   or {}).get("next_buy_target", "")
+
+    log(f"📋 NEXT BUY TARGETS (ready when cash available):")
+    if c_next: log(f"   🔵 Claude: {c_next} — {(claude_decision or {}).get('next_buy_reason','')[:80]}")
+    if g_next: log(f"   🔴 Grok:   {g_next} — {(grok_decision   or {}).get('next_buy_reason','')[:80]}")
+
+    if c_next == g_next and c_next:
+        log(f"   🤝 AGREED: Both targeting {c_next} — will buy first chance!")
+        shared_state["next_buy_target"] = c_next
+    elif c_next or g_next:
+        shared_state["next_buy_target"] = c_next or g_next
+
+    log("=" * 50)
+    log(f"💸 Low cash cycle complete | Cash: ${cash:.2f} | Positions: {len(positions)}")
+    log("=" * 50)
+
 def run_cycle():
     log("── 🤝 Collaboration Cycle ──")
     if not is_market_open():
@@ -1593,6 +1753,25 @@ def run_cycle():
     positions   = alpaca("GET", "/v2/positions")
     pos_symbols = [p["symbol"] for p in positions]
     open_count  = len(positions)
+
+    # ── CASH MODE DETECTION ──────────────────────────────────
+    min_trade    = 8.0
+    has_cash     = cash >= min_trade
+    has_positions = open_count > 0
+
+    if not has_cash and not has_positions:
+        log("⚠️ No cash and no positions — fully flat. Waiting for next cycle.")
+        return
+
+    if not has_cash and has_positions:
+        log(f"💸 LOW CASH MODE (${cash:.2f}) — Switching to profit-taking focus")
+        log(f"   Positions open: {pos_symbols}")
+        log(f"   Strategy: find best exit on current positions, prepare for reentry")
+        run_low_cash_cycle(positions, pos_symbols, cash, equity, features)
+        return
+
+    if has_cash and cash < min_trade * 2:
+        log(f"⚠️ VERY LOW CASH (${cash:.2f}) — Only executing highest confidence trades")
 
     log("📡 Fetching news + market...")
     news       = get_news_context()
