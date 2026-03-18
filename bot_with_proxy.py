@@ -625,70 +625,44 @@ def get_market_context():
 
 def get_politician_trades():
     """
-    Fetch recent politician stock trades from public disclosure APIs.
-    Uses quiverquant or capitoltrades public data.
-    Politicians must disclose trades within 45 days — we track the biggest movers.
+    Get recent politician stock trades using Grok's real-time web access.
+    Grok can search the web for latest congressional trading disclosures.
+    This bypasses Railway network restrictions on external APIs.
     """
     try:
-        # Try Capitol Trades public API (free, no auth needed)
-        url = "https://api.capitoltrades.com/trades?pageSize=20&sortBy=-publishedAt"
-        res = requests.get(url, timeout=10, headers={"Accept": "application/json"})
-        if res.ok:
-            data  = res.json()
-            items = data.get("data", [])
-            trades = []
-            for t in items[:15]:
-                politician = t.get("politician", {}).get("name", "Unknown")
-                party      = t.get("politician", {}).get("party", "?")
-                chamber    = t.get("politician", {}).get("chamber", "?")
-                ticker     = t.get("asset", {}).get("ticker", "")
-                asset_name = t.get("asset", {}).get("name", "")
-                action     = t.get("type", "")      # buy/sell
-                size       = t.get("size", "")      # $1k-$5k, $5k-$25k etc
-                filed_date = t.get("publishedAt", "")[:10]
-                if ticker and ticker in RULES["universe"] + ["SPY","QQQ","NVDA","AAPL","MSFT"]:
-                    trades.append({
-                        "politician": politician,
-                        "party":      party,
-                        "ticker":     ticker,
-                        "action":     action,
-                        "size":       size,
-                        "filed":      filed_date,
-                    })
-            if trades:
-                lines = [f"  [{t['party']}] {t['politician']}: {t['action'].upper()} {t['ticker']} {t['size']} ({t['filed']})"
-                         for t in trades]
-                return "\n".join(lines), trades
-        return "  Capitol Trades API unavailable", []
-    except Exception as e:
-        log(f"⚠️ Capitol Trades fetch failed: {e}")
+        universe_str = ", ".join(RULES["universe"])
+        prompt = f"""Search for the most recent US politician/congress member stock trades 
+filed in the last 30 days. Focus on these stocks if mentioned: {universe_str}
+Also include any trades in NVDA, AAPL, MSFT, AMZN, TSLA, META, GOOGL.
 
-    # Fallback: Try QuiverQuant congress trading (free tier)
-    try:
-        url = "https://api.quiverquant.com/beta/live/congresstrading"
-        res = requests.get(url, timeout=10)
-        if res.ok:
-            items  = res.json()[:15]
-            trades = []
-            for t in items:
-                ticker = t.get("Ticker", "")
-                if ticker:
-                    trades.append({
-                        "politician": t.get("Representative", "Unknown"),
-                        "party":      t.get("Party", "?"),
-                        "ticker":     ticker,
-                        "action":     t.get("Transaction", ""),
-                        "size":       t.get("Range", ""),
-                        "filed":      t.get("ReportDate", ""),
-                    })
-            if trades:
-                lines = [f"  [{t['party']}] {t['politician']}: {t['action'].upper()} {t['ticker']} {t['size']} ({t['filed']})"
-                         for t in trades]
-                return "\n".join(lines), trades
-    except Exception as e:
-        log(f"⚠️ QuiverQuant fetch failed: {e}")
+Return ONLY a JSON object:
+{{"trades": [
+  {{"politician": "Name", "party": "D/R", "ticker": "SYMBOL", "action": "buy/sell", "size": "$1k-$15k", "filed": "YYYY-MM-DD"}}
+], "summary": "brief overview of trends"}}
+If no data found return {{"trades": [], "summary": "no recent data"}}"""
 
-    return "  Politician trade data unavailable", []
+        raw = ask_grok(prompt,
+            "You are a financial research assistant with web access. Search for recent US congressional stock trades. Return ONLY valid JSON.")
+        result = parse_json(raw)
+
+        if result and result.get("trades"):
+            trades = result["trades"]
+            lines  = [
+                f"  [{t.get('party','?')}] {t.get('politician','?')}: "
+                f"{t.get('action','?').upper()} {t.get('ticker','?')} "
+                f"{t.get('size','')} ({t.get('filed','')})"
+                for t in trades[:12]
+            ]
+            summary = result.get("summary", "")
+            if summary:
+                log(f"🏛️ Politician trade summary: {summary[:100]}")
+            return "\n".join(lines), trades
+
+        return "  No recent politician trades found via Grok", []
+
+    except Exception as e:
+        log(f"⚠️ Politician trades via Grok failed: {e}")
+        return "  Politician trade data unavailable", []
 
 def analyze_politician_signals(trades, chart_section):
     """
@@ -904,50 +878,65 @@ def get_sec_13f_holdings(cik, investor_name):
 
 def get_top_investor_portfolios():
     """
-    Track portfolios of the world's best investors via SEC 13F filings.
-    Returns their top holdings and recent changes.
-    Focus on stocks in our universe.
+    Track portfolios of top investors using Grok's real-time web/knowledge access.
+    Uses both Grok's training knowledge and web search for latest 13F data.
+    Bypasses Railway network restrictions on SEC EDGAR.
     """
-    log("💼 Fetching top investor portfolios (SEC 13F)...")
-    all_holdings = {}
+    log("💼 Fetching top investor portfolios via Grok...")
     universe_set = set(RULES["universe"])
 
-    # Use a faster approach — fetch from a free aggregator
     try:
-        # WhaleWisdom free API (top holdings aggregated)
-        whale_holdings = {}
+        universe_str = ", ".join(RULES["universe"])
+        prompt = f"""What are the current major stock holdings of these top investors based on their latest 13F filings and recent news:
+Cathie Wood (ARK Invest), Warren Buffett (Berkshire), Michael Burry, George Soros, Ray Dalio (Bridgewater), Bill Ackman (Pershing Square), Stanley Druckenmiller
 
-        # Check each investor
-        for investor, cik in list(TOP_INVESTORS.items())[:4]:  # limit to 4 to avoid timeout
-            holdings = get_sec_13f_holdings(cik, investor)
-            for h in holdings[:5]:
-                name = h["name"].upper()
-                # Try to match to our universe
-                for sym in universe_set:
-                    if sym in name or name in sym:
-                        if sym not in all_holdings:
-                            all_holdings[sym] = []
-                        all_holdings[sym].append({
-                            "investor": investor,
-                            "value":    h["value_usd"],
-                            "filed":    h["filed"],
-                        })
+Focus specifically on these stocks if they hold them: {universe_str}
+Also note any recent buys or sells in the last quarter.
 
-        if all_holdings:
-            lines = []
-            for sym, holders in sorted(all_holdings.items(),
-                                       key=lambda x: sum(h["value"] for h in x[1]), reverse=True):
-                total_val = sum(h["value"] for h in holders)
-                investors = [h["investor"].split("(")[0].strip() for h in holders]
-                lines.append(f"  {sym}: held by {', '.join(investors)} | total ${total_val/1e6:.1f}M")
-            log(f"💼 Universe stocks held by top investors:")
-            for l in lines: log(l)
-            return "\n".join(lines), all_holdings
+Return ONLY a JSON object:
+{{"holdings": [
+  {{"investor": "Name", "symbol": "TICKER", "position": "large/medium/small", "recent_change": "new buy/increased/decreased/sold/held", "notes": "brief"}}
+], "key_insight": "most important trend across all investors"}}"""
+
+        raw = ask_grok(prompt,
+            "You are a financial analyst with knowledge of institutional investor 13F filings. Return ONLY valid JSON.")
+        result = parse_json(raw)
+
+        if result and result.get("holdings"):
+            holdings_list = result["holdings"]
+            all_holdings  = {}
+
+            for h in holdings_list:
+                sym = h.get("symbol","").upper()
+                if sym in universe_set:
+                    if sym not in all_holdings:
+                        all_holdings[sym] = []
+                    all_holdings[sym].append({
+                        "investor": h.get("investor",""),
+                        "value":    0,
+                        "filed":    "latest 13F",
+                        "change":   h.get("recent_change","held"),
+                        "notes":    h.get("notes",""),
+                    })
+
+            if all_holdings:
+                lines = []
+                for sym, holders in all_holdings.items():
+                    investors = [f"{h['investor'].split('(')[0].strip()} ({h['change']})"
+                                 for h in holders]
+                    lines.append(f"  {sym}: {', '.join(investors)}")
+
+                insight = result.get("key_insight","")
+                if insight:
+                    log(f"💼 Key investor insight: {insight[:120]}")
+
+                log(f"💼 Universe stocks held by top investors: {list(all_holdings.keys())}")
+                return "\n".join(lines), all_holdings
 
     except Exception as e:
-        log(f"⚠️ SEC 13F fetch error: {e}")
+        log(f"⚠️ Investor portfolios via Grok failed: {e}")
 
-    # Fallback: use hardcoded known major holdings (updated quarterly)
+    # Fallback: hardcoded known major holdings
     log("💼 Using cached top investor holdings...")
     known_holdings = {
         "AAPL": ["Warren Buffett (largest position ~$170B)", "Many funds"],
