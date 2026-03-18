@@ -141,6 +141,24 @@ shared_state = {
     "stops_fired_today":    0,       # Count of stop-losses fired while sleeping
     "sleeping_strategies":  {},      # Full exit strategies stored before sleep
     "ai_notes":             {},      # AI notes per position for bot to follow
+    # ── Trading Brief System ──────────────────────────────────
+    "trading_brief": {
+        "account": {
+            "market_bias":    "neutral",
+            "risk_level":     "medium",
+            "max_new_trades": 2,
+            "avoid_sectors":  [],
+            "spy_rule":       "no_buy_bear",
+            "daily_target":   0.02,
+            "stop_day_if":    -0.05,
+            "brief_date":     None,
+            "brief_notes":    "",
+        },
+        "positions":   {},   # Per-position strategy + notes
+        "watchlist":   [],   # Buy these when cash available
+        "collab_targets": [], # Collaborative big-ticket targets
+        "tomorrows_brief": None,  # Draft for tomorrow
+    },
     # Exit strategy tracking per position
     # Format: {"TICKER": {"strategy":"A/B","peak_price":0,"entry_date":"","entry_price":0}}
     "position_exits":       {},
@@ -2601,14 +2619,39 @@ def run_cycle():
     else:
         execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, features)
 
-        # ── AIs go to sleep after executing trades ───────────
-        # Bot will autonomously monitor and execute stored strategies
-        # AIs only wake when a wake condition is triggered
+        # ── Generate trading brief then sleep ───────────────
         positions_after = alpaca("GET", "/v2/positions")
-        if positions_after:
-            ai_sleep(f"executed {len(final_trades)} trades — bot monitoring {len(positions_after)} positions")
+        acct_after      = alpaca("GET", "/v2/account")
+        cash_after      = float(acct_after["cash"])
+        eq_after        = float(acct_after["equity"])
+        pool_after      = get_trading_pool(eq_after)
+
+        if positions_after or cash_after < get_cash_thresholds(eq_after)["active"]:
+            log("📋 AIs writing trading brief before sleeping...")
+            try:
+                # Get fresh intelligence for the brief
+                news_b  = get_news_context()
+                mkt_b   = get_market_context()
+                chart_b = get_chart_section()
+                pol_b, pol_trades_b = get_politician_trades()
+                inv_b, inv_hold_b   = get_top_investor_portfolios()
+                gainers_b = get_biggest_gainers()
+                ipos_b    = get_recent_ipos()
+                smart_b   = analyze_smart_money(
+                    analyze_politician_signals(pol_trades_b, chart_b),
+                    inv_hold_b, gainers_b
+                )
+                generate_trading_brief(
+                    eq_after, cash_after, positions_after, pool_after,
+                    chart_b, news_b, mkt_b, pol_b, inv_b,
+                    gainers_b, ipos_b, smart_b
+                )
+            except Exception as be:
+                log(f"⚠️ Brief generation failed: {be} — bot uses default rules")
+
+            ai_sleep(f"brief written — bot monitoring {len(positions_after)} positions + watchlist")
         else:
-            log("⏳ No positions opened — AIs staying awake")
+            log("⏳ No positions, sufficient cash — AIs staying awake for next opportunity")
 
     shared_state["last_sync"] = datetime.now().isoformat()
     log("── Cycle complete ──\n")
@@ -2846,6 +2889,343 @@ Both AIs agree on this plan. Plain text 200 words."""
         log(f"❌ After-hours error: {e}")
 
 
+
+# ══════════════════════════════════════════════════════════════
+# TRADING BRIEF SYSTEM
+# AIs write a full brief before sleeping.
+# Bot reads the brief and executes precisely.
+# ══════════════════════════════════════════════════════════════
+
+def generate_trading_brief(equity, cash, positions, pool,
+                            chart_section, news, market_ctx,
+                            pol_text, inv_text, gainers, ipos, smart_money):
+    """
+    Both AIs collaborate to write a complete trading brief.
+    This is the LAST thing AIs do before sleeping.
+    The bot follows this brief precisely while AIs sleep.
+
+    Brief contains:
+    1. Account-level direction and rules
+    2. Per-position exit strategies and notes
+    3. Watchlist — what to buy when cash is available
+    4. Collaborative targets for big-ticket trades
+    """
+    log("=" * 55)
+    log("📋 GENERATING TRADING BRIEF — AIs writing instructions for bot")
+    log("=" * 55)
+
+    pos_summary = []
+    for p in positions:
+        sym     = p["symbol"]
+        pnl_pct = round(float(p["unrealized_plpc"]) * 100, 2)
+        owner   = "Claude" if sym in shared_state["claude_positions"] else "Grok"
+        pos_summary.append(f"  {sym} [{owner}]: {pnl_pct:+.2f}% entry=${float(p['avg_entry_price']):.2f}")
+
+    thresholds   = get_cash_thresholds(equity)
+    spy_trend, spy_price, spy_sma50, spy_chg = get_spy_trend()
+    triple_syms  = smart_money.get("triple_confirmation", [])
+    top_collab   = smart_money.get("top_collab", [])
+    hot_ipos     = [i["symbol"] for i in ipos if abs(i.get("mom_5d",0)) > 5]
+
+    # ── PHASE 1: Claude writes account + position brief ──────
+    claude_brief_prompt = f"""You are CLAUDE — writing the trading brief for the bot to follow while you sleep.
+
+CURRENT STATE:
+Equity: ${equity:.2f} | Cash: ${cash:.2f} | SPY: {spy_trend.upper()} ({spy_chg:+.2f}%)
+Pool: Claude=${pool['claude']:.2f} | Grok=${pool['grok']:.2f} | Reserve=${pool['reserve']:.2f}
+Open positions:
+{chr(10).join(pos_summary) if pos_summary else '  None'}
+
+INTELLIGENCE:
+Politicians: {pol_text[:200]}
+Top investors: {inv_text[:150]}
+Triple confirmation: {triple_syms}
+Hot IPOs: {hot_ipos}
+Gainers: {[(g['symbol'],f'+{g["change"]:.1f}%') for g in gainers[:5]]}
+Market: {market_ctx}
+News: {news[:200]}
+Indicators: {chart_section[:400]}
+
+Write YOUR PART of the trading brief (account rules + position notes).
+Be specific — the bot follows this EXACTLY with no AI to ask.
+
+JSON (keep under 600 chars):
+{{
+  "market_bias": "bullish/bearish/neutral",
+  "risk_level": "low/medium/high",
+  "max_new_trades": 2,
+  "spy_rule": "no_buy_bear/trade_all/only_bull",
+  "daily_target_pct": 2.0,
+  "stop_day_loss_pct": 5.0,
+  "position_notes": {{
+    "SYMBOL": {{
+      "strategy": "A/B",
+      "conviction": "high/medium/low",
+      "thesis": "brief",
+      "special_rule": "e.g. sell before earnings/dont hold overnight",
+      "trail_pct": 0.05
+    }}
+  }},
+  "claude_watchlist": [
+    {{"symbol":"TICK","why":"brief","entry_max":0,"strategy":"A/B","confidence":85}}
+  ],
+  "account_notes": "any special instructions for bot"
+}}"""
+
+    # ── PHASE 2: Grok writes momentum + watchlist brief ──────
+    grok_brief_prompt = f"""You are GROK — writing the trading brief for the bot to follow while you sleep.
+
+CURRENT STATE:
+Equity: ${equity:.2f} | Cash: ${cash:.2f} | SPY: {spy_trend.upper()} ({spy_chg:+.2f}%)
+Open positions:
+{chr(10).join(pos_summary) if pos_summary else '  None'}
+
+MOMENTUM INTELLIGENCE:
+Hot IPOs: {[(i['symbol'],f"mom={i['mom_5d']}%",f"{i['days_old']}d old") for i in ipos[:5]]}
+Biggest gainers: {[(g['symbol'],f'+{g["change"]:.1f}%') for g in gainers[:5]]}
+News: {news[:200]}
+
+Write YOUR PART of the trading brief (momentum picks + IPO watchlist).
+The bot executes your watchlist automatically when cash is available.
+
+JSON (keep under 600 chars):
+{{
+  "market_sentiment": "bullish/bearish/neutral",
+  "momentum_strength": "strong/moderate/weak",
+  "position_notes": {{
+    "SYMBOL": {{
+      "strategy": "A/B",
+      "conviction": "high/medium/low",
+      "thesis": "brief",
+      "special_rule": "brief",
+      "trail_pct": 0.05
+    }}
+  }},
+  "grok_watchlist": [
+    {{"symbol":"TICK","why":"IPO momentum/gainer","entry_max":0,"strategy":"B","confidence":85}}
+  ],
+  "collab_targets": [
+    {{"symbol":"TICK","condition":"both 95%+ on next wake","why":"triple confirmation"}}
+  ],
+  "sentiment_notes": "key sentiment insight for bot context"
+}}"""
+
+    claude_brief = None
+    grok_brief   = None
+
+    try:
+        claude_brief = safe_ask_claude(claude_brief_prompt,
+            "You are Claude writing a precise trading brief. ONLY valid JSON under 600 chars.")
+        if claude_brief:
+            log(f"🔵 Claude brief: bias={claude_brief.get('market_bias')} "
+                f"risk={claude_brief.get('risk_level')} "
+                f"watchlist={[w.get('symbol') for w in claude_brief.get('claude_watchlist',[])]}")
+    except Exception as e:
+        log(f"❌ Claude brief: {e}")
+
+    try:
+        grok_brief = safe_ask_grok(grok_brief_prompt,
+            "You are Grok writing a precise trading brief. ONLY valid JSON under 600 chars.")
+        if grok_brief:
+            log(f"🔴 Grok brief: sentiment={grok_brief.get('market_sentiment')} "
+                f"momentum={grok_brief.get('momentum_strength')} "
+                f"watchlist={[w.get('symbol') for w in grok_brief.get('grok_watchlist',[])]}")
+    except Exception as e:
+        log(f"❌ Grok brief: {e}")
+
+    # ── PHASE 3: Merge both briefs into unified brief ─────────
+    if not claude_brief and not grok_brief:
+        log("⚠️ Both briefs failed — bot will use default rules only")
+        return
+
+    # Build merged watchlist (no duplicates)
+    merged_watchlist = []
+    seen_watchlist   = set()
+
+    c_watch = (claude_brief or {}).get("claude_watchlist", [])
+    g_watch = (grok_brief   or {}).get("grok_watchlist",  [])
+
+    for item in c_watch + g_watch:
+        sym = item.get("symbol","")
+        if sym and sym not in seen_watchlist and sym not in [p["symbol"] for p in positions]:
+            merged_watchlist.append({**item, "owner": "claude" if item in c_watch else "grok"})
+            seen_watchlist.add(sym)
+
+    # Merge position notes
+    merged_pos_notes = {}
+    c_pos = (claude_brief or {}).get("position_notes", {})
+    g_pos = (grok_brief   or {}).get("position_notes", {})
+    for sym in set(list(c_pos.keys()) + list(g_pos.keys())):
+        merged_pos_notes[sym] = {**(c_pos.get(sym,{})), **(g_pos.get(sym,{}))}
+        # Update stored exit strategy with brief's instructions
+        if sym in shared_state["position_exits"]:
+            if "strategy" in merged_pos_notes[sym]:
+                shared_state["position_exits"][sym]["strategy"]  = merged_pos_notes[sym]["strategy"]
+            if "trail_pct" in merged_pos_notes[sym]:
+                shared_state["position_exits"][sym]["trail_pct"] = merged_pos_notes[sym]["trail_pct"]
+            if "special_rule" in merged_pos_notes[sym]:
+                shared_state["position_exits"][sym]["ai_notes"]  = merged_pos_notes[sym]["special_rule"]
+
+    # Collab targets from Grok
+    collab_targets = (grok_brief or {}).get("collab_targets", [])
+
+    # Store the complete brief
+    shared_state["trading_brief"] = {
+        "account": {
+            "market_bias":    (claude_brief or {}).get("market_bias", "neutral"),
+            "risk_level":     (claude_brief or {}).get("risk_level", "medium"),
+            "max_new_trades": (claude_brief or {}).get("max_new_trades", 2),
+            "spy_rule":       (claude_brief or {}).get("spy_rule", "no_buy_bear"),
+            "daily_target":   (claude_brief or {}).get("daily_target_pct", 2.0) / 100,
+            "stop_day_if":    -(claude_brief or {}).get("stop_day_loss_pct", 5.0) / 100,
+            "brief_date":     datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "brief_notes":    (claude_brief or {}).get("account_notes","") + " | " +
+                              (grok_brief   or {}).get("sentiment_notes",""),
+        },
+        "positions":      merged_pos_notes,
+        "watchlist":      merged_watchlist,
+        "collab_targets": collab_targets,
+    }
+
+    # Also update sleeping_strategies with AI notes
+    for sym, notes in merged_pos_notes.items():
+        if sym in shared_state["sleeping_strategies"]:
+            shared_state["sleeping_strategies"][sym]["ai_notes"] = notes.get("special_rule","")
+            shared_state["sleeping_strategies"][sym]["conviction"] = notes.get("conviction","medium")
+
+    log(f"📋 TRADING BRIEF COMPLETE:")
+    log(f"   Market bias: {shared_state['trading_brief']['account']['market_bias'].upper()}")
+    log(f"   Risk level:  {shared_state['trading_brief']['account']['risk_level'].upper()}")
+    log(f"   Watchlist:   {[w['symbol'] for w in merged_watchlist]}")
+    log(f"   Collab targets: {[t.get('symbol') for t in collab_targets]}")
+    log(f"   Position rules: {list(merged_pos_notes.keys())}")
+    log(f"   Bot notes: {shared_state['trading_brief']['account']['brief_notes'][:100]}")
+    log("=" * 55)
+
+def execute_watchlist(cash, equity, pos_symbols, open_count):
+    """
+    Bot executes watchlist trades autonomously.
+    No AI needed — follows the brief exactly.
+    Runs while AIs are sleeping.
+    """
+    brief     = shared_state["trading_brief"]
+    watchlist = brief.get("watchlist", [])
+    account_b = brief.get("account", {})
+    max_trades = account_b.get("max_new_trades", 2)
+    risk_level = account_b.get("risk_level", "medium")
+    spy_rule   = account_b.get("spy_rule", "no_buy_bear")
+    thresholds = get_cash_thresholds(equity)
+
+    if not watchlist:
+        return 0
+    if cash < thresholds["active"]:
+        return 0
+    if open_count >= RULES["max_positions"]:
+        return 0
+
+    # Check SPY rule
+    spy_trend, _, _, _ = get_spy_trend()
+    if spy_rule == "no_buy_bear" and spy_trend == "bear":
+        log(f"🐻 Watchlist paused — SPY bearish (brief rule: {spy_rule})")
+        return 0
+
+    # Risk-based position sizing
+    size_pct = {"low": 0.25, "medium": 0.35, "high": 0.45}.get(risk_level, 0.35)
+
+    trades_made  = 0
+    remaining_cash = cash
+
+    for item in watchlist:
+        if trades_made >= max_trades:
+            break
+        if open_count + trades_made >= RULES["max_positions"]:
+            break
+
+        sym        = item.get("symbol","")
+        entry_max  = float(item.get("entry_max", 99999))
+        strategy   = item.get("strategy","A")
+        confidence = item.get("confidence",80)
+        owner      = item.get("owner","shared")
+        why        = item.get("why","")
+
+        if not sym or sym in pos_symbols:
+            continue
+        if confidence < RULES["min_confidence"]:
+            continue
+
+        # Check current price vs entry_max
+        try:
+            bars = get_bars(sym, days=5)
+            if not bars:
+                continue
+            current_price = bars[-1]["c"]
+            if entry_max > 0 and current_price > entry_max:
+                log(f"⏭️ WATCHLIST: {sym} at ${current_price:.2f} > entry max ${entry_max:.2f} — waiting")
+                continue
+        except:
+            continue
+
+        notional = min(remaining_cash * size_pct, remaining_cash - 5)
+        if notional < 8:
+            log(f"⚠️ WATCHLIST: Not enough cash for {sym} (${remaining_cash:.2f})")
+            break
+
+        log(f"📋 WATCHLIST EXECUTE: {sym} — {why[:60]}")
+        log(f"   Price=${current_price:.2f} entry_max=${entry_max:.2f} size=${notional:.2f} strategy={strategy}")
+
+        try:
+            # Use limit order at midpoint
+            snap_url = f"{DATA_URL}/v2/stocks/{sym}/quotes/latest"
+            headers  = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+            limit_price = None
+            try:
+                snap_res = requests.get(snap_url, headers=headers, timeout=5)
+                if snap_res.ok:
+                    quote = snap_res.json().get("quote",{})
+                    bid   = float(quote.get("bp",0))
+                    ask   = float(quote.get("ap",0))
+                    if bid > 0 and ask > 0 and (entry_max == 0 or ask <= entry_max):
+                        limit_price = round((bid+ask)/2, 2)
+            except: pass
+
+            if limit_price:
+                shares = round(notional / limit_price, 6)
+                order  = alpaca("POST", "/v2/orders", {
+                    "symbol": sym, "qty": str(shares),
+                    "side": "buy", "type": "limit",
+                    "limit_price": str(limit_price),
+                    "time_in_force": "day",
+                })
+                log(f"✅ WATCHLIST BUY {sym} {shares} @ ${limit_price} | owner={owner} | {order['id'][:8]}...")
+            else:
+                order = alpaca("POST", "/v2/orders", {
+                    "symbol": sym, "notional": str(round(notional,2)),
+                    "side": "buy", "type": "market", "time_in_force": "day",
+                })
+                log(f"✅ WATCHLIST MARKET BUY {sym} ${notional:.2f} | {order['id'][:8]}...")
+
+            remaining_cash -= notional
+            trades_made    += 1
+            pos_symbols.append(sym)
+
+            # Assign to owner
+            if owner == "claude":
+                shared_state["claude_positions"].append(sym)
+            elif owner == "grok":
+                shared_state["grok_positions"].append(sym)
+
+            # Assign exit strategy from brief
+            entry_px = limit_price or current_price
+            assign_exit_strategy(sym, strategy, entry_px, confidence,
+                                 f"watchlist: {why[:60]}")
+
+        except Exception as e:
+            log(f"❌ Watchlist buy {sym}: {e}")
+
+    if trades_made > 0:
+        log(f"📋 Watchlist executed {trades_made} trade(s) autonomously (AIs sleeping)")
+    return trades_made
+
 # ══════════════════════════════════════════════════════════════
 # AI SLEEP / WAKE SYSTEM
 # Bot runs fully autonomous while AIs sleep.
@@ -3018,6 +3398,24 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
                             shared_state["sleeping_strategies"].pop(symbol, None)
                             sold = True
                 except: pass
+
+    # ── Execute watchlist if cash became available ───────────
+    try:
+        acct_w  = alpaca("GET", "/v2/account")
+        cash_w  = float(acct_w["cash"])
+        eq_w    = float(acct_w["equity"])
+        pos_w   = alpaca("GET", "/v2/positions")
+        sym_w   = [p["symbol"] for p in pos_w]
+        thresh_w = get_cash_thresholds(eq_w)
+        if cash_w >= thresh_w["active"] and len(pos_w) < RULES["max_positions"]:
+            watchlist_count = len(shared_state["trading_brief"].get("watchlist",[]))
+            if watchlist_count > 0:
+                log(f"📋 Cash ${cash_w:.2f} available + {watchlist_count} watchlist items — executing")
+                wl_trades = execute_watchlist(cash_w, eq_w, sym_w, len(pos_w))
+                if wl_trades > 0:
+                    stops_fired = -1  # Signal that new trades were made (not stops)
+    except Exception as we:
+        log(f"⚠️ Watchlist check error: {we}")
 
     return stops_fired
 
