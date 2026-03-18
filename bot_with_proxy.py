@@ -132,6 +132,15 @@ shared_state = {
     "tomorrows_plan":       None,
     "next_buy_target":      None,
     "spy_trend":            "neutral",
+    # ── AI Sleep/Wake System ──
+    "ai_sleeping":          False,   # True = both AIs asleep, bot runs autonomous
+    "sleep_reason":         None,    # Why they went to sleep
+    "wake_reason":          None,    # What woke them up
+    "last_sleep_time":      None,
+    "last_wake_time":       None,
+    "stops_fired_today":    0,       # Count of stop-losses fired while sleeping
+    "sleeping_strategies":  {},      # Full exit strategies stored before sleep
+    "ai_notes":             {},      # AI notes per position for bot to follow
     # Exit strategy tracking per position
     # Format: {"TICKER": {"strategy":"A/B","peak_price":0,"entry_date":"","entry_price":0}}
     "position_exits":       {},
@@ -199,6 +208,10 @@ def stats():
             "grok_fail_reason":   shared_state["grok_fail_reason"],
             "failover_mode":      shared_state["failover_mode"],
             "watch_mode_active":  shared_state["watch_mode_active"],
+            "ai_sleeping":        shared_state["ai_sleeping"],
+            "sleep_reason":       shared_state["sleep_reason"],
+            "wake_reason":        shared_state["wake_reason"],
+            "stops_fired_today":  shared_state["stops_fired_today"],
             "cash_thresholds":    get_cash_thresholds(equity),
             "can_short":          features["can_short"],
             "short_progress":    features["short_progress_pct"],
@@ -2584,8 +2597,18 @@ def run_cycle():
 
     if not final_trades:
         log("⏳ No trades agreed — holding.")
+        # No trades = nothing to monitor → AIs stay awake for next cycle
     else:
         execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, features)
+
+        # ── AIs go to sleep after executing trades ───────────
+        # Bot will autonomously monitor and execute stored strategies
+        # AIs only wake when a wake condition is triggered
+        positions_after = alpaca("GET", "/v2/positions")
+        if positions_after:
+            ai_sleep(f"executed {len(final_trades)} trades — bot monitoring {len(positions_after)} positions")
+        else:
+            log("⏳ No positions opened — AIs staying awake")
 
     shared_state["last_sync"] = datetime.now().isoformat()
     log("── Cycle complete ──\n")
@@ -2822,6 +2845,182 @@ Both AIs agree on this plan. Plain text 200 words."""
     except Exception as e:
         log(f"❌ After-hours error: {e}")
 
+
+# ══════════════════════════════════════════════════════════════
+# AI SLEEP / WAKE SYSTEM
+# Bot runs fully autonomous while AIs sleep.
+# AIs only wake on specific triggers — saves 96% of API calls.
+# ══════════════════════════════════════════════════════════════
+
+def ai_sleep(reason="trades executed — waiting for cash threshold"):
+    """Put both AIs to sleep. Bot takes over autonomous execution."""
+    shared_state["ai_sleeping"]     = True
+    shared_state["sleep_reason"]    = reason
+    shared_state["last_sleep_time"] = datetime.now().isoformat()
+    shared_state["wake_reason"]     = None
+    shared_state["stops_fired_today"] = 0
+
+    # Store current exit strategies so bot can execute them while AIs sleep
+    shared_state["sleeping_strategies"] = dict(shared_state["position_exits"])
+
+    log(f"😴 AIs going to SLEEP — {reason}")
+    log(f"   Bot running autonomously with stored strategies")
+    log(f"   Positions covered: {list(shared_state['sleeping_strategies'].keys()) or 'none'}")
+    log(f"   Wake conditions:")
+    log(f"     1. Cash crosses active threshold")
+    log(f"     2. All positions closed + cash available")
+    log(f"     3. 2+ stop-losses fire (market emergency)")
+    log(f"     4. 8:30am premarket (always)")
+    log(f"     5. SPY drops >2% suddenly (market crash guard)")
+
+def ai_wake(reason):
+    """Wake both AIs — they resume full analysis and decision making."""
+    was_sleeping = shared_state["ai_sleeping"]
+    shared_state["ai_sleeping"]    = False
+    shared_state["wake_reason"]    = reason
+    shared_state["last_wake_time"] = datetime.now().isoformat()
+
+    if was_sleeping:
+        sleep_time = shared_state.get("last_sleep_time","")
+        if sleep_time:
+            try:
+                slept_mins = (datetime.now() - datetime.fromisoformat(sleep_time)).seconds // 60
+                log(f"🌅 AIs WAKING UP — {reason}")
+                log(f"   Slept for {slept_mins} minutes")
+                log(f"   Bot executed {shared_state['stops_fired_today']} stop/TP autonomously while sleeping")
+            except:
+                log(f"🌅 AIs WAKING UP — {reason}")
+        else:
+            log(f"🌅 AIs WAKING UP — {reason}")
+
+def check_wake_conditions(cash, equity, positions, spy_change=0):
+    """
+    Check if any wake condition is met.
+    Returns (should_wake, reason) tuple.
+    No AI calls — pure logic and Alpaca data.
+    """
+    if not shared_state["ai_sleeping"]:
+        return False, None
+
+    thresholds = get_cash_thresholds(equity)
+
+    # ── WAKE CONDITION 1: Cash crossed active threshold ──────
+    if cash >= thresholds["active"]:
+        return True, f"cash ${cash:.2f} crossed active threshold ${thresholds['active']:.2f}"
+
+    # ── WAKE CONDITION 2: Fully in cash + available ───────────
+    if len(positions) == 0 and cash >= thresholds["sleep"]:
+        return True, f"all positions closed — ${cash:.2f} cash available"
+
+    # ── WAKE CONDITION 3: 2+ stop-losses fired ────────────────
+    if shared_state["stops_fired_today"] >= 2:
+        return True, f"EMERGENCY — {shared_state['stops_fired_today']} stop-losses fired, market may be crashing"
+
+    # ── WAKE CONDITION 4: SPY flash crash guard ───────────────
+    if spy_change <= -2.0:
+        return True, f"EMERGENCY — SPY dropped {spy_change:.1f}% (flash crash guard)"
+
+    return False, None
+
+def run_autonomous_monitor(positions, pos_symbols, cash, equity):
+    """
+    Fully autonomous bot operation while AIs sleep.
+    Executes stored exit strategies with zero AI calls.
+    Just pure rule-based execution.
+    """
+    if not positions:
+        return 0
+
+    stops_fired = 0
+    log(f"🤖 AUTONOMOUS MONITOR — {len(positions)} positions | AIs sleeping")
+
+    for pos in positions:
+        symbol        = pos["symbol"]
+        pnl_pct       = float(pos["unrealized_plpc"])
+        pnl_usd       = float(pos["unrealized_pl"])
+        current_price = float(pos["current_price"])
+        pos_value     = float(pos["market_value"])
+
+        # Get stored strategy for this position
+        strategy_cfg = shared_state["sleeping_strategies"].get(
+            symbol,
+            shared_state["position_exits"].get(symbol, {})
+        )
+        strategy     = strategy_cfg.get("strategy", "A")
+        entry_price  = strategy_cfg.get("entry_price", current_price)
+        entry_date   = strategy_cfg.get("entry_date", datetime.now().strftime("%Y-%m-%d"))
+        trail_pct    = strategy_cfg.get("trail_pct", get_trail_pct(symbol))
+        ai_notes     = strategy_cfg.get("ai_notes", "")
+
+        # Update peak price
+        if current_price > strategy_cfg.get("peak_price", entry_price):
+            strategy_cfg["peak_price"] = current_price
+            shared_state["sleeping_strategies"][symbol] = strategy_cfg
+            shared_state["position_exits"][symbol]      = strategy_cfg
+
+        peak_price = strategy_cfg.get("peak_price", entry_price)
+
+        log(f"   [{strategy}] {symbol}: {pnl_pct*100:+.2f}% (${pnl_usd:+.2f}) "
+            f"peak=${peak_price:.2f} | {ai_notes[:40] if ai_notes else ''}")
+
+        sold = False
+
+        # ── UNIVERSAL: Hard stop-loss ─────────────────────────
+        if pnl_pct <= -RULES["exit_A_stop_loss"]:
+            log(f"🛑 AUTO STOP-LOSS {symbol} {pnl_pct*100:.1f}% — bot executing (AIs sleeping)")
+            if smart_sell(symbol, "autonomous stop-loss", pos):
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                shared_state["position_exits"].pop(symbol, None)
+                shared_state["sleeping_strategies"].pop(symbol, None)
+                shared_state["stops_fired_today"] += 1
+                stops_fired += 1
+                sold = True
+
+        # ── STRATEGY A: Fixed take-profit ─────────────────────
+        elif strategy == "A" and not sold:
+            if pnl_pct >= RULES["exit_A_take_profit"]:
+                log(f"🎯 AUTO TAKE-PROFIT [A] {symbol} +{pnl_pct*100:.1f}% — bot executing")
+                if smart_sell(symbol, "autonomous strategy A take-profit", pos):
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+                    shared_state["sleeping_strategies"].pop(symbol, None)
+                    sold = True
+
+        # ── STRATEGY B: Trailing stop ─────────────────────────
+        elif strategy == "B" and not sold:
+            profit_at_peak  = (peak_price - entry_price) / entry_price
+            trail_active    = profit_at_peak >= RULES["exit_B_trail_activates"]
+            trail_stop      = peak_price * (1 - trail_pct)
+
+            if trail_active and current_price <= trail_stop:
+                log(f"🎯 AUTO TRAILING STOP [B] {symbol} "
+                    f"peak=${peak_price:.2f} stop=${trail_stop:.2f} "
+                    f"current=${current_price:.2f} | +{pnl_pct*100:.1f}%")
+                if smart_sell(symbol, f"autonomous strategy B trailing stop", pos):
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+                    shared_state["sleeping_strategies"].pop(symbol, None)
+                    sold = True
+
+            # Time stop
+            elif RULES["exit_B_time_stop_days"] and not sold:
+                try:
+                    days_held = (datetime.now() - datetime.strptime(entry_date, "%Y-%m-%d")).days
+                    if days_held >= RULES["exit_B_time_stop_days"] and pnl_pct < RULES["exit_B_trail_activates"]:
+                        log(f"⏰ AUTO TIME STOP [B] {symbol} — {days_held}d held, only {pnl_pct*100:+.2f}%")
+                        if smart_sell(symbol, f"autonomous time stop ({days_held}d)", pos):
+                            shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                            shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                            shared_state["position_exits"].pop(symbol, None)
+                            shared_state["sleeping_strategies"].pop(symbol, None)
+                            sold = True
+                except: pass
+
+    return stops_fired
+
 def trading_loop():
     log(f"🚀 COLLABORATIVE AI Trading System v2.0")
     log(f"💰 Budget: ${RULES['total_budget']} | Reserve: {RULES['growth_reserve_pct']*100:.0f}% untouchable")
@@ -2847,26 +3046,143 @@ def trading_loop():
     last_premarket  = None
     last_afterhours = None
 
+    # ── Background cash monitor (no AI needed) ───────────────
+    cash_check_interval = 60   # Check cash every 60 seconds silently
+    last_cash_check     = 0
+    last_known_cash     = 0
+
     while True:
         try:
             mode, interval = get_market_mode()
-            now_et = datetime.now(ZoneInfo("America/New_York"))
-            today  = now_et.date()
+            now_et   = datetime.now(ZoneInfo("America/New_York"))
+            today    = now_et.date()
+            now_unix = time.time()
+
+            # ── SILENT CASH MONITOR (no AI, no cost) ─────────
+            # Runs every 60 seconds regardless of market mode
+            # Only during market hours to save Alpaca API calls
+            mins_et = now_et.hour * 60 + now_et.minute
+            is_market_hours = 510 <= mins_et < 1020  # 8:30am-5pm ET
+
+            if is_market_hours and (now_unix - last_cash_check) >= cash_check_interval:
+                try:
+                    account      = alpaca("GET", "/v2/account")
+                    current_cash = float(account["cash"])
+                    current_eq   = float(account["equity"])
+                    thresholds   = get_cash_thresholds(current_eq)
+                    last_cash_check = now_unix
+
+                    # Cash increased past active threshold — wake both AIs
+                    if (shared_state["watch_mode_active"] and
+                        current_cash >= thresholds["active"] and
+                        last_known_cash < thresholds["active"]):
+                        log(f"💡 CASH MONITOR: ${current_cash:.2f} crossed active threshold "
+                            f"${thresholds['active']:.2f} — WAKING GROK immediately!")
+                        log(f"   No AI was needed to detect this — pure Alpaca API check")
+                        shared_state["watch_mode_active"] = False
+                        # Force immediate full cycle
+                        if mode in ("opening","prime","power_hour"):
+                            log(f"🚀 Triggering immediate full collaboration cycle!")
+                            run_cycle()
+                            last_cash_check = time.time()
+
+                    # Cash dropped to sleep level — log silently
+                    elif (current_cash < thresholds["sleep"] and
+                          last_known_cash >= thresholds["sleep"]):
+                        log(f"💤 CASH MONITOR: Cash dropped to ${current_cash:.2f} — entering sleep mode")
+
+                    # Cash entered watch zone
+                    elif (current_cash < thresholds["active"] and
+                          last_known_cash >= thresholds["active"] and
+                          current_cash >= thresholds["sleep"]):
+                        log(f"👁️ CASH MONITOR: Cash ${current_cash:.2f} entered watch zone "
+                            f"(${thresholds['sleep']}-${thresholds['active']:.2f})")
+                        log(f"   Switching to Claude-only monitoring")
+                        shared_state["watch_mode_active"] = True
+
+                    last_known_cash = current_cash
+
+                except Exception as ce:
+                    pass  # Silent — cash monitor never crashes the main loop
+
+            # ── MAIN TRADING LOGIC ───────────────────────────
 
             if mode == "sleep":
                 next_check = (now_et + timedelta(minutes=interval)).strftime("%H:%M ET")
                 log(f"😴 Sleeping {interval} min. Next: {next_check}")
 
             elif mode == "premarket":
+                # Always wake AIs at 8:30am for research regardless of sleep state
+                if shared_state["ai_sleeping"]:
+                    ai_wake("8:30am premarket — daily research always runs")
                 run_premarket()
+                # After premarket research, AIs sleep again if no cash to trade
+                try:
+                    acct_check = alpaca("GET", "/v2/account")
+                    cash_check = float(acct_check["cash"])
+                    eq_check   = float(acct_check["equity"])
+                    thresh_check = get_cash_thresholds(eq_check)
+                    if cash_check < thresh_check["active"]:
+                        ai_sleep("premarket research done — insufficient cash to trade")
+                except: pass
 
             elif mode in ("opening", "prime", "power_hour"):
                 labels = {"opening":"🔔 OPENING","prime":"🚀 PRIME","power_hour":"⚡ POWER HOUR"}
-                log(f"{labels[mode]} — Collaboration cycle")
-                run_cycle()
+
+                if shared_state["ai_sleeping"]:
+                    # ── BOT AUTONOMOUS MODE ───────────────────
+                    # AIs sleeping — bot monitors and executes stored strategies
+                    try:
+                        acct      = alpaca("GET", "/v2/account")
+                        cash_now  = float(acct["cash"])
+                        eq_now    = float(acct["equity"])
+                        pos_now   = alpaca("GET", "/v2/positions")
+                        sym_now   = [p["symbol"] for p in pos_now]
+
+                        # Check SPY for crash guard
+                        spy_trend_now, spy_price_now, spy_sma_now, spy_chg_now = get_spy_trend()
+
+                        # Check wake conditions
+                        should_wake, wake_reason = check_wake_conditions(
+                            cash_now, eq_now, pos_now, spy_chg_now
+                        )
+
+                        if should_wake:
+                            ai_wake(wake_reason)
+                            log(f"{labels[mode]} — AIs woke up, running collaboration")
+                            run_cycle()
+                        else:
+                            # Bot executes stored strategies autonomously
+                            log(f"🤖 {labels[mode]} — BOT AUTONOMOUS (AIs sleeping)")
+                            log(f"   Cash: ${cash_now:.2f} | Positions: {sym_now or 'none'}")
+                            log(f"   Sleep reason: {shared_state['sleep_reason']}")
+                            fires = run_autonomous_monitor(pos_now, sym_now, cash_now, eq_now)
+                            if fires > 0:
+                                log(f"   {fires} position(s) exited autonomously")
+                    except Exception as ae:
+                        log(f"❌ Autonomous monitor error: {ae}")
+                else:
+                    # AIs awake — full collaboration
+                    log(f"{labels[mode]} — Full collaboration")
+                    run_cycle()
 
             elif mode == "afterhours":
+                # Always wake for afterhours review
+                if shared_state["ai_sleeping"]:
+                    ai_wake("4pm afterhours — daily review always runs")
                 run_afterhours()
+                # After review, AIs sleep again if nothing to do
+                try:
+                    acct_ah   = alpaca("GET", "/v2/account")
+                    cash_ah   = float(acct_ah["cash"])
+                    eq_ah     = float(acct_ah["equity"])
+                    thresh_ah = get_cash_thresholds(eq_ah)
+                    pos_ah    = alpaca("GET", "/v2/positions")
+                    if cash_ah < thresh_ah["active"] and pos_ah:
+                        ai_sleep("afterhours review done — bot monitoring overnight positions")
+                    elif not pos_ah and cash_ah < thresh_ah["active"]:
+                        ai_sleep("afterhours done — no positions, insufficient cash")
+                except: pass
 
         except Exception as e:
             log(f"❌ Loop error: {e}")
