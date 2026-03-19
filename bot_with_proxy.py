@@ -9,6 +9,44 @@ from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+# ── 5-Layer Projection Engine ────────────────────────────────
+# projection_engine.py must be in the same directory (already in GitHub)
+from projection_engine import (
+    get_projection,
+    score_buy_opportunity      as proj_score_buy,
+    format_projection_for_ai   as proj_format_for_ai,
+    get_position_exit_guidance as proj_get_exit_guidance,
+)
+
+# ── Projection Accuracy Tracker ──────────────────────────────
+# Defined here (not in projection_engine.py) because it writes to shared_state.
+# Call from run_afterhours() to build a rolling accuracy score over time.
+def track_projection_accuracy(symbol, actual_high, actual_low):
+    """
+    Compare yesterday's projection vs today's actual prices.
+    Updates shared_state accuracy counters.
+    Call once per position at end of day from run_afterhours().
+    """
+    proj = shared_state.get("last_projections", {}).get(symbol)
+    if not proj or proj.get("error") or not proj.get("proj_high"):
+        return
+    ph = proj["proj_high"]
+    pl = proj["proj_low"]
+    # "Hit" = actual range stayed within 2% of projected range
+    high_hit = actual_high <= ph * 1.02
+    low_hit  = actual_low  >= pl * 0.98
+    both_hit = high_hit and low_hit
+    shared_state["proj_total_count"] += 1
+    if both_hit:
+        shared_state["proj_hit_count"] += 1
+    total = shared_state["proj_total_count"]
+    hits  = shared_state["proj_hit_count"]
+    shared_state["proj_accuracy_pct"] = round(hits / total * 100, 1) if total else 0.0
+    log(f"📐 Proj accuracy: {symbol} | Proj={pl}–{ph} "
+        f"Actual={round(actual_low,2)}–{round(actual_high,2)} | "
+        f"{'✅ HIT' if both_hit else '❌ MISS'} | "
+        f"Rolling: {hits}/{total} = {shared_state['proj_accuracy_pct']}%")
+
 ALPACA_KEY    = os.environ.get("ALPACA_KEY", "")
 ALPACA_SECRET = os.environ.get("ALPACA_SECRET", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
@@ -170,6 +208,12 @@ shared_state = {
     # Exit strategy tracking per position
     # Format: {"TICKER": {"strategy":"A/B","peak_price":0,"entry_date":"","entry_price":0}}
     "position_exits":       {},
+    # ── 5-Layer Projection Engine State ──────────────────────
+    "last_projections":    {},      # {symbol: projection_dict} — updated each cycle
+    "last_proj_time":      None,    # ISO timestamp of last projection run
+    "proj_hit_count":      0,       # How many projections were accurate
+    "proj_total_count":    0,       # Total projections tracked
+    "proj_accuracy_pct":   0.0,     # Rolling accuracy %
     # AI health status
     "claude_healthy":       True,
     "grok_healthy":         True,
@@ -461,6 +505,51 @@ def performance():
             "by_strategy":     strat_summary,
             "by_exit_reason":  reason_counts,
             "by_spy_trend":    spy_summary,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/projection")
+def projection_endpoint():
+    """
+    Live daily range projections for all universe symbols (or a single symbol).
+    Uses the 5-layer model from projection_engine.py.
+
+    Query params:
+      ?symbol=NVDA  — single symbol projection
+      ?full=1       — include layer_details breakdown
+    """
+    try:
+        symbol  = request.args.get("symbol","").upper()
+        full    = request.args.get("full","0") == "1"
+        symbols = [symbol] if symbol else RULES["universe"]
+        results = {}
+
+        for sym in symbols:
+            try:
+                bars = get_bars(sym)
+                ind  = compute_indicators(bars)
+                proj = get_projection(sym, bars, ind=ind)
+                if not full:
+                    proj.pop("layer_details", None)
+                results[sym] = proj
+            except Exception as e:
+                results[sym] = {"symbol": sym, "error": str(e)}
+
+        # Cache for bot autonomous use
+        shared_state["last_projections"] = {k: v for k, v in results.items() if not v.get("error")}
+        shared_state["last_proj_time"]   = datetime.now().isoformat()
+
+        return jsonify({
+            "projections":      results,
+            "formatted_prompt": proj_format_for_ai(results, include_low_conf=True),
+            "accuracy": {
+                "hit_count":    shared_state["proj_hit_count"],
+                "total_count":  shared_state["proj_total_count"],
+                "accuracy_pct": shared_state["proj_accuracy_pct"],
+            },
+            "cached_at":    shared_state["last_proj_time"],
+            "symbol_count": len(results),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -831,13 +920,46 @@ def compute_indicators(bars):
             "bb_pct":bb_pct,"vol_ratio":vol_ratio,"mom_5d":mom_5d}
 
 def get_chart_section():
-    lines = []
+    """
+    Enhanced chart section — adds 5-layer projection line for every symbol.
+    Projections cached in shared_state for autonomous bot use (zero AI calls).
+    """
+    lines       = []
+    projections = {}
+
     for sym in RULES["universe"]:
-        bars=get_bars(sym); ind=compute_indicators(bars)
-        if not ind: lines.append(f"  {sym}: insufficient data"); continue
-        lines.append(f"  {sym}: ${ind['close']} RSI={ind['rsi']} MACD={ind['macd']} "
-                     f"SMA20={ind['sma20']} SMA50={ind['sma50']} EMA9={ind['ema9']} "
-                     f"EMA21={ind['ema21']} BB%={ind['bb_pct']} Vol={ind['vol_ratio']} Mom5d={ind['mom_5d']}%")
+        bars = get_bars(sym)
+        ind  = compute_indicators(bars)
+        if not ind:
+            lines.append(f"  {sym}: insufficient data")
+            continue
+
+        # Original indicator line (unchanged)
+        lines.append(
+            f"  {sym}: ${ind['close']} RSI={ind['rsi']} MACD={ind['macd']} "
+            f"SMA20={ind['sma20']} SMA50={ind['sma50']} EMA9={ind['ema9']} "
+            f"EMA21={ind['ema21']} BB%={ind['bb_pct']} "
+            f"Vol={ind['vol_ratio']} Mom5d={ind['mom_5d']}%"
+        )
+
+        # NEW: 5-layer projection line from projection_engine.py
+        try:
+            proj = get_projection(sym, bars, ind=ind)
+            projections[sym] = proj
+            if not proj.get("error"):
+                lines.append(
+                    f"    → PROJ: High={proj['proj_high']} Low={proj['proj_low']} "
+                    f"Pivot={proj['pivot']} ATR=${proj['atr']} "
+                    f"Bias={proj['bias'].upper()} Conf={proj['confidence']}/100 "
+                    f"| {proj['trade_action']}"
+                )
+        except Exception:
+            pass  # Never break chart section for a projection failure
+
+    # Cache projections in shared_state — bot reads this while AIs sleep
+    shared_state["last_projections"] = projections
+    shared_state["last_proj_time"]   = datetime.now().isoformat()
+
     return "\n".join(lines)
 
 def get_full_market_intelligence():
@@ -1623,9 +1745,55 @@ def check_exit_conditions(positions):
                 shared_state["position_exits"].pop(symbol, None)
             continue
 
-        # ── STRATEGY A: Fixed take-profit ────────────────────
+        # ── STRATEGY A: Dynamic projection take-profit (proj_get_exit_guidance) ─
         if strategy == "A":
-            if pnl_pct >= RULES["exit_A_take_profit"]:
+            # Try projection_engine dynamic TP first
+            should_proj_exit = False
+            proj_exit_price  = 0.0
+            proj_reason      = ""
+            try:
+                bars_tp = get_bars(symbol, days=10)
+                ind_tp  = compute_indicators(bars_tp) if bars_tp else None
+                if ind_tp:
+                    guidance = proj_get_exit_guidance(
+                        symbol, bars_tp, ind_tp,
+                        entry_price, current_price, pnl_pct
+                    )
+                    if guidance.get("conf", 0) >= 55:
+                        should_proj_exit = guidance["should_exit"]
+                        proj_exit_price  = guidance["exit_price"]
+                        proj_reason      = guidance["reason"]
+                        # Also honour projection stop level
+                        if current_price <= guidance["stop_price"] and pnl_pct < 0:
+                            log(f"🛑 [A-PROJ] [{owner}] PROJ STOP {symbol} "
+                                f"below proj_low stop=${guidance['stop_price']:.2f}")
+                            if smart_sell(symbol, f"proj stop {guidance['stop_price']}", pos):
+                                record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                                             float(pos.get("market_value", 0)), owner.lower(),
+                                             reason=f"strategy A proj stop — {proj_reason}",
+                                             pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="A-proj",
+                                             entry_price=entry_price)
+                                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                                shared_state["position_exits"].pop(symbol, None)
+                            continue
+            except Exception:
+                pass  # Fall through to fixed TP
+
+            if should_proj_exit and proj_exit_price > 0:
+                log(f"🎯 [A-PROJ] [{owner}] DYNAMIC TP {symbol} "
+                    f"+{pnl_pct*100:.1f}% | target=${proj_exit_price:.2f} | {proj_reason}")
+                if smart_sell(symbol, f"strategy A dynamic TP — {proj_reason}", pos):
+                    record_trade("take_profit", symbol, pos.get("qty"), current_price,
+                                 float(pos.get("market_value", 0)), owner.lower(),
+                                 reason=f"strategy A dynamic TP — {proj_reason}",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="A-proj",
+                                 entry_price=entry_price)
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+            elif pnl_pct >= RULES["exit_A_take_profit"]:
+                # Fixed fallback: original 7% take-profit
                 log(f"🎯 [A] [{owner}] FIXED TP {symbol} +{pnl_pct*100:.1f}% >= {RULES['exit_A_take_profit']*100:.0f}% | +${pnl_usd:.2f}")
                 if smart_sell(symbol, "strategy A take-profit", pos):
                     record_trade("take_profit", symbol, pos.get("qty"), current_price,
@@ -1825,7 +1993,15 @@ SMART MONEY:
 🔥 Triple confirmation: {triple_syms}
 ⭐ Top collaborative: {top_collab}
 
-INDICATORS: {chart_section[:450]}"""
+INDICATORS + 5-LAYER DAILY PROJECTIONS:
+{chart_section[:600]}
+
+HOW TO USE PROJECTIONS:
+- proj_high = today's statistical resistance. Use as take-profit target. Fade near it.
+- proj_low  = today's statistical support. Use as entry zone for buys.
+- pivot     = key daily inflection. Above pivot = bullish day. Below = bearish.
+- ATR       = expected daily $ range. Price moved > ATR = momentum exhausted.
+- conf>=70  = high conviction, full size. 50-69 = half size. <50 = skip/watch only."""
 
     # Round 1: Both propose independently
     r1_prompt = f"""{context}
@@ -2443,26 +2619,20 @@ def run_autopilot(positions, pos_symbols, cash, equity):
         ind  = compute_indicators(bars)
         if not ind: continue
 
-        score = 0
-        signals = []
+        # ── projection_engine.py buy scorer (replaces legacy 5-point system) ──
+        proj_score, proj_summary = proj_score_buy(sym, bars, ind, cash)
 
-        # RSI oversold
+        # Legacy signals layered on top for extra confirmation
+        legacy_score = 0
         if ind["rsi"] and ind["rsi"] < RULES["autopilot_rsi_buy"]:
-            score += 3; signals.append(f"RSI={ind['rsi']} oversold")
-
-        # MACD positive
+            legacy_score += 10
         if ind["macd"] and ind["macd"] > 0:
-            score += 2; signals.append(f"MACD={ind['macd']} positive")
+            legacy_score += 5
 
-        # Price above SMA20 (uptrend)
-        if ind["sma20"] and ind["close"] > ind["sma20"]:
-            score += 1; signals.append(f"price>${ind['sma20']} SMA20")
+        score   = min(100, proj_score + legacy_score)
+        signals = [proj_summary]
 
-        # 5-day momentum positive
-        if ind["mom_5d"] and ind["mom_5d"] > 0:
-            score += 1; signals.append(f"mom5d={ind['mom_5d']}%")
-
-        if score >= 5 and score > best_score:  # Need 5+ for autopilot buy
+        if score >= 55 and score > best_score:   # Raised from 5 → 55 (projection-calibrated)
             best_score  = score
             best_signal = {"symbol": sym, "score": score, "signals": signals, "ind": ind}
 
@@ -2985,7 +3155,7 @@ SMART MONEY:
 ⭐ Top collaborative: {top_collab}
 📈 Biggest gainers (>3%): {[(g['symbol'], f'+{g["change"]:.1f}%') for g in gainers[:5]]}
 
-INDICATORS: {chart[:350]}
+INDICATORS + 5-LAYER PROJECTIONS (proj_high=TP target, proj_low=entry zone): {chart[:500]}
 
 Research tasks:
 1. Triple confirmation = highest priority
@@ -3046,7 +3216,22 @@ def run_afterhours():
 
         # Both AIs plan tomorrow
         news  = get_news_context()
-        chart = get_chart_section()
+        chart = get_chart_section()   # Refreshes projections + caches in shared_state
+
+        # ── PROJECTION ACCURACY TRACKING (uses track_projection_accuracy from projection_engine) ──
+        try:
+            for p in positions:
+                sym      = p["symbol"]
+                actual_h = float(p.get("high_of_day", p.get("current_price", 0)))
+                actual_l = float(p.get("low_of_day",  p.get("current_price", 0)))
+                if actual_h > 0 and actual_l > 0:
+                    track_projection_accuracy(sym, actual_h, actual_l, shared_state)
+            if shared_state["proj_total_count"] > 0:
+                log(f"📐 Projection accuracy: "
+                    f"{shared_state['proj_hit_count']}/{shared_state['proj_total_count']} = "
+                    f"{shared_state['proj_accuracy_pct']}%")
+        except Exception as pa:
+            log(f"⚠️ Projection accuracy tracking: {pa}")
 
         # Fetch end of day intelligence
         # ── PHASE 1: Specialized After-Hours Research ──────
@@ -3489,6 +3674,9 @@ def generate_trading_brief(equity, cash, positions, pool,
     if deposit_note:
         log(f"   {deposit_note}")
 
+    chart_section = get_chart_section()  # Refreshes + caches projections in shared_state
+    proj_context  = proj_format_for_ai(shared_state.get("last_projections", {}))
+
     pos_summary = []
     for p in positions:
         sym     = p["symbol"]
@@ -3519,7 +3707,10 @@ Hot IPOs: {hot_ipos}
 Gainers: {[(g['symbol'],f'+{g["change"]:.1f}%') for g in gainers[:5]]}
 Market: {market_ctx}
 News: {news[:200]}
-Indicators: {chart_section[:400]}
+Indicators: {chart_section[:300]}
+
+5-LAYER PROJECTIONS from projection_engine.py (use proj_high as TP, proj_low as entry):
+{proj_context[:400]}
 
 BOT FOUND WHILE YOU SLEPT (hourly trend scan):
 High priority findings: {scan_summary if scan_summary else "none"}
@@ -3564,6 +3755,9 @@ MOMENTUM INTELLIGENCE:
 Hot IPOs: {[(i['symbol'],f"mom={i['mom_5d']}%",f"{i['days_old']}d old") for i in ipos[:5]]}
 Biggest gainers: {[(g['symbol'],f'+{g["change"]:.1f}%') for g in gainers[:5]]}
 News: {news[:200]}
+
+5-LAYER PROJECTIONS (set entry_max = proj_low, TP = proj_high):
+{proj_context[:350]}
 
 Write YOUR PART of the trading brief (momentum picks + IPO watchlist).
 The bot executes your watchlist automatically when cash is available.
@@ -3733,19 +3927,53 @@ def execute_watchlist(cash, equity, pos_symbols, open_count):
         if confidence < RULES["min_confidence"]:
             continue
 
-        # Check current price vs entry_max
+        # Check current price vs entry_max AND projection-based entry gate
         try:
-            bars = get_bars(sym, days=5)
+            bars = get_bars(sym, days=10)
             if not bars:
                 continue
+            ind           = compute_indicators(bars)
             current_price = bars[-1]["c"]
+
+            # Standard entry_max check
             if entry_max > 0 and current_price > entry_max:
                 log(f"⏭️ WATCHLIST: {sym} at ${current_price:.2f} > entry max ${entry_max:.2f} — waiting")
                 continue
-        except:
-            continue
 
-        notional = min(remaining_cash * size_pct, remaining_cash - 5)
+            # Projection-based entry gate — uses cached projection from shared_state
+            # (zero extra API calls needed since get_chart_section already ran)
+            proj       = shared_state.get("last_projections", {}).get(sym)
+            size_pct_s = size_pct  # default size
+
+            if proj and not proj.get("error") and proj.get("proj_low") and proj.get("confidence", 0) >= 55:
+                proj_low  = proj["proj_low"]
+                proj_high = proj["proj_high"]
+                proj_conf = proj["confidence"]
+                proj_bias = proj.get("bias", "neutral")
+                range_mid = (proj_low + proj_high) / 2
+
+                # Skip if price already past midpoint on a bearish day
+                if current_price > range_mid and proj_bias == "bearish":
+                    log(f"⏭️ WATCHLIST PROJ: {sym} ${current_price:.2f} > midrange "
+                        f"${range_mid:.2f} bearish — waiting for pullback")
+                    continue
+
+                # Reduce size if projection confidence is moderate
+                if proj_conf < 60:
+                    size_pct_s = size_pct * 0.60
+                    log(f"   ⚠️ WATCHLIST: {sym} proj conf={proj_conf} — sizing at 60%")
+                else:
+                    log(f"   📐 WATCHLIST PROJ: {sym} conf={proj_conf} range={proj_low}–{proj_high} "
+                        f"bias={proj_bias} — entry OK")
+
+        except Exception:
+            size_pct_s = size_pct
+            try:
+                current_price = get_bars(sym, days=3)[-1]["c"]
+            except Exception:
+                continue
+
+        notional = min(remaining_cash * size_pct_s, remaining_cash - 5)
         if notional < 8:
             log(f"⚠️ WATCHLIST: Not enough cash for {sym} (${remaining_cash:.2f})")
             break
