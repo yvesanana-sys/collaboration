@@ -198,6 +198,113 @@ def alpaca_get(path):
 def health():
     return jsonify({"status": "ok", "bot": BOT_NAME})
 
+@app.route("/history")
+def history():
+    """
+    Full trade history endpoint for Claude analysis.
+    Visit: collaboration-production-cba3.up.railway.app/history
+    """
+    try:
+        account   = alpaca_get("/v2/account")
+        positions = alpaca_get("/v2/positions")
+        equity    = float(account["equity"])
+        start_cap = RULES["total_budget"]
+
+        # Get all orders last 90 days
+        end   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        start = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+        orders_res = requests.get(
+            f"{BASE_URL}/v2/orders?status=all&limit=500&after={start}&direction=desc",
+            headers=headers
+        )
+        orders = orders_res.json() if orders_res.ok else []
+        filled = [o for o in orders if o.get("status") == "filled"]
+
+        # Symbol breakdown
+        symbols = {}
+        for o in filled:
+            sym = o["symbol"]
+            if sym not in symbols:
+                symbols[sym] = {"buys":0,"sells":0,"total_notional":0}
+            qty   = float(o.get("filled_qty",0))
+            price = float(o.get("filled_avg_price",0))
+            symbols[sym]["total_notional"] += round(qty*price,2)
+            if o["side"] == "buy":
+                symbols[sym]["buys"]  += 1
+            else:
+                symbols[sym]["sells"] += 1
+
+        # Portfolio history
+        port_hist = {}
+        try:
+            ph_res = requests.get(
+                f"{BASE_URL}/v2/account/portfolio/history?period=1M&timeframe=1D",
+                headers=headers
+            )
+            if ph_res.ok:
+                ph = ph_res.json()
+                port_hist = {
+                    "timestamps":  ph.get("timestamp",[]),
+                    "equity":      ph.get("equity",[]),
+                    "profit_loss": ph.get("profit_loss",[]),
+                }
+        except: pass
+
+        return jsonify({
+            "summary": {
+                "equity":        equity,
+                "cash":          float(account["cash"]),
+                "start_capital": start_cap,
+                "total_pnl":     round(equity - start_cap, 2),
+                "total_pnl_pct": round((equity-start_cap)/start_cap*100, 2),
+                "total_orders":  len(filled),
+                "symbols_count": len(symbols),
+                "analysis_note": "Upload this JSON to Claude for trade analysis",
+            },
+            "portfolio_history": port_hist,
+            "symbols_traded":    symbols,
+            "open_positions": [{
+                "symbol":      p["symbol"],
+                "pnl_pct":     round(float(p["unrealized_plpc"])*100,2),
+                "pnl_usd":     round(float(p["unrealized_pl"]),2),
+                "entry_price": float(p["avg_entry_price"]),
+                "current":     float(p["current_price"]),
+                "value":       float(p["market_value"]),
+                "owner":       "claude" if p["symbol"] in shared_state["claude_positions"]
+                               else "grok" if p["symbol"] in shared_state["grok_positions"]
+                               else "shared",
+                "strategy":    shared_state["position_exits"].get(p["symbol"],{}).get("strategy","A"),
+            } for p in positions],
+            "recent_orders": [{
+                "symbol":     o["symbol"],
+                "side":       o["side"],
+                "qty":        o.get("filled_qty"),
+                "price":      o.get("filled_avg_price"),
+                "notional":   round(float(o.get("filled_qty",0)) *
+                                   float(o.get("filled_avg_price",0)),2),
+                "type":       o.get("type"),
+                "filled_at":  o.get("filled_at","")[:19],
+                "status":     o.get("status"),
+            } for o in filled[:50]],
+            "bot_state": {
+                "ai_sleeping":      shared_state["ai_sleeping"],
+                "sleep_reason":     shared_state["sleep_reason"],
+                "autonomy_tier":    shared_state["autonomy_tier"],
+                "claude_wins":      shared_state["claude_win_days"],
+                "grok_wins":        shared_state["grok_win_days"],
+                "claude_total_pnl": shared_state["claude_total_pnl"],
+                "grok_total_pnl":   shared_state["grok_total_pnl"],
+                "claude_allocation":shared_state["claude_allocation"],
+                "grok_allocation":  shared_state["grok_allocation"],
+                "bearish_watchlist":shared_state["bearish_watchlist"],
+                "trend_scan":       shared_state.get("trend_scan_results",[])[:10],
+                "last_scan_time":   shared_state.get("trend_scan_time"),
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/stats")
 def stats():
     try:
