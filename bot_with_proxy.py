@@ -18,6 +18,11 @@ from projection_engine import (
     get_position_exit_guidance as proj_get_exit_guidance,
 )
 
+# ── Adaptive Prompt Builder + Evolving Memory ─────────────────
+# prompt_builder.py must be in the same directory (already in GitHub)
+from prompt_builder import PromptBuilder
+prompt_builder = PromptBuilder()   # Single instance — memory grows all session
+
 # ── Projection Accuracy Tracker ──────────────────────────────
 # Defined here (not in projection_engine.py) because it writes to shared_state.
 # Call from run_afterhours() to build a rolling accuracy score over time.
@@ -269,6 +274,26 @@ def record_trade(action, symbol, qty, price, notional, owner,
     # Keep last 500
     if len(trade_history) > 500:
         trade_history.pop(0)
+
+    # ── Feed prompt memory on every closed trade ──────────────
+    # Sells/stops/TPs carry pnl — buys don't, so filter on pnl_usd presence
+    if pnl_usd is not None and action in (
+        "sell", "stop_loss", "take_profit", "trail_stop", "time_stop"
+    ):
+        try:
+            prompt_builder.on_trade_closed(
+                symbol       = symbol,
+                pnl_usd      = float(pnl_usd),
+                pnl_pct      = float(pnl_pct) if pnl_pct is not None else 0.0,
+                owner        = owner or "bot",
+                strategy     = strategy or "A",
+                signals      = [],          # signals not available here; memory still useful
+                spy_trend    = spy_trend or shared_state.get("spy_trend", "neutral"),
+                entry_reason = reason or "",
+            )
+        except Exception:
+            pass  # Never let memory errors break trade recording
+
     return entry
 
 def alpaca_get(path):
@@ -551,6 +576,18 @@ def projection_endpoint():
             "cached_at":    shared_state["last_proj_time"],
             "symbol_count": len(results),
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/prompt_memory")
+def prompt_memory_endpoint():
+    """
+    Live view of the adaptive prompt memory — lessons learned from closed trades.
+    Shows win rates by situation mode, AI patterns, regime stats, recent lessons.
+    GET /prompt_memory
+    """
+    try:
+        return jsonify(prompt_builder.get_memory_stats())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1961,64 +1998,31 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
     if ipo_syms:
         log(f"🆕 IPOs in play: {ipo_syms}")
 
-    context = f"""=== AI COLLABORATION TRADING SYSTEM ===
-Portfolio: ${equity:.2f} | Cash: ${cash:.2f} | P&L: ${equity-RULES['total_budget']:+.2f}
-Growth Reserve: ${pool['reserve']:.2f} (UNTOUCHABLE — never trade this)
-Trading Pool: ${pool['trading']:.2f} total
-  Claude budget: ${pool['claude']:.2f} ({shared_state['claude_allocation']*100:.1f}%)
-  Grok budget:   ${pool['grok']:.2f} ({shared_state['grok_allocation']*100:.1f}%)
-Performance: Claude ${shared_state['claude_daily_pnl']:+.2f} today | Grok ${shared_state['grok_daily_pnl']:+.2f} today
-Win days: Claude {shared_state['claude_win_days']} | Grok {shared_state['grok_win_days']}
-{short_note}
-Open positions ({open_count}/{RULES['max_positions']}):
-{chr(10).join(pos_details) if pos_details else '  None'}
-
-MARKET: {market_ctx}
-NEWS: {news[:300]}
-
-POLITICIAN TRADES (public disclosures — strong signal):
-{pol_text[:350]}
-Top mimick candidates: {pol_mimick}
-
-BIGGEST GAINERS TODAY >3% (COLLABORATIVE ONLY):
-{[(g['symbol'], f'+{g["change"]:.1f}%') for g in gainers[:5]]}
-
-RECENT IPOs (autonomous candidates — high momentum):
-{[(i['symbol'], f"{i['days_old']}d old", f"mom={i['mom_5d']}%") for i in ipos[:5]]}
-Hot IPOs: {hot_ipos}
-
-TOP INVESTORS (13F): {inv_text[:200]}
-
-SMART MONEY:
-🔥 Triple confirmation: {triple_syms}
-⭐ Top collaborative: {top_collab}
-
-INDICATORS + 5-LAYER DAILY PROJECTIONS:
-{chart_section[:600]}
-
-HOW TO USE PROJECTIONS:
-- proj_high = today's statistical resistance. Use as take-profit target. Fade near it.
-- proj_low  = today's statistical support. Use as entry zone for buys.
-- pivot     = key daily inflection. Above pivot = bullish day. Below = bearish.
-- ATR       = expected daily $ range. Price moved > ATR = momentum exhausted.
-- conf>=70  = high conviction, full size. 50-69 = half size. <50 = skip/watch only."""
-
     # Round 1: Both propose independently
-    r1_prompt = f"""{context}
-
-IMPORTANT RULES FOR THIS CYCLE:
-- SPY TREND: {shared_state.get('spy_trend','neutral').upper()} {'— DO NOT suggest new buys, exits only' if shared_state.get('spy_trend') == 'bear' else '— Full trading active'}
-- AUTONOMOUS trades: technicals + news + politician signals + HOT IPOs (>5% momentum)
-- COLLABORATIVE candidates: Biggest gainers (>3%) AND triple confirmation stocks
-- IPOs with strong momentum are GOOD autonomous trades — they move fast
-- Never suggest a biggest gainer for autonomous — only flag for collaborative
-- Politician mimicking: 2+ politicians bought = strong autonomous signal
-- Triple confirmation = best collaborative candidate
-- LIMIT ORDERS: Bot uses limit orders at bid/ask midpoint for better entry price
-
-Propose up to 2 AUTONOMOUS trades from your budget.
-Also flag any COLLABORATIVE candidates (biggest gainers or strong politician signals).
-JSON: {{"strategy_name":"name","market_thesis":"brief","proposed_trades":[{{"action":"buy/sell/short","symbol":"TICK","notional_usd":15.0,"confidence":85,"direction":"long/short","signals":["s1","s2","s3"],"rationale":"brief","politician_signal":false,"ipo_signal":false}}],"collaborative_candidates":[{{"symbol":"TICK","reason":"biggest gainer OR triple confirmation","confidence":90}}],"bearish_watchlist":["tickers"]}}"""
+    # ── Adaptive prompt — situation-aware, projection-informed, memory-injected ──
+    r1_prompt, situation_mode = prompt_builder.build_r1(
+        equity          = equity,
+        cash            = cash,
+        positions       = positions,
+        pos_details     = pos_details,
+        pool            = pool,
+        chart_section   = chart_section,
+        news            = news,
+        market_ctx      = market_ctx,
+        pol_text        = pol_text,
+        pol_mimick      = pol_mimick,
+        gainers         = gainers,
+        ipos            = ipos,
+        hot_ipos        = hot_ipos,
+        triple_syms     = triple_syms,
+        top_collab      = top_collab,
+        inv_text        = inv_text,
+        short_note      = short_note,
+        spy_trend       = shared_state.get("spy_trend", "neutral"),
+        features        = features,
+        projections     = shared_state.get("last_projections", {}),
+    )
+    log(f"🧠 Prompt mode: {situation_mode.upper().replace('_',' ')}")
 
     log("🔵 Round 1 — Claude proposing...")
     log("🔴 Round 1 — Grok proposing...")
@@ -2028,14 +2032,14 @@ JSON: {{"strategy_name":"name","market_thesis":"brief","proposed_trades":[{{"act
 
     if c_ok:
         claude_r1 = safe_ask_claude(r1_prompt,
-            "You are Claude, disciplined quant trader. ONLY valid JSON under 500 chars.")
+            prompt_builder.build_claude_system())
     else:
         log("⚠️ Claude unhealthy — skipping Round 1 for Claude")
         claude_r1 = None
 
     if g_ok:
         grok_r1 = safe_ask_grok(r1_prompt,
-            "You are Grok, momentum trader with Twitter access. ONLY valid JSON under 500 chars.")
+            prompt_builder.build_grok_system())
     else:
         log("⚠️ Grok unhealthy — skipping Round 1 for Grok")
         grok_r1 = None
@@ -3134,35 +3138,22 @@ def run_premarket():
     ipo_syms     = [i["symbol"] for i in ipos[:5]]
     hot_ipos     = [i for i in ipos if abs(i.get("mom_5d", 0)) > 5]
 
-    research_prompt = f"""Pre-market research. Market opens in {mins_to_open} min.
-Budget: Claude=${pool['claude']:.2f} | Grok=${pool['grok']:.2f} | Reserve=${pool['reserve']:.2f} (untouchable)
-Performance: Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}
-
-MARKET: {market}
-NEWS (24h): {news[:200]}
-
-POLITICIAN TRADES: {pol_text[:200]}
-Top mimick: {pol_mimick}
-
-TOP INVESTORS (13F): {inv_text[:200]}
-
-RECENT IPOs (30-180 days old — high momentum potential):
-{[(i['symbol'], f"{i['days_old']}d old", f"mom={i['mom_5d']}%") for i in ipos[:5]]}
-Hot IPOs (>5% momentum): {[i['symbol'] for i in hot_ipos]}
-
-SMART MONEY:
-🔥 Triple confirmation: {triple_syms}
-⭐ Top collaborative: {top_collab}
-📈 Biggest gainers (>3%): {[(g['symbol'], f'+{g["change"]:.1f}%') for g in gainers[:5]]}
-
-INDICATORS + 5-LAYER PROJECTIONS (proj_high=TP target, proj_low=entry zone): {chart[:500]}
-
-Research tasks:
-1. Triple confirmation = highest priority
-2. Hot IPOs with strong momentum — good autonomous candidates
-3. Politician + investor combos aligned with technicals
-4. Biggest gainers → collaborative only
-Plain text 150 words."""
+    research_prompt = prompt_builder.build_premarket(
+        equity      = equity,
+        pool        = pool,
+        chart       = chart,
+        news        = news,
+        market      = market,
+        pol_text    = pol_text,
+        pol_mimick  = pol_mimick,
+        triple_syms = triple_syms,
+        top_collab  = top_collab,
+        gainers     = gainers,
+        ipos        = ipos,
+        hot_ipos    = hot_ipos,
+        inv_text    = inv_text,
+        projections = shared_state.get("last_projections", {}),
+    )
 
     try:
         c_research = ask_claude(research_prompt,
@@ -3249,52 +3240,24 @@ def run_afterhours():
         smart_ah    = intel_ah["smart_money"]
 
         # Claude reviews smart money for tomorrow
-        claude_ah_prompt = f"""AFTER-HOURS — You are CLAUDE reviewing smart money signals for TOMORROW.
-
-TODAY'S PERFORMANCE:
-P&L: ${pnl:+.2f} | Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}
-Positions held: {[p['symbol'] for p in positions]}
-
-NEW POLITICIAN FILINGS (just disclosed):
-{pol_text_ah[:400]}
-
-TOP INVESTOR MOVES (any new 13F updates):
-{inv_text_ah[:300]}
-
-TOMORROW'S SMART MONEY SETUP:
-Triple confirmation: {smart_ah.get("triple_confirmation", [])}
-Top collaborative: {smart_ah.get("top_collab", [])}
-
-ANALYSIS TASKS:
-1. Any NEW politician filings today that change tomorrow's outlook?
-2. Are politicians buying into weakness? (contrarian signal)
-3. Which smart money positions should we mirror tomorrow?
-4. Any politician SELLS to watch as warning signals?
-5. Recommend: hold overnight positions or go to cash?
-Plain text 180 words."""
+        claude_ah_prompt = prompt_builder.build_afterhours_claude(
+            pnl         = pnl,
+            positions   = positions,
+            pol_text    = pol_text_ah,
+            inv_text    = inv_text_ah,
+            smart_money = smart_ah,
+            spy_trend   = shared_state.get("spy_trend", "neutral"),
+        )
 
         # Grok reviews momentum for tomorrow
-        grok_ah_prompt = f"""AFTER-HOURS — You are GROK reviewing momentum signals for TOMORROW.
-
-TODAY'S PERFORMANCE:
-P&L: ${pnl:+.2f} | Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}
-
-AFTER-HOURS IPO ACTIVITY:
-{[(i["symbol"], f"mom={i['mom_5d']}%", f"price=${i['price']}") for i in ipos_ah[:6]]}
-
-AFTER-HOURS MOVERS:
-{[(g["symbol"], f'+{g["change"]:.1f}%') for g in gainers_ah[:5]]}
-
-NEWS: {news[:300]}
-
-ANALYSIS TASKS:
-1. Which IPOs are showing after-hours strength? (pre-market gap up likely)
-2. Twitter/X sentiment for tomorrow — fear or greed?
-3. Any earnings surprises affecting our universe?
-4. Which of today's losers might bounce tomorrow?
-5. Top 3 momentum plays for tomorrow's open
-6. Bearish watchlist update — any new short candidates?
-Plain text 180 words."""
+        grok_ah_prompt = prompt_builder.build_afterhours_grok(
+            pnl         = pnl,
+            positions   = positions,
+            ipos        = ipos_ah,
+            gainers     = gainers_ah,
+            news        = news,
+            spy_trend   = shared_state.get("spy_trend", "neutral"),
+        )
 
         claude_ah = ""
         grok_ah   = ""
