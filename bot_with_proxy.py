@@ -6,7 +6,7 @@ import requests
 import threading
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 ALPACA_KEY    = os.environ.get("ALPACA_KEY", "")
@@ -188,6 +188,45 @@ shared_state = {
 app = Flask(__name__)
 CORS(app)
 
+# ── Trade History Log ─────────────────────────────────────
+# Persists in memory; last 500 trades kept
+# Each entry: buy or sell with full context for performance review
+trade_history = []
+
+def record_trade(action, symbol, qty, price, notional, owner,
+                 confidence=None, reason=None, pnl_usd=None,
+                 pnl_pct=None, strategy=None, entry_price=None,
+                 spy_trend=None):
+    """
+    Record every buy/sell to trade_history for /history endpoint.
+    action  : 'buy' | 'sell' | 'short' | 'stop_loss' | 'take_profit' | 'trail_stop' | 'time_stop'
+    """
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    entry = {
+        "time":         datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "time_et":      now_et.strftime("%Y-%m-%d %H:%M ET"),
+        "action":       action,
+        "symbol":       symbol,
+        "qty":          qty,
+        "price":        round(float(price), 4) if price else None,
+        "notional":     round(float(notional), 2) if notional else None,
+        "owner":        owner,          # claude | grok | shared | bot
+        "confidence":   confidence,
+        "reason":       reason,
+        # Exit-only fields
+        "entry_price":  round(float(entry_price), 4) if entry_price else None,
+        "pnl_usd":      round(float(pnl_usd), 2) if pnl_usd is not None else None,
+        "pnl_pct":      round(float(pnl_pct) * 100, 2) if pnl_pct is not None else None,
+        "strategy":     strategy,       # A | B | autopilot
+        "spy_trend":    spy_trend or shared_state.get("spy_trend", "neutral"),
+        "equity_after": None,           # filled in async — best effort
+    }
+    trade_history.append(entry)
+    # Keep last 500
+    if len(trade_history) > 500:
+        trade_history.pop(0)
+    return entry
+
 def alpaca_get(path):
     headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
     res = requests.get(BASE_URL + path, headers=headers)
@@ -197,113 +236,6 @@ def alpaca_get(path):
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "bot": BOT_NAME})
-
-@app.route("/history")
-def history():
-    """
-    Full trade history endpoint for Claude analysis.
-    Visit: collaboration-production-cba3.up.railway.app/history
-    """
-    try:
-        account   = alpaca_get("/v2/account")
-        positions = alpaca_get("/v2/positions")
-        equity    = float(account["equity"])
-        start_cap = RULES["total_budget"]
-
-        # Get all orders last 90 days
-        end   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        start = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
-        orders_res = requests.get(
-            f"{BASE_URL}/v2/orders?status=all&limit=500&after={start}&direction=desc",
-            headers=headers
-        )
-        orders = orders_res.json() if orders_res.ok else []
-        filled = [o for o in orders if o.get("status") == "filled"]
-
-        # Symbol breakdown
-        symbols = {}
-        for o in filled:
-            sym = o["symbol"]
-            if sym not in symbols:
-                symbols[sym] = {"buys":0,"sells":0,"total_notional":0}
-            qty   = float(o.get("filled_qty",0))
-            price = float(o.get("filled_avg_price",0))
-            symbols[sym]["total_notional"] += round(qty*price,2)
-            if o["side"] == "buy":
-                symbols[sym]["buys"]  += 1
-            else:
-                symbols[sym]["sells"] += 1
-
-        # Portfolio history
-        port_hist = {}
-        try:
-            ph_res = requests.get(
-                f"{BASE_URL}/v2/account/portfolio/history?period=1M&timeframe=1D",
-                headers=headers
-            )
-            if ph_res.ok:
-                ph = ph_res.json()
-                port_hist = {
-                    "timestamps":  ph.get("timestamp",[]),
-                    "equity":      ph.get("equity",[]),
-                    "profit_loss": ph.get("profit_loss",[]),
-                }
-        except: pass
-
-        return jsonify({
-            "summary": {
-                "equity":        equity,
-                "cash":          float(account["cash"]),
-                "start_capital": start_cap,
-                "total_pnl":     round(equity - start_cap, 2),
-                "total_pnl_pct": round((equity-start_cap)/start_cap*100, 2),
-                "total_orders":  len(filled),
-                "symbols_count": len(symbols),
-                "analysis_note": "Upload this JSON to Claude for trade analysis",
-            },
-            "portfolio_history": port_hist,
-            "symbols_traded":    symbols,
-            "open_positions": [{
-                "symbol":      p["symbol"],
-                "pnl_pct":     round(float(p["unrealized_plpc"])*100,2),
-                "pnl_usd":     round(float(p["unrealized_pl"]),2),
-                "entry_price": float(p["avg_entry_price"]),
-                "current":     float(p["current_price"]),
-                "value":       float(p["market_value"]),
-                "owner":       "claude" if p["symbol"] in shared_state["claude_positions"]
-                               else "grok" if p["symbol"] in shared_state["grok_positions"]
-                               else "shared",
-                "strategy":    shared_state["position_exits"].get(p["symbol"],{}).get("strategy","A"),
-            } for p in positions],
-            "recent_orders": [{
-                "symbol":     o["symbol"],
-                "side":       o["side"],
-                "qty":        o.get("filled_qty"),
-                "price":      o.get("filled_avg_price"),
-                "notional":   round(float(o.get("filled_qty",0)) *
-                                   float(o.get("filled_avg_price",0)),2),
-                "type":       o.get("type"),
-                "filled_at":  o.get("filled_at","")[:19],
-                "status":     o.get("status"),
-            } for o in filled[:50]],
-            "bot_state": {
-                "ai_sleeping":      shared_state["ai_sleeping"],
-                "sleep_reason":     shared_state["sleep_reason"],
-                "autonomy_tier":    shared_state["autonomy_tier"],
-                "claude_wins":      shared_state["claude_win_days"],
-                "grok_wins":        shared_state["grok_win_days"],
-                "claude_total_pnl": shared_state["claude_total_pnl"],
-                "grok_total_pnl":   shared_state["grok_total_pnl"],
-                "claude_allocation":shared_state["claude_allocation"],
-                "grok_allocation":  shared_state["grok_allocation"],
-                "bearish_watchlist":shared_state["bearish_watchlist"],
-                "trend_scan":       shared_state.get("trend_scan_results",[])[:10],
-                "last_scan_time":   shared_state.get("trend_scan_time"),
-            }
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/stats")
 def stats():
@@ -360,6 +292,175 @@ def stats():
                           else "shared"}
                 for p in positions
             ]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/history")
+def history():
+    """
+    Full trade history — last N trades (default 100, max 500).
+    Query params:
+      ?limit=50        — return last N trades
+      ?symbol=NVDA     — filter by ticker
+      ?action=sell     — filter by action type
+      ?owner=claude    — filter by AI owner
+    """
+    try:
+        limit   = min(int(request.args.get("limit", 100)), 500)
+        symbol  = request.args.get("symbol", "").upper()
+        action  = request.args.get("action", "").lower()
+        owner   = request.args.get("owner", "").lower()
+
+        trades = list(reversed(trade_history))  # newest first
+
+        if symbol: trades = [t for t in trades if t.get("symbol") == symbol]
+        if action: trades = [t for t in trades if t.get("action","").startswith(action)]
+        if owner:  trades = [t for t in trades if t.get("owner") == owner]
+
+        trades = trades[:limit]
+
+        return jsonify({
+            "count":  len(trades),
+            "total_recorded": len(trade_history),
+            "trades": trades,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/performance")
+def performance():
+    """
+    Trading performance analytics derived from trade_history.
+    Returns win rate, avg P&L, best/worst trades, per-symbol breakdown,
+    per-AI breakdown, and trend of trade quality over time.
+    """
+    try:
+        sells = [t for t in trade_history if t.get("pnl_usd") is not None]
+        buys  = [t for t in trade_history if t.get("action") == "buy"]
+
+        total_trades  = len(sells)
+        wins          = [t for t in sells if t.get("pnl_usd", 0) > 0]
+        losses        = [t for t in sells if t.get("pnl_usd", 0) <= 0]
+        win_rate      = round(len(wins) / total_trades * 100, 1) if total_trades else 0
+        total_pnl     = round(sum(t.get("pnl_usd", 0) for t in sells), 2)
+        avg_win       = round(sum(t.get("pnl_usd", 0) for t in wins) / len(wins), 2) if wins else 0
+        avg_loss      = round(sum(t.get("pnl_usd", 0) for t in losses) / len(losses), 2) if losses else 0
+        profit_factor = round(abs(sum(t.get("pnl_usd",0) for t in wins)) /
+                              abs(sum(t.get("pnl_usd",0) for t in losses)), 2) if losses and wins else None
+
+        best_trade  = max(sells, key=lambda t: t.get("pnl_usd", 0), default=None)
+        worst_trade = min(sells, key=lambda t: t.get("pnl_usd", 0), default=None)
+
+        # Per-symbol breakdown
+        sym_stats = {}
+        for t in sells:
+            sym = t.get("symbol","?")
+            if sym not in sym_stats:
+                sym_stats[sym] = {"trades": 0, "wins": 0, "total_pnl": 0.0,
+                                  "avg_pnl_pct": [], "strategies": []}
+            sym_stats[sym]["trades"]    += 1
+            sym_stats[sym]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                sym_stats[sym]["wins"] += 1
+            if t.get("pnl_pct") is not None:
+                sym_stats[sym]["avg_pnl_pct"].append(t["pnl_pct"])
+            if t.get("strategy"):
+                sym_stats[sym]["strategies"].append(t["strategy"])
+
+        symbol_summary = {}
+        for sym, s in sym_stats.items():
+            symbol_summary[sym] = {
+                "trades":    s["trades"],
+                "wins":      s["wins"],
+                "win_rate":  round(s["wins"]/s["trades"]*100, 1) if s["trades"] else 0,
+                "total_pnl": round(s["total_pnl"], 2),
+                "avg_pnl_pct": round(sum(s["avg_pnl_pct"])/len(s["avg_pnl_pct"]), 2)
+                               if s["avg_pnl_pct"] else None,
+                "strategy_used": max(set(s["strategies"]), key=s["strategies"].count)
+                                 if s["strategies"] else None,
+            }
+
+        # Per-AI breakdown
+        ai_stats = {}
+        for t in sells:
+            owner = t.get("owner", "unknown")
+            if owner not in ai_stats:
+                ai_stats[owner] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            ai_stats[owner]["trades"]    += 1
+            ai_stats[owner]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                ai_stats[owner]["wins"] += 1
+
+        ai_summary = {}
+        for owner, s in ai_stats.items():
+            ai_summary[owner] = {
+                "trades":    s["trades"],
+                "wins":      s["wins"],
+                "win_rate":  round(s["wins"]/s["trades"]*100, 1) if s["trades"] else 0,
+                "total_pnl": round(s["total_pnl"], 2),
+            }
+
+        # Exit reason breakdown
+        reason_counts = {}
+        for t in sells:
+            r = t.get("action", "sell")
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+
+        # Strategy A vs B performance
+        strat_stats = {}
+        for t in sells:
+            s = t.get("strategy") or "unknown"
+            if s not in strat_stats:
+                strat_stats[s] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            strat_stats[s]["trades"]    += 1
+            strat_stats[s]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                strat_stats[s]["wins"] += 1
+
+        strat_summary = {}
+        for s, d in strat_stats.items():
+            strat_summary[s] = {
+                "trades":    d["trades"],
+                "win_rate":  round(d["wins"]/d["trades"]*100, 1) if d["trades"] else 0,
+                "total_pnl": round(d["total_pnl"], 2),
+            }
+
+        # SPY trend performance (were trades better in bull vs bear market?)
+        spy_stats = {}
+        for t in sells:
+            trend = t.get("spy_trend", "neutral")
+            if trend not in spy_stats:
+                spy_stats[trend] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            spy_stats[trend]["trades"]    += 1
+            spy_stats[trend]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                spy_stats[trend]["wins"] += 1
+
+        spy_summary = {
+            k: {"trades": v["trades"],
+                "win_rate": round(v["wins"]/v["trades"]*100,1) if v["trades"] else 0,
+                "total_pnl": round(v["total_pnl"],2)}
+            for k, v in spy_stats.items()
+        }
+
+        return jsonify({
+            "summary": {
+                "total_closed_trades": total_trades,
+                "total_buys":          len(buys),
+                "win_rate_pct":        win_rate,
+                "total_pnl":           total_pnl,
+                "avg_win":             avg_win,
+                "avg_loss":            avg_loss,
+                "profit_factor":       profit_factor,
+            },
+            "best_trade":      best_trade,
+            "worst_trade":     worst_trade,
+            "by_symbol":       symbol_summary,
+            "by_ai":           ai_summary,
+            "by_strategy":     strat_summary,
+            "by_exit_reason":  reason_counts,
+            "by_spy_trend":    spy_summary,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1512,6 +1613,11 @@ def check_exit_conditions(positions):
         if pnl_pct <= -RULES["exit_A_stop_loss"]:
             log(f"🛑 [{owner}] STOP LOSS {symbol} ({pnl_pct*100:.1f}%) strategy={strategy}")
             if smart_sell(symbol, "stop loss", pos):
+                record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                             float(pos.get("market_value", 0)), owner.lower(),
+                             reason="stop loss triggered", pnl_usd=pnl_usd,
+                             pnl_pct=pnl_pct, strategy=strategy,
+                             entry_price=entry_price)
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                 shared_state["position_exits"].pop(symbol, None)
@@ -1522,6 +1628,11 @@ def check_exit_conditions(positions):
             if pnl_pct >= RULES["exit_A_take_profit"]:
                 log(f"🎯 [A] [{owner}] FIXED TP {symbol} +{pnl_pct*100:.1f}% >= {RULES['exit_A_take_profit']*100:.0f}% | +${pnl_usd:.2f}")
                 if smart_sell(symbol, "strategy A take-profit", pos):
+                    record_trade("take_profit", symbol, pos.get("qty"), current_price,
+                                 float(pos.get("market_value", 0)), owner.lower(),
+                                 reason="strategy A fixed take-profit", pnl_usd=pnl_usd,
+                                 pnl_pct=pnl_pct, strategy="A",
+                                 entry_price=entry_price)
                     shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
@@ -1536,8 +1647,8 @@ def check_exit_conditions(positions):
                 shared_state["position_exits"][symbol]["peak_price"] = current_price
                 log(f"   [B] {symbol}: New peak ${current_price:.2f} (was ${old_peak:.2f}) | trailing stop = ${current_price*(1-trail_pct):.2f}")
 
-            peak_price   = shared_state["position_exits"][symbol].get("peak_price", current_price)
-            trail_stop   = peak_price * (1 - trail_pct)
+            peak_price     = shared_state["position_exits"][symbol].get("peak_price", current_price)
+            trail_stop     = peak_price * (1 - trail_pct)
             profit_at_peak = (peak_price - entry_price) / entry_price
 
             # Trailing activates only once position is +3% profitable
@@ -1548,6 +1659,11 @@ def check_exit_conditions(positions):
                     f"peak=${peak_price:.2f} trail=${trail_stop:.2f} current=${current_price:.2f} | "
                     f"+{pnl_pct*100:.1f}% | +${pnl_usd:.2f}")
                 if smart_sell(symbol, f"strategy B trailing stop (peak ${peak_price:.2f})", pos):
+                    record_trade("trail_stop", symbol, pos.get("qty"), current_price,
+                                 float(pos.get("market_value", 0)), owner.lower(),
+                                 reason=f"strategy B trailing stop peak=${peak_price:.2f}",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="B",
+                                 entry_price=entry_price)
                     shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
@@ -1560,6 +1676,11 @@ def check_exit_conditions(positions):
                         log(f"⏰ [B] [{owner}] TIME STOP {symbol} | "
                             f"{days_held} days held, only {pnl_pct*100:+.2f}% — freeing capital")
                         if smart_sell(symbol, f"strategy B time stop ({days_held} days)", pos):
+                            record_trade("time_stop", symbol, pos.get("qty"), current_price,
+                                         float(pos.get("market_value", 0)), owner.lower(),
+                                         reason=f"strategy B time stop {days_held} days held",
+                                         pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="B",
+                                         entry_price=entry_price)
                             shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                             shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                             shared_state["position_exits"].pop(symbol, None)
@@ -1973,6 +2094,9 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                         })
                         log(f"✅ LIMIT BUY [{owner}] {symbol} {shares} shares @ ${limit_price} "
                             f"(~${notional:.2f}) | conf={conf}% | {order['id'][:8]}...")
+                        record_trade("buy", symbol, shares, limit_price, notional,
+                                     owner, confidence=conf, reason="limit order",
+                                     strategy=trade.get("exit_strategy","A"))
                     else:
                         raise Exception("Calculated 0 shares")
                 else:
@@ -1983,6 +2107,9 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                     })
                     log(f"✅ MARKET BUY [{owner}] {symbol} ${notional:.2f} | "
                         f"conf={conf}% | fee≈${fee_est:.3f} | {order['id'][:8]}...")
+                    record_trade("buy", symbol, None, None, notional,
+                                 owner, confidence=conf, reason="market order",
+                                 strategy=trade.get("exit_strategy","A"))
 
                 remaining_cash -= notional; new_positions += 1
                 if owner == "claude" and symbol not in shared_state["claude_positions"]:
@@ -2048,6 +2175,8 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
             try:
                 alpaca("DELETE", f"/v2/positions/{symbol}")
                 log(f"✅ REAL SELL [{owner}] {symbol}")
+                record_trade("sell", symbol, None, None, None,
+                             owner, confidence=conf, reason="AI decision")
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                 pos_symbols.remove(symbol)
@@ -2271,6 +2400,11 @@ def run_autopilot(positions, pos_symbols, cash, equity):
             log(f"🎯 AUTOPILOT take-profit: {symbol} +{pnl_pct*100:.1f}%")
             try:
                 alpaca("DELETE", f"/v2/positions/{symbol}")
+                record_trade("take_profit", symbol, pos.get("qty"), float(pos.get("current_price",0)),
+                             float(pos.get("market_value",0)), "bot",
+                             reason="autopilot take-profit",
+                             pnl_usd=float(pos.get("unrealized_pl",0)),
+                             pnl_pct=pnl_pct, strategy="autopilot")
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                 log(f"✅ AUTOPILOT SOLD {symbol}")
@@ -2279,6 +2413,11 @@ def run_autopilot(positions, pos_symbols, cash, equity):
             log(f"🛑 AUTOPILOT stop-loss: {symbol} {pnl_pct*100:.1f}%")
             try:
                 alpaca("DELETE", f"/v2/positions/{symbol}")
+                record_trade("stop_loss", symbol, pos.get("qty"), float(pos.get("current_price",0)),
+                             float(pos.get("market_value",0)), "bot",
+                             reason="autopilot stop-loss",
+                             pnl_usd=float(pos.get("unrealized_pl",0)),
+                             pnl_pct=pnl_pct, strategy="autopilot")
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                 log(f"✅ AUTOPILOT SOLD {symbol}")
@@ -2338,6 +2477,9 @@ def run_autopilot(positions, pos_symbols, cash, equity):
                     "side": "buy", "type": "market", "time_in_force": "day",
                 })
                 log(f"✅ AUTOPILOT BUY {sym} ${notional:.2f} | {order['id'][:8]}...")
+                record_trade("buy", sym, None, None, notional, "bot",
+                             reason=f"autopilot score={best_score}",
+                             strategy="autopilot")
                 shared_state["claude_positions"].append(sym)  # Assign to Claude by default
             except Exception as e: log(f"❌ Autopilot buy {sym}: {e}")
     else:
@@ -2554,6 +2696,9 @@ Respond ONLY with JSON:
             log(f"🎯 [{p['owner']}] Auto take-profit: {p['symbol']} at +{p['pnl_pct']:.1f}%")
             try:
                 alpaca("DELETE", f"/v2/positions/{p['symbol']}")
+                record_trade("take_profit", p["symbol"], None, p["price"], p["value"],
+                             p["owner"].lower(), reason="low-cash auto take-profit",
+                             pnl_usd=p["pnl_usd"], pnl_pct=p["pnl_pct"]/100)
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != p["symbol"]]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != p["symbol"]]
                 log(f"✅ SOLD {p['symbol']} — profit locked")
@@ -2565,6 +2710,9 @@ Respond ONLY with JSON:
             log(f"🛑 [{p['owner']}] Auto stop-loss: {p['symbol']} at {p['pnl_pct']:.1f}%")
             try:
                 alpaca("DELETE", f"/v2/positions/{p['symbol']}")
+                record_trade("stop_loss", p["symbol"], None, p["price"], p["value"],
+                             p["owner"].lower(), reason="low-cash auto stop-loss",
+                             pnl_usd=p["pnl_usd"], pnl_pct=p["pnl_pct"]/100)
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != p["symbol"]]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != p["symbol"]]
                 log(f"✅ SOLD {p['symbol']} — loss cut")
@@ -2579,6 +2727,11 @@ Respond ONLY with JSON:
         log(f"   Grok reason:   {(grok_decision   or {}).get('sell_reason','')}")
         try:
             alpaca("DELETE", f"/v2/positions/{c_sell}")
+            sold_pos = next((p for p in pos_details if p["symbol"] == c_sell), {})
+            record_trade("sell", c_sell, None, sold_pos.get("price"), sold_pos.get("value"),
+                         sold_pos.get("owner","shared").lower(),
+                         reason=f"low-cash: both AIs agreed — {(claude_decision or {}).get('sell_reason','')}",
+                         pnl_usd=sold_pos.get("pnl_usd"), pnl_pct=(sold_pos.get("pnl_pct",0)/100 if sold_pos.get("pnl_pct") else None))
             shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != c_sell]
             shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != c_sell]
             log(f"✅ SOLD {c_sell} — cash freed up for better opportunity")
@@ -3797,6 +3950,11 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
         if pnl_pct <= -RULES["exit_A_stop_loss"]:
             log(f"🛑 AUTO STOP-LOSS {symbol} {pnl_pct*100:.1f}% — bot executing (AIs sleeping)")
             if smart_sell(symbol, "autonomous stop-loss", pos):
+                owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                             pos_value, owner, reason="autonomous stop-loss (AIs sleeping)",
+                             pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy=strategy,
+                             entry_price=entry_price)
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                 shared_state["position_exits"].pop(symbol, None)
@@ -3810,6 +3968,11 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
             if pnl_pct >= RULES["exit_A_take_profit"]:
                 log(f"🎯 AUTO TAKE-PROFIT [A] {symbol} +{pnl_pct*100:.1f}% — bot executing")
                 if smart_sell(symbol, "autonomous strategy A take-profit", pos):
+                    owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                    record_trade("take_profit", symbol, pos.get("qty"), current_price,
+                                 pos_value, owner, reason="autonomous strategy A take-profit",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="A",
+                                 entry_price=entry_price)
                     shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
@@ -3827,6 +3990,12 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
                     f"peak=${peak_price:.2f} stop=${trail_stop:.2f} "
                     f"current=${current_price:.2f} | +{pnl_pct*100:.1f}%")
                 if smart_sell(symbol, f"autonomous strategy B trailing stop", pos):
+                    owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                    record_trade("trail_stop", symbol, pos.get("qty"), current_price,
+                                 pos_value, owner,
+                                 reason=f"autonomous strategy B trailing stop peak=${peak_price:.2f}",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="B",
+                                 entry_price=entry_price)
                     shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
@@ -3840,6 +4009,12 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
                     if days_held >= RULES["exit_B_time_stop_days"] and pnl_pct < RULES["exit_B_trail_activates"]:
                         log(f"⏰ AUTO TIME STOP [B] {symbol} — {days_held}d held, only {pnl_pct*100:+.2f}%")
                         if smart_sell(symbol, f"autonomous time stop ({days_held}d)", pos):
+                            owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                            record_trade("time_stop", symbol, pos.get("qty"), current_price,
+                                         pos_value, owner,
+                                         reason=f"autonomous time stop {days_held} days held",
+                                         pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="B",
+                                         entry_price=entry_price)
                             shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                             shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                             shared_state["position_exits"].pop(symbol, None)
