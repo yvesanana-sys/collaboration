@@ -3225,7 +3225,7 @@ def run_afterhours():
                 actual_h = float(p.get("high_of_day", p.get("current_price", 0)))
                 actual_l = float(p.get("low_of_day",  p.get("current_price", 0)))
                 if actual_h > 0 and actual_l > 0:
-                    track_projection_accuracy(sym, actual_h, actual_l, shared_state)
+                    track_projection_accuracy(sym, actual_h, actual_l)
             if shared_state["proj_total_count"] > 0:
                 log(f"📐 Projection accuracy: "
                     f"{shared_state['proj_hit_count']}/{shared_state['proj_total_count']} = "
