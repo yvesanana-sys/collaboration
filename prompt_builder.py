@@ -631,21 +631,37 @@ Plain text 180 words."""
         return prompt
 
     def build_afterhours_grok(self, pnl, positions, ipos,
-                               gainers, news, spy_trend):
+                               gainers, news, spy_trend,
+                               pol_text="", pol_mimick=None):
         """
         Build Grok's after-hours momentum review prompt.
+        Now includes Capitol Trades politician data — Grok cross-references
+        politician buys against momentum setups for tomorrow's watchlist.
         """
-        ai_persona = self.memory.get_ai_persona("grok")
-        lessons    = self.memory.format_for_prompt(
+        ai_persona  = self.memory.get_ai_persona("grok")
+        lessons     = self.memory.format_for_prompt(
             situation=self._last_situation, spy_trend=spy_trend
         )
+        pol_mimick  = pol_mimick or []
 
-        prompt = f"""AFTER-HOURS — GROK reviewing momentum signals for TOMORROW.
+        # Build politician section — highlight any overlap with after-hours movers
+        gainer_syms = {g["symbol"] for g in gainers}
+        pol_overlap = [s for s in pol_mimick if s in gainer_syms]
+
+        pol_section = ""
+        if pol_text and pol_text.strip() and pol_text != "  No politician trade data available":
+            pol_section = f"""
+POLITICIAN TRADES (Capitol Trades — filed recently):
+{pol_text[:300]}
+Top mimick candidates: {pol_mimick}
+{f"⚡ OVERLAP — politicians buying today's movers: {pol_overlap}" if pol_overlap else ""}"""
+
+        prompt = f"""AFTER-HOURS — GROK reviewing momentum + smart money for TOMORROW.
 
 TODAY'S RESULTS:
 P&L: ${pnl:+.2f} | SPY: {spy_trend.upper()}
 {f"Your edge: {ai_persona}" if ai_persona else ""}
-
+{pol_section}
 AFTER-HOURS IPO ACTIVITY:
 {[(i["symbol"], f"mom={i['mom_5d']}%", f"price=${i['price']}") for i in ipos[:6]]}
 
@@ -658,11 +674,12 @@ NEWS: {news[:300]}
 
 ANALYSIS TASKS:
 1. Which IPOs show after-hours strength? (pre-market gap up likely)
-2. Twitter/X sentiment for tomorrow — fear or greed?
-3. Any earnings surprises affecting our universe?
-4. Which losers might bounce tomorrow?
-5. Top 3 momentum plays for tomorrow's open
-6. Any new short candidates for bearish watchlist?
+2. Any politician buys overlapping with today's movers? (double signal)
+3. Twitter/X sentiment for tomorrow — fear or greed?
+4. Any earnings surprises affecting our universe?
+5. Which losers might bounce tomorrow?
+6. Top 3 momentum plays for tomorrow's open — prioritize politician + momentum combos
+7. Any new short candidates for bearish watchlist?
 Plain text 180 words."""
 
         return prompt
