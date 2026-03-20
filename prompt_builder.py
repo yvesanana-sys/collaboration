@@ -439,11 +439,12 @@ class PromptBuilder:
                  pol_text, pol_mimick, gainers, ipos,
                  hot_ipos, triple_syms, top_collab, inv_text,
                  short_note, spy_trend, features,
-                 projections=None):
+                 projections=None,
+                 crypto_context: str = ""):   # ← NEW: unified crypto section
         """
         Build the Round 1 collaborative session prompt.
         Situation-aware, projection-informed, memory-injected.
-        Replaces the hardcoded context + r1_prompt in collaborative_session().
+        Now includes optional crypto section — one big call instead of two.
         """
         self._cycle_count += 1
 
@@ -490,6 +491,17 @@ class PromptBuilder:
             top_collab, inv_text, chart_section
         )
 
+        # ── Crypto section (unified — avoids separate AI call) ──
+        crypto_block = ""
+        if crypto_context:
+            crypto_block = f"""
+=== 🪙 CRYPTO (Binance.US — same call, no extra cost) ===
+{crypto_context}
+CRYPTO TASK: Alongside stock proposals, include optional crypto_trades.
+Rules: min 2.5% profit | -4% stop | 72h max hold | LIMIT orders only | VIABLE range only
+JSON crypto_trades field: [{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.0,"confidence":80,"entry_target":95000.0,"tp_target":97500.0,"rationale":"brief"}}]
+Leave crypto_trades empty [] if no good setup — never force a crypto trade."""
+
         # 7. Assemble the full prompt
         prompt = f"""{situation_header}
 
@@ -509,7 +521,7 @@ Trading Pool: ${pool['trading']:.2f}
 {proj_text}
 
 {f"=== {lessons} ===" if lessons else ""}
-
+{crypto_block}
 === YOUR TASK [{mode.upper().replace('_',' ')} MODE] ===
 FOCUS: {focus}
 SPY: {spy_trend.upper()} {'— NO NEW BUYS' if spy_trend == 'bear' else '— Full trading active'}
@@ -684,7 +696,38 @@ Plain text 180 words."""
 
         return prompt
 
-    # ── BUILD SYSTEM PROMPTS (persona-aware) ────────────────
+    # ── BUILD CRYPTO CONTEXT (for unified R1 call) ──────────
+    def build_crypto_context(self, wallet_summary: str = "",
+                              crypto_pool: float = 0,
+                              crypto_proj_text: str = "",
+                              crypto_holdings: str = "",
+                              crypto_stats: str = "",
+                              stock_cross_ref: str = "") -> str:
+        """
+        Build the crypto section appended to build_r1().
+        Keeps crypto decisions in the SAME AI call as stocks —
+        zero extra API cost, full shared context.
+        Returns empty string if nothing to show.
+        """
+        if not crypto_proj_text and not wallet_summary:
+            return ""
+
+        parts = []
+        if wallet_summary:
+            parts.append(wallet_summary)
+        if crypto_pool > 0:
+            parts.append(f"Spendable USDT: ${crypto_pool:.2f}")
+        if crypto_holdings:
+            parts.append(crypto_holdings)
+        if crypto_stats:
+            parts.append(f"24h movers: {crypto_stats}")
+        if crypto_proj_text:
+            parts.append(crypto_proj_text)
+        if stock_cross_ref:
+            parts.append(stock_cross_ref)
+
+        return "\n".join(p for p in parts if p.strip())
+
     def build_claude_system(self):
         """Claude's system prompt — evolves with performance."""
         persona = self.memory.get_ai_persona("claude")
