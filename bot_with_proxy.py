@@ -1088,28 +1088,287 @@ def get_market_context():
         return f"  Market error: {e}"
 
 
+
+# ── Capitol Trades Watchlist ──────────────────────────────────
+# High-signal politicians ranked by trading volume + tech focus.
+# URL: https://www.capitoltrades.com/politicians/{ID}
+# Add/remove politicians here — no other code changes needed.
+CAPITOL_TRADES_POLITICIANS = {
+    "P000197": {"name": "Nancy Pelosi",         "party": "D", "focus": "tech"},
+    "M001243": {"name": "Dave McCormick",        "party": "R", "focus": "broad"},
+    "F000110": {"name": "Cleo Fields",           "party": "D", "focus": "broad"},
+    "F000472": {"name": "Scott Franklin",        "party": "R", "focus": "broad"},
+    "M001236": {"name": "Tim Moore",             "party": "R", "focus": "broad"},
+    "P000608": {"name": "Scott Peters",          "party": "D", "focus": "tech"},
+    "B001292": {"name": "Don Beyer",             "party": "D", "focus": "broad"},
+    "C001047": {"name": "Shelley Moore Capito",  "party": "R", "focus": "energy"},
+    "H000273": {"name": "John Hickenlooper",     "party": "D", "focus": "tech"},
+    "M001234": {"name": "Kelly Morrison",        "party": "D", "focus": "broad"},
+}
+
+# Tickers always worth tracking regardless of universe
+ALWAYS_TRACK_TICKERS = {
+    "NVDA", "AAPL", "MSFT", "AMZN", "TSLA", "META", "GOOGL",
+    "PLTR", "AMD", "AVGO", "TSM", "NFLX", "CRM", "ORCL",
+}
+
+def _parse_capitoltrades_page(html):
+    """
+    Parse a Capitol Trades politician page HTML into structured trade dicts.
+    Returns list of trade dicts:
+      {"politician", "party", "ticker", "action", "size", "traded_date", "filed_date", "filed_after_days"}
+    """
+    import re
+    trades = []
+
+    # Find the trade table rows — each row has: issuer | published | traded | filed_after | type | size
+    # Pattern matches ticker symbols like NVDA:US, AAPL:US from the issuer column
+    ticker_pattern  = re.compile(r'([A-Z]{1,5}):US')
+    # Match buy/sell type
+    type_pattern    = re.compile(r'\|\s*(buy|sell)\s*\|', re.IGNORECASE)
+    # Match size ranges like 100K–250K, 1M–5M, 1K–15K
+    size_pattern    = re.compile(r'(\d+[KkMm][\–\-]\d+[KkMm]|\d+[KkMm])')
+    # Match dates like "16 Jan  2026" or "2026-01-16"
+    date_pattern    = re.compile(r'(\d{1,2}\s+\w{3}\s+\d{4}|\d{4}-\d{2}-\d{2})')
+    # Match "days  N" for filed_after
+    days_pattern    = re.compile(r'days\s+(\d+)')
+
+    # Split by table row delimiter and parse each
+    rows = html.split('|')
+    i = 0
+    while i < len(rows):
+        row = rows[i].strip()
+        # Look for ticker in this segment
+        ticker_match = ticker_pattern.search(row)
+        if ticker_match:
+            ticker = ticker_match.group(1)
+            # Collect the next few cells
+            window = " | ".join(rows[i:i+8])
+            action_match = type_pattern.search(window)
+            size_match   = size_pattern.search(window)
+            dates        = date_pattern.findall(window)
+            days_match   = days_pattern.search(window)
+
+            if action_match:
+                action       = action_match.group(1).lower()
+                size         = size_match.group(0) if size_match else "unknown"
+                traded_date  = dates[1] if len(dates) > 1 else (dates[0] if dates else "")
+                filed_date   = dates[0] if dates else ""
+                filed_days   = int(days_match.group(1)) if days_match else 999
+
+                trades.append({
+                    "ticker":           ticker,
+                    "action":           action,
+                    "size":             size,
+                    "traded_date":      traded_date,
+                    "filed_date":       filed_date,
+                    "filed_after_days": filed_days,
+                })
+        i += 1
+
+    return trades
+
+def _fetch_politician_trades(pol_id, pol_info, cutoff_days=60):
+    """
+    Fetch and parse one politician's recent trades from Capitol Trades.
+    Returns list of normalized trade dicts or [] on failure.
+    cutoff_days: only return trades filed within this many days
+    """
+    url = f"https://www.capitoltrades.com/politicians/{pol_id}"
+    try:
+        headers = {
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0.0.0 Safari/537.36"),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        resp = requests.get(url, headers=headers, timeout=12)
+        if resp.status_code != 200:
+            return []
+
+        raw_trades = _parse_capitoltrades_page(resp.text)
+
+        result = []
+        for t in raw_trades:
+            # Filter by recency
+            if t["filed_after_days"] > cutoff_days:
+                continue
+            result.append({
+                "politician": pol_info["name"],
+                "party":      pol_info["party"],
+                "ticker":     t["ticker"],
+                "action":     t["action"],
+                "size":       t["size"],
+                "filed":      t["filed_date"],
+                "traded":     t["traded_date"],
+                "days_lag":   t["filed_after_days"],
+                "source":     "capitoltrades",
+            })
+        return result
+
+    except Exception:
+        return []
+
+def _fetch_recent_trades_feed(cutoff_days=30):
+    """
+    Fetch the main /trades feed from Capitol Trades — catches ALL politicians,
+    not just the ones in our watchlist. Returns trades filed recently across
+    the entire congress that match our universe or always-track tickers.
+    """
+    url = "https://www.capitoltrades.com/trades"
+    try:
+        headers = {
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0.0.0 Safari/537.36"),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        resp = requests.get(url, headers=headers, timeout=12)
+        if resp.status_code != 200:
+            return []
+
+        import re
+        trades = []
+        # Parse politician name from links like /politicians/P000197
+        pol_name_pattern = re.compile(
+            r'\[([^\]]+)\]\(https://www\.capitoltrades\.com/politicians/([A-Z0-9]+)\)'
+        )
+        ticker_pattern = re.compile(r'([A-Z]{1,5}):US')
+        type_pattern   = re.compile(r'\|\s*(buy|sell)\s*\|', re.IGNORECASE)
+        size_pattern   = re.compile(r'(\d+[KkMm][\–\-]\d+[KkMm])')
+        days_pattern   = re.compile(r'days\s+(\d+)')
+        date_pattern   = re.compile(r'(\d{1,2}\s+\w{3}\s+\d{4})')
+
+        rows = resp.text.split('\n')
+        for row in rows:
+            ticker_match = ticker_pattern.search(row)
+            if not ticker_match:
+                continue
+            ticker = ticker_match.group(1)
+            # Only process tickers we care about
+            all_tickers = set(RULES["universe"]) | ALWAYS_TRACK_TICKERS
+            if ticker not in all_tickers:
+                continue
+
+            action_match = type_pattern.search(row)
+            if not action_match:
+                continue
+
+            days_match = days_pattern.search(row)
+            filed_days = int(days_match.group(1)) if days_match else 999
+            if filed_days > cutoff_days:
+                continue
+
+            size_match = size_pattern.search(row)
+            date_match = date_pattern.search(row)
+            pol_match  = pol_name_pattern.search(row)
+
+            trades.append({
+                "politician": pol_match.group(1) if pol_match else "Unknown",
+                "party":      "?",
+                "ticker":     ticker,
+                "action":     action_match.group(1).lower(),
+                "size":       size_match.group(0) if size_match else "unknown",
+                "filed":      date_match.group(0) if date_match else "",
+                "traded":     "",
+                "days_lag":   filed_days,
+                "source":     "capitoltrades_feed",
+            })
+
+        return trades
+
+    except Exception:
+        return []
+
 def get_politician_trades():
     """
-    Get recent politician stock trades using Grok's real-time web access.
-    Grok can search the web for latest congressional trading disclosures.
-    This bypasses Railway network restrictions on external APIs.
+    Fetch real congressional stock trades directly from Capitol Trades.
+    Strategy:
+      1. Fetch the main /trades feed — catches ALL congress members,
+         filtered to our universe + always-track tickers, filed last 30 days.
+      2. Fetch individual pages for our top watchlist politicians (Pelosi etc.)
+         to get their full recent history even if not in today's feed.
+      3. Deduplicate and return clean structured data.
+
+    Zero Grok API calls — direct HTTP scraping.
+    Falls back to Grok if Capitol Trades is unreachable.
     """
+    all_trades = []
+    sources_ok = []
+
+    # ── Strategy 1: Main trades feed (all politicians, our tickers) ──
+    try:
+        feed_trades = _fetch_recent_trades_feed(cutoff_days=30)
+        if feed_trades:
+            all_trades.extend(feed_trades)
+            sources_ok.append(f"feed:{len(feed_trades)}")
+    except Exception as e:
+        log(f"⚠️ Capitol Trades feed: {e}")
+
+    # ── Strategy 2: Individual watchlist politicians ──────────────
+    # Only fetch top 5 to keep startup time reasonable (parallel would be ideal)
+    # Priority order: highest volume / most followed first
+    priority_pols = list(CAPITOL_TRADES_POLITICIANS.items())[:5]
+    for pol_id, pol_info in priority_pols:
+        try:
+            pol_trades = _fetch_politician_trades(pol_id, pol_info, cutoff_days=45)
+            if pol_trades:
+                all_trades.extend(pol_trades)
+                sources_ok.append(f"{pol_info['name'].split()[1]}:{len(pol_trades)}")
+            time.sleep(0.3)  # Polite rate limiting
+        except Exception:
+            pass
+
+    # ── Deduplicate ───────────────────────────────────────────────
+    seen = set()
+    unique_trades = []
+    for t in all_trades:
+        key = (t["politician"], t["ticker"], t["action"], t.get("traded",""))
+        if key not in seen:
+            seen.add(key)
+            unique_trades.append(t)
+
+    # ── Filter to actionable tickers only ────────────────────────
+    all_tickers = set(RULES["universe"]) | ALWAYS_TRACK_TICKERS
+    actionable  = [t for t in unique_trades if t["ticker"] in all_tickers]
+
+    if actionable:
+        log(f"🏛️ Capitol Trades: {len(actionable)} trades found "
+            f"({len(unique_trades)} total) | sources: {', '.join(sources_ok)}")
+
+        # Build summary text
+        lines = []
+        for t in sorted(actionable, key=lambda x: x.get("days_lag", 99))[:15]:
+            icon = "🟢" if t["action"] == "buy" else "🔴"
+            lines.append(
+                f"  {icon} [{t['party']}] {t['politician']}: "
+                f"{t['action'].upper()} {t['ticker']} "
+                f"{t['size']} (filed {t['filed']}, {t['days_lag']}d lag)"
+            )
+
+        # Count buy pressure on each ticker
+        buy_counts = {}
+        for t in actionable:
+            if t["action"] == "buy":
+                buy_counts[t["ticker"]] = buy_counts.get(t["ticker"], 0) + 1
+        if buy_counts:
+            top_buys = sorted(buy_counts.items(), key=lambda x: -x[1])[:5]
+            log(f"🏛️ Top politician buys: {top_buys}")
+
+        return "\n".join(lines), actionable
+
+    # ── Fallback: Grok if Capitol Trades completely unreachable ──
+    log("⚠️ Capitol Trades unreachable — falling back to Grok web search")
     try:
         universe_str = ", ".join(RULES["universe"])
-        prompt = f"""Search for the most recent US politician/congress member stock trades 
-filed in the last 30 days. Focus on these stocks if mentioned: {universe_str}
-Also include any trades in NVDA, AAPL, MSFT, AMZN, TSLA, META, GOOGL.
-
-Return ONLY a JSON object:
-{{"trades": [
-  {{"politician": "Name", "party": "D/R", "ticker": "SYMBOL", "action": "buy/sell", "size": "$1k-$15k", "filed": "YYYY-MM-DD"}}
-], "summary": "brief overview of trends"}}
-If no data found return {{"trades": [], "summary": "no recent data"}}"""
-
-        raw = ask_grok(prompt,
-            "You are a financial research assistant with web access. Search for recent US congressional stock trades. Return ONLY valid JSON.")
+        prompt = (f"Search for US politician stock trades filed last 30 days. "
+                  f"Focus on: {universe_str}, NVDA, AAPL, MSFT, AMZN, TSLA, META, GOOGL. "
+                  f'Return ONLY JSON: {{"trades": [{{"politician":"Name","party":"D/R",'
+                  f'"ticker":"SYM","action":"buy/sell","size":"$1k-$15k","filed":"YYYY-MM-DD"}}],'
+                  f'"summary":"brief"}}')
+        raw    = ask_grok(prompt,
+            "Financial research assistant. Search congressional trades. ONLY valid JSON.")
         result = parse_json(raw)
-
         if result and result.get("trades"):
             trades = result["trades"]
             lines  = [
@@ -1118,16 +1377,11 @@ If no data found return {{"trades": [], "summary": "no recent data"}}"""
                 f"{t.get('size','')} ({t.get('filed','')})"
                 for t in trades[:12]
             ]
-            summary = result.get("summary", "")
-            if summary:
-                log(f"🏛️ Politician trade summary: {summary[:100]}")
             return "\n".join(lines), trades
-
-        return "  No recent politician trades found via Grok", []
-
     except Exception as e:
-        log(f"⚠️ Politician trades via Grok failed: {e}")
-        return "  Politician trade data unavailable", []
+        log(f"⚠️ Grok fallback also failed: {e}")
+
+    return "  No politician trade data available", []
 
 def analyze_politician_signals(trades, chart_section):
     """
@@ -3238,6 +3492,7 @@ def run_afterhours():
         ipos_ah     = intel_ah.get("ipos", [])
         gainers_ah  = intel_ah["gainers"]
         smart_ah    = intel_ah["smart_money"]
+        pol_mimick_ah = intel_ah.get("pol_signals", {}).get("top_mimick", [])
 
         # Claude reviews smart money for tomorrow
         claude_ah_prompt = prompt_builder.build_afterhours_claude(
@@ -3249,7 +3504,7 @@ def run_afterhours():
             spy_trend   = shared_state.get("spy_trend", "neutral"),
         )
 
-        # Grok reviews momentum for tomorrow
+        # Grok reviews momentum + politician overlap for tomorrow
         grok_ah_prompt = prompt_builder.build_afterhours_grok(
             pnl         = pnl,
             positions   = positions,
@@ -3257,6 +3512,8 @@ def run_afterhours():
             gainers     = gainers_ah,
             news        = news,
             spy_trend   = shared_state.get("spy_trend", "neutral"),
+            pol_text    = pol_text_ah,
+            pol_mimick  = pol_mimick_ah,
         )
 
         claude_ah = ""
