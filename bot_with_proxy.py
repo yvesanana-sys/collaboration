@@ -199,6 +199,10 @@ shared_state = {
     "stops_fired_today":    0,       # Count of stop-losses fired while sleeping
     "sleeping_strategies":  {},      # Full exit strategies stored before sleep
     "ai_notes":             {},      # AI notes per position for bot to follow
+    # ── AI Custom Wake Instructions ───────────────────────────
+    # AIs write these before sleeping — bot checks every cycle
+    # Format: list of condition dicts the bot evaluates autonomously
+    "ai_wake_instructions": [],      # [{type, symbol, threshold, reason, priority}]
     # ── Trading Brief System ──────────────────────────────────
     "trading_brief": {
         "account": {
@@ -353,6 +357,7 @@ def stats():
             "sleep_reason":       shared_state["sleep_reason"],
             "wake_reason":        shared_state["wake_reason"],
             "stops_fired_today":  shared_state["stops_fired_today"],
+            "ai_wake_instructions": shared_state.get("ai_wake_instructions", []),
             "cash_thresholds":    get_cash_thresholds(equity),
             "can_short":          features["can_short"],
             "short_progress":    features["short_progress_pct"],
@@ -4119,7 +4124,12 @@ JSON (keep under 600 chars):
   "claude_watchlist": [
     {{"symbol":"TICK","why":"brief","entry_max":0,"strategy":"A/B","confidence":85}}
   ],
-  "account_notes": "any special instructions for bot"
+  "account_notes": "any special instructions for bot",
+  "wake_instructions": [
+    {{"type":"price_below","symbol":"NVDA","threshold":170.0,"reason":"approaching support — reassess","priority":"high"}},
+    {{"type":"pnl_above","symbol":"PLTR","threshold":5.5,"reason":"near TP — may want to take profit early","priority":"normal"}},
+    {{"type":"time_after","threshold":"14:30","reason":"reassess before power hour","priority":"normal"}}
+  ]
 }}"""
 
     # ── PHASE 2: Grok writes momentum + watchlist brief ──────
@@ -4246,12 +4256,40 @@ JSON (keep under 600 chars):
             shared_state["sleeping_strategies"][sym]["ai_notes"] = notes.get("special_rule","")
             shared_state["sleeping_strategies"][sym]["conviction"] = notes.get("conviction","medium")
 
+    # ── Store AI custom wake instructions ─────────────────────
+    # Collect from both Claude and Grok briefs
+    all_wake_instrs = []
+    for brief_src in [claude_brief, grok_brief]:
+        if isinstance(brief_src, dict):
+            instrs = brief_src.get("wake_instructions", [])
+            if isinstance(instrs, list):
+                all_wake_instrs.extend(instrs)
+
+    if all_wake_instrs:
+        # Deduplicate by type+symbol combo
+        seen_keys = set()
+        unique_instrs = []
+        for instr in all_wake_instrs:
+            key = (instr.get("type"), instr.get("symbol",""), instr.get("threshold"))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_instrs.append(instr)
+        shared_state["ai_wake_instructions"] = unique_instrs
+        log(f"🤖 AI wrote {len(unique_instrs)} custom wake instruction(s):")
+        for instr in unique_instrs:
+            log(f"   → [{instr.get('priority','normal').upper()}] "
+                f"{instr.get('type')} {instr.get('symbol','')} "
+                f"@ {instr.get('threshold')} — {instr.get('reason','')[:60]}")
+    else:
+        shared_state["ai_wake_instructions"] = []
+
     log(f"📋 TRADING BRIEF COMPLETE:")
     log(f"   Market bias: {shared_state['trading_brief']['account']['market_bias'].upper()}")
     log(f"   Risk level:  {shared_state['trading_brief']['account']['risk_level'].upper()}")
     log(f"   Watchlist:   {[w['symbol'] for w in merged_watchlist]}")
     log(f"   Collab targets: {[t.get('symbol') for t in collab_targets]}")
     log(f"   Position rules: {list(merged_pos_notes.keys())}")
+    log(f"   Wake instructions: {len(shared_state['ai_wake_instructions'])}")
     log(f"   Bot notes: {shared_state['trading_brief']['account']['brief_notes'][:100]}")
     log("=" * 55)
 
@@ -4439,12 +4477,18 @@ def ai_sleep(reason="trades executed — waiting for cash threshold"):
     log(f"😴 AIs going to SLEEP — {reason}")
     log(f"   Bot running autonomously with stored strategies")
     log(f"   Positions covered: {list(shared_state['sleeping_strategies'].keys()) or 'none'}")
+    instrs = shared_state.get("ai_wake_instructions", [])
+    if instrs:
+        log(f"   🤖 Custom wake triggers ({len(instrs)}):")
+        for i in instrs:
+            log(f"      • {i.get('type')} {i.get('symbol','')} @ {i.get('threshold')} — {i.get('reason','')[:50]}")
     log(f"   Wake conditions:")
     log(f"     1. Cash crosses active threshold")
     log(f"     2. All positions closed + cash available")
     log(f"     3. 2+ stop-losses fire (market emergency)")
     log(f"     4. 8:30am premarket (always)")
     log(f"     5. SPY drops >2% suddenly (market crash guard)")
+    log(f"     6. AI custom instructions ({len(instrs)} active)")
 
 def ai_wake(reason):
     """Wake both AIs — they resume full analysis and decision making."""
@@ -4507,6 +4551,99 @@ def check_wake_conditions(cash, equity, positions, spy_change=0):
     # ── WAKE CONDITION 4: SPY flash crash guard ───────────────
     if spy_change <= -2.0:
         return True, f"EMERGENCY — SPY dropped {spy_change:.1f}% (flash crash guard)"
+
+    # ── WAKE CONDITION 5: AI custom wake instructions ─────────
+    instr_wake, instr_reason = check_ai_wake_instructions(positions, cash, equity)
+    if instr_wake:
+        return True, instr_reason
+
+    return False, None
+
+def check_ai_wake_instructions(positions, cash, equity):
+    """
+    Check custom wake conditions written by the AIs before sleeping.
+    Pure logic — no AI calls. Bot evaluates each instruction autonomously.
+
+    Supported instruction types:
+      price_above:    wake if symbol price > threshold
+      price_below:    wake if symbol price < threshold
+      pnl_above:      wake if position P&L% > threshold (e.g. near TP)
+      pnl_below:      wake if position P&L% < threshold (e.g. near stop)
+      cash_above:     wake if cash > threshold (deposit detected)
+      time_after:     wake after a specific time (HH:MM ET)
+      crypto_move:    wake if BTC/ETH moves > threshold% in either direction
+      spy_above:      wake if SPY crosses above price threshold
+      spy_below:      wake if SPY crosses below price threshold
+    """
+    instructions = shared_state.get("ai_wake_instructions", [])
+    if not instructions:
+        return False, None
+
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    pos_map = {p["symbol"]: p for p in positions}
+
+    for instr in instructions:
+        itype     = instr.get("type", "")
+        symbol    = instr.get("symbol", "")
+        threshold = instr.get("threshold", 0)
+        reason    = instr.get("reason", "AI wake instruction triggered")
+        priority  = instr.get("priority", "normal")
+
+        try:
+            # ── Price conditions ──────────────────────────────
+            if itype == "price_above" and symbol:
+                pos = pos_map.get(symbol)
+                if pos and float(pos["current_price"]) >= threshold:
+                    return True, f"🤖 AI instruction: {symbol} above ${threshold} — {reason}"
+
+            elif itype == "price_below" and symbol:
+                pos = pos_map.get(symbol)
+                if pos and float(pos["current_price"]) <= threshold:
+                    return True, f"🤖 AI instruction: {symbol} below ${threshold} — {reason}"
+
+            # ── P&L conditions ────────────────────────────────
+            elif itype == "pnl_above" and symbol:
+                pos = pos_map.get(symbol)
+                if pos and float(pos["unrealized_plpc"]) * 100 >= threshold:
+                    return True, f"🤖 AI instruction: {symbol} P&L +{threshold}% reached — {reason}"
+
+            elif itype == "pnl_below" and symbol:
+                pos = pos_map.get(symbol)
+                if pos and float(pos["unrealized_plpc"]) * 100 <= threshold:
+                    return True, f"🤖 AI instruction: {symbol} P&L {threshold}% hit — {reason}"
+
+            # ── Cash condition ────────────────────────────────
+            elif itype == "cash_above":
+                if cash >= threshold:
+                    return True, f"🤖 AI instruction: cash ${cash:.2f} > ${threshold} — {reason}"
+
+            # ── Time condition ────────────────────────────────
+            elif itype == "time_after":
+                # threshold is "HH:MM" string
+                try:
+                    h, m = str(threshold).split(":")
+                    target = now_et.replace(hour=int(h), minute=int(m),
+                                           second=0, microsecond=0)
+                    if now_et >= target:
+                        # Remove this instruction after triggering (one-shot)
+                        shared_state["ai_wake_instructions"].remove(instr)
+                        return True, f"🤖 AI instruction: scheduled wake at {threshold} ET — {reason}"
+                except Exception:
+                    pass
+
+            # ── SPY conditions ────────────────────────────────
+            elif itype in ("spy_above", "spy_below"):
+                try:
+                    spy_trend, spy_price, _, spy_chg = get_spy_trend()
+                    if itype == "spy_above" and spy_price >= threshold:
+                        return True, f"🤖 AI instruction: SPY ${spy_price:.2f} above ${threshold} — {reason}"
+                    elif itype == "spy_below" and spy_price <= threshold:
+                        return True, f"🤖 AI instruction: SPY ${spy_price:.2f} below ${threshold} — {reason}"
+                except Exception:
+                    pass
+
+        except Exception as ie:
+            log(f"⚠️ Wake instruction check error ({itype}): {ie}")
 
     return False, None
 
