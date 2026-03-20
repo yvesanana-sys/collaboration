@@ -1837,7 +1837,7 @@ def ask_grok(prompt, system="You are a trading AI. Respond with ONLY a short val
         res = http.post(
             "https://api.x.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"},
-            json={"model": "grok-3-mini", "max_tokens": max_tokens,
+            json={"model": "grok-4-1-fast-non-reasoning", "max_tokens": max_tokens,
                   "messages": [{"role": "system", "content": system},
                                 {"role": "user", "content": prompt}]},
         )
