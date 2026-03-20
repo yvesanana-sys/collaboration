@@ -1177,12 +1177,22 @@ def _fetch_politician_trades(pol_id, pol_info, cutoff_days=60):
     url = f"https://www.capitoltrades.com/politicians/{pol_id}"
     try:
         headers = {
-            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/120.0.0.0 Safari/537.36"),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent":       ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                 "Chrome/122.0.0.0 Safari/537.36"),
+            "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language":  "en-US,en;q=0.9",
+            "Accept-Encoding":  "gzip, deflate, br",
+            "Connection":       "keep-alive",
+            "Referer":          "https://www.capitoltrades.com/politicians",
+            "Cache-Control":    "no-cache",
+            "Pragma":           "no-cache",
+            "Sec-Fetch-Dest":   "document",
+            "Sec-Fetch-Mode":   "navigate",
+            "Sec-Fetch-Site":   "same-origin",
+            "Upgrade-Insecure-Requests": "1",
         }
-        resp = requests.get(url, headers=headers, timeout=12)
+        resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code != 200:
             return []
 
@@ -1218,12 +1228,22 @@ def _fetch_recent_trades_feed(cutoff_days=30):
     url = "https://www.capitoltrades.com/trades"
     try:
         headers = {
-            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/120.0.0.0 Safari/537.36"),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent":       ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                 "Chrome/122.0.0.0 Safari/537.36"),
+            "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language":  "en-US,en;q=0.9",
+            "Accept-Encoding":  "gzip, deflate, br",
+            "Connection":       "keep-alive",
+            "Referer":          "https://www.capitoltrades.com/",
+            "Cache-Control":    "no-cache",
+            "Pragma":           "no-cache",
+            "Sec-Fetch-Dest":   "document",
+            "Sec-Fetch-Mode":   "navigate",
+            "Sec-Fetch-Site":   "same-origin",
+            "Upgrade-Insecure-Requests": "1",
         }
-        resp = requests.get(url, headers=headers, timeout=12)
+        resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code != 200:
             return []
 
@@ -1473,62 +1493,122 @@ def get_biggest_gainers():
 
 def get_recent_ipos(min_days=30, max_days=180):
     """
-    Fetch recent IPOs with 30-180 days of trading history.
-    IPOs often have explosive momentum — good for autonomous AND collaborative.
-    Requirements: 500k+ avg volume, $5-$200 price range.
+    Fetch genuine recent IPOs using Alpaca's listed_at date field.
+    Only returns stocks that actually listed within min_days–max_days ago.
+    Filters out established stocks that happen to have limited bar history.
+    Requirements: 500k+ avg volume, $5–$500 price, listed 30–180 days ago.
     """
     try:
-        end     = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        start   = (datetime.now(timezone.utc) - timedelta(days=max_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        today   = datetime.now(timezone.utc).date()
         headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 
-        # Get all active tradable assets
-        res = requests.get(f"{BASE_URL}/v2/assets?status=active&asset_class=us_equity",
-                          headers=headers, timeout=10)
+        # Get all active tradable assets — includes listed_at field
+        res = requests.get(
+            f"{BASE_URL}/v2/assets?status=active&asset_class=us_equity",
+            headers=headers, timeout=15
+        )
         if not res.ok:
             return []
 
         assets = res.json()
-        candidates = [
-            a["symbol"] for a in assets
-            if a.get("tradable") and a.get("marginable") and a.get("easy_to_borrow")
-            and not a.get("symbol","").endswith(("W","R","U","P"))
-            and len(a.get("symbol","")) <= 5
-        ]
+
+        # ── Filter to genuine recent IPOs using listed_at ────────
+        # listed_at is the actual exchange listing date — reliable signal
+        ipo_candidates = []
+        for a in assets:
+            listed_at = a.get("listed_at", "")
+            if not listed_at:
+                continue
+            try:
+                listed_date = datetime.fromisoformat(
+                    listed_at.replace("Z", "+00:00")
+                ).date()
+            except Exception:
+                continue
+
+            days_since = (today - listed_date).days
+
+            # Must be within our IPO window
+            if not (min_days <= days_since <= max_days):
+                continue
+
+            sym = a.get("symbol", "")
+            # Skip warrants, rights, units, preferred shares
+            if not sym or sym.endswith(("W", "R", "U", "P", "+")):
+                continue
+            # Skip longer symbols (typically ETFs/structured products)
+            if len(sym) > 5:
+                continue
+            # Must be tradable + easy to borrow
+            if not (a.get("tradable") and a.get("easy_to_borrow")):
+                continue
+
+            ipo_candidates.append({
+                "symbol":    sym,
+                "days_old":  days_since,
+                "listed_at": listed_at,
+            })
+
+        if not ipo_candidates:
+            return []
+
+        log(f"🆕 Genuine IPO candidates (listed {min_days}–{max_days}d ago): "
+            f"{len(ipo_candidates)} stocks — sampling for volume/momentum...")
+
+        # ── Fetch bars to check volume + momentum ────────────────
+        end   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        start = (datetime.now(timezone.utc) - timedelta(days=max_days + 5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Sort by most recent IPO first (freshest momentum potential)
+        ipo_candidates.sort(key=lambda x: x["days_old"])
 
         recent_ipos = []
-        import random
-        sample = random.sample(candidates, min(200, len(candidates)))
-
-        for sym in sample:
+        for cand in ipo_candidates:
+            sym = cand["symbol"]
             try:
-                url = f"{DATA_URL}/v2/stocks/{sym}/bars?timeframe=1Day&start={start}&end={end}&limit=200&feed=iex"
-                r   = requests.get(url, headers=headers, timeout=5)
-                if r.ok:
-                    bars = r.json().get("bars", [])
-                    if min_days <= len(bars) <= max_days:
-                        avg_vol    = sum(b["v"] for b in bars) / len(bars)
-                        last_price = bars[-1]["c"]
-                        mom_5d     = round((bars[-1]["c"] - bars[-6]["c"]) / bars[-6]["c"] * 100, 2) if len(bars) >= 6 else 0
-                        if avg_vol > 500000 and 5 <= last_price <= 200:
-                            recent_ipos.append({
-                                "symbol":   sym,
-                                "days_old": len(bars),
-                                "price":    last_price,
-                                "avg_vol":  round(avg_vol),
-                                "mom_5d":   mom_5d,
-                            })
-                            if len(recent_ipos) >= 8:
-                                break
-            except:
+                url = (f"{DATA_URL}/v2/stocks/{sym}/bars"
+                       f"?timeframe=1Day&start={start}&end={end}&limit=200&feed=iex")
+                r   = requests.get(url, headers=headers, timeout=6)
+                if not r.ok:
+                    continue
+                bars = r.json().get("bars", [])
+                if len(bars) < 5:
+                    continue
+
+                last_price = bars[-1]["c"]
+                avg_vol    = sum(b["v"] for b in bars) / len(bars)
+                mom_5d     = round(
+                    (bars[-1]["c"] - bars[-6]["c"]) / bars[-6]["c"] * 100, 2
+                ) if len(bars) >= 6 else 0
+
+                # Quality gates: liquid, priced reasonably
+                if avg_vol < 500_000:
+                    continue
+                if not (5 <= last_price <= 500):
+                    continue
+
+                recent_ipos.append({
+                    "symbol":    sym,
+                    "days_old":  cand["days_old"],
+                    "price":     last_price,
+                    "avg_vol":   round(avg_vol),
+                    "mom_5d":    mom_5d,
+                    "listed_at": cand["listed_at"],
+                })
+
+                if len(recent_ipos) >= 10:
+                    break
+
+            except Exception:
                 continue
 
         if recent_ipos:
-            # Sort by momentum
             recent_ipos = sorted(recent_ipos, key=lambda x: -abs(x["mom_5d"]))
-            log(f"🆕 Recent IPOs detected ({len(recent_ipos)}): {[i['symbol'] for i in recent_ipos]}")
+            ipo_summary = [(i["symbol"], f"{i['days_old']}d", f"{i['mom_5d']:+.1f}%") for i in recent_ipos]
+            log(f"🆕 Recent IPOs confirmed ({len(recent_ipos)}): {ipo_summary}")
 
         return recent_ipos
+
     except Exception as e:
         log(f"⚠️ IPO detection failed: {e}")
         return []
