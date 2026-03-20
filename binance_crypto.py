@@ -786,8 +786,8 @@ JSON only:
 
         # ── Consolidate decisions — both AIs must agree on any action ──
         # "keep" is default — only act if both agree on something else
-        claude_decisions = {d["asset"]: d for d in (claude_resp or {}).get("staking_decisions", [])}
-        grok_decisions   = {d["asset"]: d for d in (grok_resp   or {}).get("staking_decisions", [])}
+        claude_decisions = {d["asset"]: d for d in (claude_resp if isinstance(claude_resp, dict) else {}).get("staking_decisions", [])}
+        grok_decisions   = {d["asset"]: d for d in (grok_resp   if isinstance(grok_resp,   dict) else {}).get("staking_decisions", [])}
 
         executed = {}
         all_assets = set(claude_decisions.keys()) | set(grok_decisions.keys())
@@ -869,7 +869,7 @@ JSON only:
 
         # Log notes
         for ai, resp in [("Claude", claude_resp), ("Grok", grok_resp)]:
-            if resp and resp.get("staking_note"):
+            if resp and isinstance(resp, dict) and resp.get("staking_note"):
                 print(f"[STAKING] {ai}: {resp['staking_note'][:100]}", flush=True)
 
         self.last_check = datetime.now(timezone.utc).isoformat()
@@ -1471,7 +1471,6 @@ class CryptoTrader:
                 near_tp   = [s for s, p in self.positions.items()
                              if p.pnl_pct(get_crypto_price(s)) >= 4.0]
 
-                from binance_crypto import classify_situation as _classify
                 situation_mode, focus, urgency, _ = prompt_builder.assess_situation(
                     equity      = total_equity,
                     cash        = crypto_pool,
@@ -1647,7 +1646,7 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
         # ── Process SELL decisions on existing holdings ───────
         sell_decisions = []
         for ai_name, resp in [("claude", claude_resp), ("grok", grok_resp)]:
-            if not resp:
+            if not resp or not isinstance(resp, dict):
                 continue
             for sell in resp.get("sell_decisions", []):
                 sym = sell.get("symbol", "")
@@ -1696,7 +1695,7 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
 
         # ── Log hold decisions ─────────────────────────────────
         for ai_name, resp in [("claude", claude_resp), ("grok", grok_resp)]:
-            if not resp:
+            if not resp or not isinstance(resp, dict):
                 continue
             for hold in resp.get("hold_decisions", []):
                 sym    = hold.get("symbol", "")
@@ -1709,7 +1708,7 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
         proposals = []
 
         for ai_name, resp in [("claude", claude_resp), ("grok", grok_resp)]:
-            if not resp:
+            if not resp or not isinstance(resp, dict):
                 continue
             trades = resp.get("crypto_trades", [])
             for t in trades:
@@ -1976,7 +1975,7 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
 
         proposals = []
         for ai_name, resp in [("claude", claude_r1), ("grok", grok_r1)]:
-            if not resp:
+            if not resp or not isinstance(resp, dict):
                 continue
             for t in resp.get("crypto_trades", []):
                 sym      = t.get("symbol", "")
