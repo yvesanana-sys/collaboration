@@ -23,6 +23,11 @@ from projection_engine import (
 from prompt_builder import PromptBuilder
 prompt_builder = PromptBuilder()   # Single instance — memory grows all session
 
+# ── Binance.US Crypto Trading Engine ─────────────────────────
+# binance_crypto.py must be in the same directory
+from binance_crypto import CryptoTrader
+crypto_trader = CryptoTrader()     # 24/7 crypto — runs parallel to stocks
+
 # ── Projection Accuracy Tracker ──────────────────────────────
 # Defined here (not in projection_engine.py) because it writes to shared_state.
 # Call from run_afterhours() to build a rolling accuracy score over time.
@@ -56,6 +61,8 @@ ALPACA_KEY    = os.environ.get("ALPACA_KEY", "")
 ALPACA_SECRET = os.environ.get("ALPACA_SECRET", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
 GROK_KEY      = os.environ.get("GROK_KEY", "")
+BINANCE_KEY   = os.environ.get("BINANCE_KEY", "")    # Binance.US crypto
+BINANCE_SECRET= os.environ.get("BINANCE_SECRET", "") # Binance.US crypto
 BASE_URL      = "https://api.alpaca.markets"
 DATA_URL      = "https://data.alpaca.markets"
 BOT_NAME      = os.environ.get("BOT_NAME", "collaboration")
@@ -588,6 +595,18 @@ def prompt_memory_endpoint():
     """
     try:
         return jsonify(prompt_builder.get_memory_stats())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/crypto_status")
+def crypto_status_endpoint():
+    """
+    Live Binance.US crypto trading status.
+    Shows open positions, P&L, projections, recent trades, rules.
+    GET /crypto_status
+    """
+    try:
+        return jsonify(crypto_trader.get_status())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2332,6 +2351,31 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
     if ipo_syms:
         log(f"🆕 IPOs in play: {ipo_syms}")
 
+    # ── Build crypto context for unified R1 call ─────────────
+    # If crypto_trader is enabled, gather crypto data and append
+    # to R1 prompt — no extra AI call needed
+    crypto_context_str = ""
+    if crypto_trader.is_enabled():
+        try:
+            crypto_projs  = crypto_trader.get_projections_snapshot()
+            crypto_wallet = crypto_trader.get_wallet_snapshot()
+            crypto_stats  = crypto_trader.get_stats_snapshot()
+            crypto_cross  = crypto_trader.get_stock_cross_ref(
+                shared_state.get("last_projections", {})
+            )
+            crypto_context_str = prompt_builder.build_crypto_context(
+                wallet_summary  = crypto_wallet.get("summary", ""),
+                crypto_pool     = crypto_wallet.get("usdt_free", 0),
+                crypto_proj_text = crypto_projs,
+                crypto_holdings = crypto_wallet.get("holdings_text", ""),
+                crypto_stats    = crypto_stats,
+                stock_cross_ref = crypto_cross,
+            )
+            if crypto_context_str:
+                log("🪙 Crypto context added to R1 prompt — unified call")
+        except Exception as ce:
+            log(f"⚠️ Crypto context build failed: {ce} — skipping crypto in R1")
+
     # Round 1: Both propose independently
     # ── Adaptive prompt — situation-aware, projection-informed, memory-injected ──
     r1_prompt, situation_mode = prompt_builder.build_r1(
@@ -2355,6 +2399,7 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
         spy_trend       = shared_state.get("spy_trend", "neutral"),
         features        = features,
         projections     = shared_state.get("last_projections", {}),
+        crypto_context  = crypto_context_str,
     )
     log(f"🧠 Prompt mode: {situation_mode.upper().replace('_',' ')}")
 
@@ -2392,6 +2437,24 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
     if not claude_r1 and not grok_r1:
         log("⚠️ Both failed Round 1 — holding")
         return [], False, {}
+
+    # ── UNIFIED CRYPTO EXECUTION from R1 responses ────────────
+    # Extract crypto_trades from both AI responses and execute now.
+    # Zero extra AI calls — crypto piggybacks on the stock R1 call.
+    if crypto_trader.is_enabled() and crypto_context_str:
+        try:
+            crypto_pool_now = crypto_trader.get_wallet_snapshot().get("usdt_free", 0)
+            crypto_new = crypto_trader.execute_from_r1(
+                claude_r1       = claude_r1,
+                grok_r1         = grok_r1,
+                crypto_pool     = crypto_pool_now,
+                record_trade_fn = record_trade,
+                prompt_builder  = prompt_builder,
+            )
+            if crypto_new:
+                log(f"🪙 Crypto: {crypto_new} new position(s) from unified R1")
+        except Exception as cex:
+            log(f"⚠️ Crypto R1 execution failed: {cex}")
 
     # ── AUTONOMOUS TRADES (Round 2 — quick review) ─────────────────
     # Each AI proposes trades for their own fund independently
@@ -3650,6 +3713,22 @@ Both AIs agree on this plan. Plain text 200 words."""
         except Exception as e:
             log(f"❌ Tomorrow plan: {e}")
 
+        # ── 🔒 STAKING REVIEW (once daily at afterhours) ──────
+        # Much better here than mid-cycle — no overlap with stock trading.
+        # AIs are already awake for afterhours so no extra wake cost.
+        if crypto_trader.is_enabled():
+            try:
+                log("=" * 50)
+                log("🔒 STAKING REVIEW — Daily check at afterhours")
+                log("=" * 50)
+                crypto_trader.staking.run_staking_cycle(
+                    projections   = crypto_trader._projections or {},
+                    ask_claude_fn = ask_claude,
+                    ask_grok_fn   = ask_grok,
+                )
+            except Exception as se:
+                log(f"⚠️ Staking review error: {se}")
+
     except Exception as e:
         log(f"❌ After-hours error: {e}")
 
@@ -4747,6 +4826,53 @@ def trading_loop():
         except Exception as e:
             log(f"❌ Loop error: {e}")
             interval = 5
+
+        # ── 🪙 CRYPTO — autonomous exit monitor runs every tick ──
+        # Full AI cycle only runs when AIs are SLEEPING (stocks inactive).
+        # When AIs are awake, crypto decisions are embedded in R1 (above).
+        try:
+            if crypto_trader.is_enabled():
+                try:
+                    acct_eq = alpaca("GET", "/v2/account")
+                    eq_for_crypto = float(acct_eq["equity"])
+                except Exception:
+                    eq_for_crypto = shared_state.get("last_equity", 55.0)
+
+                spy_now = shared_state.get("spy_trend", "neutral")
+
+                if shared_state["ai_sleeping"]:
+                    # AIs asleep — crypto gets its own full cycle
+                    # Runs every ~hour (cycle_count % 12 with 5min intervals)
+                    should_run_full = (
+                        len(crypto_trader.positions) == 0 or
+                        crypto_trader.cycle_count % 12 == 0
+                    )
+                    if should_run_full:
+                        log("🪙 Crypto: AIs sleeping — running standalone cycle")
+                        crypto_trader.run_crypto_cycle(
+                            total_equity      = eq_for_crypto,
+                            ask_claude_fn     = ask_claude,
+                            ask_grok_fn       = ask_grok,
+                            spy_trend         = spy_now,
+                            prompt_builder    = prompt_builder,
+                            record_trade_fn   = record_trade,
+                            pol_text          = "",  # Skip pol fetch — save cost
+                            stock_projections = shared_state.get("last_projections", {}),
+                        )
+                    else:
+                        # Just exit monitor — zero AI calls
+                        exits = crypto_trader.run_exit_monitor()
+                        if exits:
+                            log(f"🪙 Crypto: {exits} autonomous exit(s)")
+                else:
+                    # AIs awake — only run exit monitor here.
+                    # Crypto decisions already handled in R1 above.
+                    exits = crypto_trader.run_exit_monitor()
+                    if exits:
+                        log(f"🪙 Crypto: {exits} exit(s) monitored")
+
+        except Exception as ce:
+            log(f"⚠️ Crypto loop error: {ce}")
 
         mode, interval = get_market_mode()
         log(f"Sleeping {interval} min [mode: {mode}]...")
