@@ -970,6 +970,189 @@ def get_bars(symbol, days=60):
         log(f"⚠️ Bars {symbol}: {e}")
         return []
 
+def get_intraday_bars(symbol, timeframe="5Min", hours=7):
+    """
+    Fetch intraday bars for VWAP, candlestick patterns and volume delta.
+    Default: 5-minute bars for the last 7 hours (covers full trading day).
+    Returns list of bars with keys: t, o, h, l, c, v
+    """
+    try:
+        end   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        start = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+        url = (f"{DATA_URL}/v2/stocks/{symbol}/bars"
+               f"?timeframe={timeframe}&start={start}&end={end}"
+               f"&limit=200&feed=iex&adjustment=raw")
+        res = requests.get(url, headers=headers, timeout=10)
+        if not res.ok:
+            url2 = (f"{DATA_URL}/v2/stocks/{symbol}/bars"
+                    f"?timeframe={timeframe}&start={start}&end={end}&limit=200")
+            res = requests.get(url2, headers=headers, timeout=10)
+        if res.ok:
+            bars = res.json().get("bars", [])
+            return bars if bars else []
+        return []
+    except Exception as e:
+        return []
+
+def compute_intraday_indicators(intraday_bars):
+    """
+    Compute intraday indicators from 5-min bars:
+      - VWAP (Volume Weighted Average Price)
+      - Volume delta proxy (green vs red candle volume)
+      - Candlestick patterns (last 3 candles)
+      - Intraday trend (above/below VWAP)
+      - Support/resistance levels from today's range
+    """
+    if not intraday_bars or len(intraday_bars) < 3:
+        return None
+
+    # ── VWAP ─────────────────────────────────────────────────
+    # VWAP = sum(typical_price * volume) / sum(volume)
+    # Typical price = (H + L + C) / 3
+    total_pv  = sum(((b["h"] + b["l"] + b["c"]) / 3) * b["v"]
+                    for b in intraday_bars)
+    total_vol = sum(b["v"] for b in intraday_bars)
+    vwap = round(total_pv / total_vol, 2) if total_vol > 0 else None
+
+    # ── Volume delta (buy vs sell pressure proxy) ─────────────
+    # Green candle (close > open) = buying pressure
+    # Red candle (close < open)   = selling pressure
+    buy_vol  = sum(b["v"] for b in intraday_bars if b["c"] >= b["o"])
+    sell_vol = sum(b["v"] for b in intraday_bars if b["c"] <  b["o"])
+    total_delta_vol = buy_vol + sell_vol
+    buy_pct  = round(buy_vol  / total_delta_vol * 100, 1) if total_delta_vol > 0 else 50
+    sell_pct = round(sell_vol / total_delta_vol * 100, 1) if total_delta_vol > 0 else 50
+    vol_delta_bias = "BUYERS" if buy_pct > 60 else "SELLERS" if sell_pct > 60 else "NEUTRAL"
+
+    # ── Volume spike detection (intraday) ─────────────────────
+    avg_bar_vol  = total_delta_vol / len(intraday_bars) if intraday_bars else 0
+    last_bar_vol = intraday_bars[-1]["v"] if intraday_bars else 0
+    intraday_vol_ratio = round(last_bar_vol / avg_bar_vol, 1) if avg_bar_vol > 0 else 0
+
+    # ── Candlestick pattern detection (last 3 candles) ────────
+    patterns = []
+    bars = intraday_bars[-6:]  # Last 6 bars for context
+
+    def body(b):    return abs(b["c"] - b["o"])
+    def upper(b):   return b["h"] - max(b["c"], b["o"])
+    def lower(b):   return min(b["c"], b["o"]) - b["l"]
+    def range_(b):  return b["h"] - b["l"]
+    def is_bull(b): return b["c"] > b["o"]
+    def is_bear(b): return b["c"] < b["o"]
+
+    if len(bars) >= 2:
+        c0 = bars[-1]   # Current (latest)
+        c1 = bars[-2]   # Previous
+
+        # ── Hammer / Hanging Man ──────────────────────────────
+        # Long lower wick (>2x body), small body, tiny upper wick
+        if (range_(c0) > 0 and body(c0) > 0 and
+            lower(c0) >= body(c0) * 2 and
+            upper(c0) <= body(c0) * 0.5):
+            pattern = "HAMMER" if is_bull(c0) else "HANGING_MAN"
+            patterns.append(f"{pattern}(bullish reversal signal)" if is_bull(c0)
+                            else f"{pattern}(bearish warning)")
+
+        # ── Shooting Star / Inverted Hammer ──────────────────
+        # Long upper wick (>2x body), small body, tiny lower wick
+        if (range_(c0) > 0 and body(c0) > 0 and
+            upper(c0) >= body(c0) * 2 and
+            lower(c0) <= body(c0) * 0.5):
+            pattern = "SHOOTING_STAR" if is_bear(c0) else "INVERTED_HAMMER"
+            patterns.append(f"{pattern}(bearish reversal)" if is_bear(c0)
+                            else f"{pattern}(potential reversal)")
+
+        # ── Doji (indecision) ────────────────────────────────
+        if range_(c0) > 0 and body(c0) <= range_(c0) * 0.1:
+            patterns.append("DOJI(indecision — watch next candle)")
+
+        # ── Bullish Engulfing ────────────────────────────────
+        if (is_bear(c1) and is_bull(c0) and
+            c0["o"] <= c1["c"] and c0["c"] >= c1["o"]):
+            patterns.append("BULLISH_ENGULFING(strong buy signal)")
+
+        # ── Bearish Engulfing ────────────────────────────────
+        if (is_bull(c1) and is_bear(c0) and
+            c0["o"] >= c1["c"] and c0["c"] <= c1["o"]):
+            patterns.append("BEARISH_ENGULFING(strong sell signal)")
+
+        # ── Liquidity grab / shakeout ────────────────────────
+        # Big wick down but closes back up near open (the 8am NVDA pattern)
+        if (range_(c0) > 0 and
+            lower(c0) >= range_(c0) * 0.5 and
+            c0["c"] >= (c0["o"] + c0["l"]) / 2):
+            patterns.append("LIQUIDITY_GRAB(wick-down recovery — bullish)")
+
+        # ── Bearish wick grab (stop hunt up) ────────────────
+        if (range_(c0) > 0 and
+            upper(c0) >= range_(c0) * 0.5 and
+            c0["c"] <= (c0["o"] + c0["h"]) / 2):
+            patterns.append("STOP_HUNT_HIGH(wick-up reversal — bearish)")
+
+    if len(bars) >= 3:
+        c0, c1, c2 = bars[-1], bars[-2], bars[-3]
+
+        # ── Three white soldiers (strong uptrend) ────────────
+        if (is_bull(c0) and is_bull(c1) and is_bull(c2) and
+            c0["c"] > c1["c"] > c2["c"] and
+            c0["o"] > c1["o"] > c2["o"]):
+            patterns.append("THREE_WHITE_SOLDIERS(strong bullish trend)")
+
+        # ── Three black crows (strong downtrend) ─────────────
+        if (is_bear(c0) and is_bear(c1) and is_bear(c2) and
+            c0["c"] < c1["c"] < c2["c"] and
+            c0["o"] < c1["o"] < c2["o"]):
+            patterns.append("THREE_BLACK_CROWS(strong bearish trend)")
+
+        # ── Morning star (bullish reversal) ──────────────────
+        if (is_bear(c2) and body(c1) <= range_(c1) * 0.3 and
+            is_bull(c0) and c0["c"] > (c2["o"] + c2["c"]) / 2):
+            patterns.append("MORNING_STAR(bullish reversal — high confidence)")
+
+        # ── Evening star (bearish reversal) ──────────────────
+        if (is_bull(c2) and body(c1) <= range_(c1) * 0.3 and
+            is_bear(c0) and c0["c"] < (c2["o"] + c2["c"]) / 2):
+            patterns.append("EVENING_STAR(bearish reversal — high confidence)")
+
+    # ── Intraday support / resistance ─────────────────────────
+    today_high = max(b["h"] for b in intraday_bars)
+    today_low  = min(b["l"] for b in intraday_bars)
+    current    = intraday_bars[-1]["c"]
+    vwap_pos   = ("ABOVE_VWAP" if vwap and current > vwap * 1.001
+                  else "BELOW_VWAP" if vwap and current < vwap * 0.999
+                  else "AT_VWAP")
+
+    # ── OBV (On-Balance Volume) from intraday bars ────────────
+    obv = 0
+    obv_values = []
+    for i, b in enumerate(intraday_bars):
+        if i == 0:
+            obv += b["v"]
+        elif b["c"] > intraday_bars[i-1]["c"]:
+            obv += b["v"]
+        elif b["c"] < intraday_bars[i-1]["c"]:
+            obv -= b["v"]
+        obv_values.append(obv)
+
+    # OBV trend: compare last 6 bars
+    obv_trend = "RISING" if len(obv_values) >= 6 and obv_values[-1] > obv_values[-6] else \
+                "FALLING" if len(obv_values) >= 6 and obv_values[-1] < obv_values[-6] else "FLAT"
+
+    return {
+        "vwap":             vwap,
+        "vwap_position":    vwap_pos,
+        "buy_vol_pct":      buy_pct,
+        "sell_vol_pct":     sell_pct,
+        "vol_delta_bias":   vol_delta_bias,
+        "intraday_vol_ratio": intraday_vol_ratio,
+        "patterns":         patterns,
+        "today_high":       round(today_high, 2),
+        "today_low":        round(today_low, 2),
+        "obv_trend":        obv_trend,
+        "bar_count":        len(intraday_bars),
+    }
+
 def compute_indicators(bars):
     if len(bars) < 26: return None
     closes  = [b["c"] for b in bars]
@@ -999,11 +1182,37 @@ def compute_indicators(bars):
     avg_vol=sum(volumes[-20:])/20 if len(volumes)>=20 else None
     vol_ratio=round(volumes[-1]/avg_vol,2) if avg_vol else None
     mom_5d=round((closes[-1]-closes[-6])/closes[-6]*100,2) if len(closes)>=6 else None
+
+    # ── OBV (On-Balance Volume) — daily ──────────────────────
+    # Rising OBV + rising price = healthy uptrend (volume confirms move)
+    # Rising price + falling OBV = distribution (smart money selling)
+    obv = 0
+    obv_series = []
+    for i, b in enumerate(bars):
+        if i == 0:
+            obv += b["v"]
+        elif b["c"] > bars[i-1]["c"]:
+            obv += b["v"]
+        elif b["c"] < bars[i-1]["c"]:
+            obv -= b["v"]
+        obv_series.append(obv)
+    obv_trend = ("RISING"  if len(obv_series) >= 10 and obv_series[-1] > obv_series[-10]
+            else "FALLING" if len(obv_series) >= 10 and obv_series[-1] < obv_series[-10]
+            else "FLAT")
+    # OBV divergence: price up but OBV falling = bearish divergence
+    price_trend = ("UP"   if len(closes) >= 10 and closes[-1] > closes[-10]
+              else "DOWN" if len(closes) >= 10 and closes[-1] < closes[-10]
+              else "FLAT")
+    obv_divergence = None
+    if price_trend == "UP"   and obv_trend == "FALLING": obv_divergence = "BEARISH"
+    if price_trend == "DOWN" and obv_trend == "RISING":  obv_divergence = "BULLISH"
+
     return {"close":round(close,2),"rsi":rsi_v,"macd":macd,
             "sma20":round(sma20,2) if sma20 else None,
             "sma50":round(sma50,2) if sma50 else None,
             "ema9":round(ema9,2),"ema21":round(ema21,2),
-            "bb_pct":bb_pct,"vol_ratio":vol_ratio,"mom_5d":mom_5d}
+            "bb_pct":bb_pct,"vol_ratio":vol_ratio,"mom_5d":mom_5d,
+            "obv_trend":obv_trend,"obv_divergence":obv_divergence}
 
 def get_chart_section():
     """
@@ -1020,15 +1229,40 @@ def get_chart_section():
             lines.append(f"  {sym}: insufficient data")
             continue
 
-        # Original indicator line (unchanged)
+        # Daily indicator line
         lines.append(
             f"  {sym}: ${ind['close']} RSI={ind['rsi']} MACD={ind['macd']} "
             f"SMA20={ind['sma20']} SMA50={ind['sma50']} EMA9={ind['ema9']} "
             f"EMA21={ind['ema21']} BB%={ind['bb_pct']} "
-            f"Vol={ind['vol_ratio']} Mom5d={ind['mom_5d']}%"
+            f"Vol={ind['vol_ratio']} Mom5d={ind['mom_5d']}% "
+            f"OBV={ind['obv_trend']}"
+            + (f" ⚠️OBV_DIV={ind['obv_divergence']}" if ind.get('obv_divergence') else "")
         )
 
-        # NEW: 5-layer projection line from projection_engine.py
+        # NEW: Intraday 5-min bars — VWAP, volume delta, candlestick patterns
+        try:
+            intraday = get_intraday_bars(sym, timeframe="5Min", hours=8)
+            if intraday and len(intraday) >= 5:
+                id_ind = compute_intraday_indicators(intraday)
+                if id_ind:
+                    # VWAP line
+                    vwap_line = (f"    → INTRADAY: VWAP=${id_ind['vwap']} "
+                                 f"[{id_ind['vwap_position']}] "
+                                 f"H={id_ind['today_high']} L={id_ind['today_low']} "
+                                 f"| Volume: {id_ind['vol_delta_bias']} "
+                                 f"(buy={id_ind['buy_vol_pct']}% sell={id_ind['sell_vol_pct']}%) "
+                                 f"OBV_intra={id_ind['obv_trend']}")
+                    if id_ind['intraday_vol_ratio'] >= 2.0:
+                        vwap_line += f" 🔥VOL_SPIKE={id_ind['intraday_vol_ratio']}x"
+                    lines.append(vwap_line)
+
+                    # Candlestick patterns
+                    if id_ind['patterns']:
+                        lines.append(f"    → PATTERNS: {' | '.join(id_ind['patterns'][:3])}")
+        except Exception:
+            pass  # Never break chart section for intraday failure
+
+        # 5-layer projection
         try:
             proj = get_projection(sym, bars, ind=ind)
             projections[sym] = proj
@@ -1040,7 +1274,7 @@ def get_chart_section():
                     f"| {proj['trade_action']}"
                 )
         except Exception:
-            pass  # Never break chart section for a projection failure
+            pass
 
     # Cache projections in shared_state — bot reads this while AIs sleep
     shared_state["last_projections"] = projections
@@ -3111,20 +3345,69 @@ def run_autopilot(positions, pos_symbols, cash, equity):
         ind  = compute_indicators(bars)
         if not ind: continue
 
-        # ── projection_engine.py buy scorer (replaces legacy 5-point system) ──
+        # ── projection_engine.py buy scorer ───────────────────
         proj_score, proj_summary = proj_score_buy(sym, bars, ind, cash)
 
-        # Legacy signals layered on top for extra confirmation
+        # ── Intraday signals (VWAP, volume delta, patterns) ───
+        intraday_score = 0
+        intraday_signals = []
+        try:
+            intraday = get_intraday_bars(sym, timeframe="5Min", hours=8)
+            if intraday and len(intraday) >= 5:
+                id_ind = compute_intraday_indicators(intraday)
+                if id_ind:
+                    # Bonus: price above VWAP = bullish intraday
+                    if id_ind["vwap_position"] == "ABOVE_VWAP":
+                        intraday_score += 8
+                        intraday_signals.append("above_VWAP")
+                    # Bonus: buyers dominating volume
+                    if id_ind["vol_delta_bias"] == "BUYERS":
+                        intraday_score += 8
+                        intraday_signals.append(f"buy_vol={id_ind['buy_vol_pct']}%")
+                    # Bonus: intraday OBV rising
+                    if id_ind["obv_trend"] == "RISING":
+                        intraday_score += 5
+                        intraday_signals.append("OBV_rising")
+                    # Bonus: bullish candlestick pattern
+                    bullish_patterns = [p for p in id_ind["patterns"]
+                                        if any(x in p for x in
+                                        ["HAMMER","ENGULFING","MORNING","SOLDIERS",
+                                         "LIQUIDITY_GRAB"])]
+                    if bullish_patterns:
+                        intraday_score += 10
+                        intraday_signals.append(bullish_patterns[0].split("(")[0])
+                    # Penalty: price below VWAP + sellers dominating
+                    if (id_ind["vwap_position"] == "BELOW_VWAP" and
+                            id_ind["vol_delta_bias"] == "SELLERS"):
+                        intraday_score -= 15
+                        intraday_signals.append("below_VWAP+sellers")
+                    # Penalty: bearish patterns
+                    bearish_patterns = [p for p in id_ind["patterns"]
+                                        if any(x in p for x in
+                                        ["SHOOTING_STAR","BEARISH","CROWS",
+                                         "EVENING","STOP_HUNT"])]
+                    if bearish_patterns:
+                        intraday_score -= 10
+                        intraday_signals.append(f"BEARISH_PATTERN")
+        except Exception:
+            pass  # Never break autopilot for intraday failure
+
+        # ── Legacy signals ────────────────────────────────────
         legacy_score = 0
         if ind["rsi"] and ind["rsi"] < RULES["autopilot_rsi_buy"]:
             legacy_score += 10
         if ind["macd"] and ind["macd"] > 0:
             legacy_score += 5
+        # OBV divergence from daily
+        if ind.get("obv_divergence") == "BULLISH":
+            legacy_score += 8
+        elif ind.get("obv_divergence") == "BEARISH":
+            legacy_score -= 10
 
-        score   = min(100, proj_score + legacy_score)
-        signals = [proj_summary]
+        score   = min(100, proj_score + legacy_score + intraday_score)
+        signals = [proj_summary] + intraday_signals
 
-        if score >= 55 and score > best_score:   # Raised from 5 → 55 (projection-calibrated)
+        if score >= 55 and score > best_score:
             best_score  = score
             best_signal = {"symbol": sym, "score": score, "signals": signals, "ind": ind}
 
