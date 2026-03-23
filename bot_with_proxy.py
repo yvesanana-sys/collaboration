@@ -653,10 +653,28 @@ def deploy_endpoint():
         })
 
     # POST — trigger deploy
-    msg = request.args.get("msg") or request.json.get("message", None) if request.is_json else None
-    result = github_push_all(commit_msg=msg)
-    status_code = 200 if result.get("success") else 500
-    return jsonify(result), status_code
+    try:
+        msg = None
+        if request.is_json:
+            msg = request.json.get("message")
+        if not msg:
+            msg = request.args.get("msg")
+
+        # Run in background thread — never blocks or crashes the bot
+        def _do_deploy():
+            github_push_all(commit_msg=msg)
+
+        t = threading.Thread(target=_do_deploy, daemon=True)
+        t.start()
+
+        return jsonify({
+            "status":  "deploying",
+            "message": f"Pushing to {GITHUB_REPO}:{GITHUB_BRANCH} in background...",
+            "note":    "Check Railway logs in ~30s for result",
+        }), 202
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
@@ -2319,14 +2337,28 @@ def ask_grok(prompt, system="You are a trading AI. Respond with ONLY a short val
 
 def clean_json_str(raw):
     import re
-    raw = re.sub(r"```\w*", "", raw).replace("```","").strip()
+    # Remove markdown code fences (```json ... ``` or ``` ... ```)
+    raw = re.sub(r'```(?:json)?\s*', '', raw).replace('```', '').strip()
+    # Remove non-printable chars except whitespace
     raw = "".join(ch for ch in raw if ord(ch) >= 32 or ch in "\n\t")
+    # Remove trailing commas before } or ]
     raw = re.sub(r",\s*([}\]])", r"\1", raw)
-    first = min(raw.find("{") if raw.find("{")!=-1 else len(raw),
-                raw.find("[") if raw.find("[")!=-1 else len(raw))
-    if first > 0: raw = raw[first:]
+    # Find the outermost JSON object or array
+    first_brace  = raw.find("{")
+    first_bracket = raw.find("[")
+    if first_brace == -1 and first_bracket == -1:
+        return raw
+    if first_brace == -1:
+        first = first_bracket
+    elif first_bracket == -1:
+        first = first_brace
+    else:
+        first = min(first_brace, first_bracket)
+    if first > 0:
+        raw = raw[first:]
     last = max(raw.rfind("}"), raw.rfind("]"))
-    if last != -1: raw = raw[:last+1]
+    if last != -1:
+        raw = raw[:last+1]
     return raw.strip()
 
 def parse_json(raw):
@@ -2505,7 +2537,19 @@ def get_spy_trend():
     """
     try:
         bars = get_bars("SPY", days=60)
-        if len(bars) >= 50:
+        if not bars or len(bars) < 50:
+            # IEX feed failed — try without feed specification
+            try:
+                end   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                start = (datetime.now(timezone.utc) - timedelta(days=70)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+                url = f"{DATA_URL}/v2/stocks/SPY/bars?timeframe=1Day&start={start}&end={end}&limit=60"
+                res = requests.get(url, headers=headers, timeout=10)
+                if res.ok:
+                    bars = res.json().get("bars", [])
+            except Exception:
+                pass
+        if bars and len(bars) >= 50:
             closes  = [b["c"] for b in bars]
             sma50   = sum(closes[-50:]) / 50
             current = closes[-1]
