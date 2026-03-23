@@ -1317,6 +1317,16 @@ class CryptoTrader:
             if "stop_loss" in reason:
                 sell_price = pos.stop_price
 
+            # ── Fee-aware floor: never sell below entry + fees ────
+            # Crypto round-trip: 0.02% (0% maker + 0.01% taker × 2)
+            # Minimum net profit: 0.5%
+            # Floor = entry * (1 + 0.0002 + 0.005) = entry * 1.0052
+            min_sell = round(pos.entry_price * (1 + CRYPTO_RULES["round_trip_fee"] + 0.005), 4)
+            if "stop_loss" not in reason and sell_price < min_sell:
+                self._log(f"   💰 {pos.symbol}: sell floored ${sell_price:.4f} → ${min_sell:.4f} "
+                          f"(entry ${pos.entry_price:.4f} + fees + 0.5%)")
+                sell_price = min_sell
+
             result = place_crypto_sell(pos.symbol, pos.qty, sell_price)
 
             pnl_usd = round((current_price - pos.entry_price) * pos.qty, 2)
