@@ -625,16 +625,21 @@ def get_position_exit_guidance(symbol, bars, ind, entry_price,
         exit_price = proj_high
         reason = f"neutral — proj_high=${proj_high}"
 
-    # ── HARD FLOOR: exit price must ALWAYS be above entry ────
-    # Minimum 1% profit above entry — never sell at a loss as "take profit"
-    min_exit = round(entry_price * 1.01, 2)
+    # ── HARD FLOOR: exit price must always be above entry + fees ──
+    # Alpaca round-trip fees: ~0.03% (SEC + FINRA regulatory fees)
+    # Minimum net profit target: 0.5% after fees
+    # Floor = entry + fees (0.03%) + min_profit (0.5%) = entry * 1.008
+    stock_round_trip_fee = 0.0003   # ~0.03% SEC/FINRA regulatory fees
+    stock_min_net_profit = 0.005    # 0.5% minimum net profit target
+    min_exit = round(entry_price * (1 + stock_round_trip_fee + stock_min_net_profit), 2)
+
     if exit_price <= entry_price:
         exit_price = min_exit
-        reason = (f"exit floor applied (proj was below entry) — "
-                  f"min exit ${min_exit} (+1%)")
+        reason = (f"exit floor applied (proj below entry) — "
+                  f"min exit ${min_exit} (entry + fees + 0.5%)")
     elif exit_price < min_exit:
         exit_price = min_exit
-        reason = f"{reason} [floored to +1% min = ${min_exit}]"
+        reason = f"{reason} [floored to fee-aware min ${min_exit}]"
 
     # Stop: below proj_low or hard -4%, whichever is closer to entry
     stop_proj  = proj_low * 0.995
