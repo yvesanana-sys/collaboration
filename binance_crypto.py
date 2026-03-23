@@ -48,14 +48,21 @@ BINANCE_SECRET  = os.environ.get("BINANCE_SECRET", "")
 # 8 high-liquidity coins available on Binance.US
 # Symbol format: BTCUSDT (Binance.US format)
 CRYPTO_UNIVERSE = {
-    "BTCUSDT":  {"name": "Bitcoin",   "min_notional": 10.0, "decimals": 5},
-    "ETHUSDT":  {"name": "Ethereum",  "min_notional": 10.0, "decimals": 4},
-    "SOLUSDT":  {"name": "Solana",    "min_notional": 10.0, "decimals": 3},
-    "AVAXUSDT": {"name": "Avalanche", "min_notional": 10.0, "decimals": 3},
-    "DOGEUSDT": {"name": "Dogecoin",  "min_notional": 10.0, "decimals": 0},
-    "LINKUSDT": {"name": "Chainlink", "min_notional": 10.0, "decimals": 3},
-    "ADAUSDT":  {"name": "Cardano",   "min_notional": 10.0, "decimals": 1},
-    "DOTUSDT":  {"name": "Polkadot",  "min_notional": 10.0, "decimals": 3},
+    # ── Major coins ───────────────────────────────────────────
+    "BTCUSDT":   {"name": "Bitcoin",    "min_notional": 10.0, "decimals": 5},
+    "ETHUSDT":   {"name": "Ethereum",   "min_notional": 10.0, "decimals": 4},
+    "SOLUSDT":   {"name": "Solana",     "min_notional": 10.0, "decimals": 3},
+    "AVAXUSDT":  {"name": "Avalanche",  "min_notional": 10.0, "decimals": 3},
+    "DOGEUSDT":  {"name": "Dogecoin",   "min_notional": 10.0, "decimals": 0},
+    "LINKUSDT":  {"name": "Chainlink",  "min_notional": 10.0, "decimals": 3},
+    "ADAUSDT":   {"name": "Cardano",    "min_notional": 10.0, "decimals": 1},
+    "DOTUSDT":   {"name": "Polkadot",   "min_notional": 10.0, "decimals": 3},
+    # ── Your current holdings — always tracked + tradeable ────
+    "FETUSDT":   {"name": "Fetch.ai",   "min_notional": 10.0, "decimals": 1},
+    "SHIBUSDT":  {"name": "Shiba Inu",  "min_notional": 10.0, "decimals": 0},
+    "AUDIOUSDT": {"name": "Audius",     "min_notional": 10.0, "decimals": 1},
+    "KAVAUSDT":  {"name": "Kava",       "min_notional": 10.0, "decimals": 3},
+    "RVNUSDT":   {"name": "Ravencoin",  "min_notional": 10.0, "decimals": 0},
 }
 
 # ── Crypto Trading Rules ──────────────────────────────────────
@@ -1023,9 +1030,9 @@ def get_full_wallet() -> dict:
                 lines.append(f"    {p['asset']}: {p['qty']:.4f} = ${p['value_usdt']:.2f} @ ${p['price']:.4f}")
         if non_tradeable:
             lines.append(f"  📦 Other holdings ({len(non_tradeable)}) — hold only:")
-            for p in non_tradeable[:4]:
-                if p.get("value_usdt", 0) > 1:
-                    lines.append(f"    {p['asset']}: {p['qty']:.4f} = ${p.get('value_usdt', '?'):.2f}")
+            for p in non_tradeable:
+                if p.get("value_usdt", 0) > 0.5:
+                    lines.append(f"    {p['asset']}: {p['qty']:.4f} = ${p.get('value_usdt', 0):.2f}")
         if bnb_info:
             lines.append(f"  🔶 BNB (fee coin): {bnb_info['qty']:.4f} = ${bnb_info['value_usdt']:.2f}")
         if stablecoins:
@@ -1851,6 +1858,35 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
 
             except Exception as e:
                 self._log(f"   ❌ Buy error for {sym}: {e}")
+
+        # ── Display AI strategy summary ────────────────────────
+        self._log(f"   📋 CRYPTO STRATEGY SUMMARY (Cycle #{self.cycle_count}):")
+        self._log(f"   Mode: {situation_mode.upper().replace('_',' ')} | "
+                  f"USDT: ${crypto_pool:.2f} | Wallet: ${crypto_equity:.2f}")
+
+        for ai_name, resp in [("Claude", claude_resp), ("Grok", grok_resp)]:
+            if not resp or not isinstance(resp, dict):
+                self._log(f"   {ai_name}: no response")
+                continue
+            note  = resp.get("market_note", "")
+            avoid = resp.get("avoid", [])
+            buys  = [t.get("symbol","") for t in resp.get("crypto_trades", [])
+                     if t.get("action") == "buy"]
+            holds = [h.get("symbol","") for h in resp.get("hold_decisions", [])]
+            sells = [s.get("symbol","") for s in resp.get("sell_decisions", [])]
+            self._log(f"   {ai_name}: "
+                      + (f"BUY={buys} " if buys else "no buys ")
+                      + (f"HOLD={holds} " if holds else "")
+                      + (f"SELL={sells} " if sells else "")
+                      + (f"AVOID={avoid} " if avoid else "")
+                      + (f"| {note[:80]}" if note else ""))
+
+        if not final_proposals:
+            if crypto_pool < CRYPTO_RULES["min_trade_usdt"]:
+                self._log(f"   💡 No trades: insufficient USDT (${crypto_pool:.2f}). "
+                          f"Convert holdings to USDT to enable buying.")
+            else:
+                self._log(f"   💡 No trades: AIs found no high-confidence setups this cycle.")
 
         self._log_positions()
         self.last_cycle = datetime.now().isoformat()
