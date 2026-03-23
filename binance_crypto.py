@@ -48,21 +48,31 @@ BINANCE_SECRET  = os.environ.get("BINANCE_SECRET", "")
 # 8 high-liquidity coins available on Binance.US
 # Symbol format: BTCUSDT (Binance.US format)
 CRYPTO_UNIVERSE = {
-    # ── Major coins ───────────────────────────────────────────
-    "BTCUSDT":   {"name": "Bitcoin",    "min_notional": 10.0, "decimals": 5},
-    "ETHUSDT":   {"name": "Ethereum",   "min_notional": 10.0, "decimals": 4},
-    "SOLUSDT":   {"name": "Solana",     "min_notional": 10.0, "decimals": 3},
-    "AVAXUSDT":  {"name": "Avalanche",  "min_notional": 10.0, "decimals": 3},
-    "DOGEUSDT":  {"name": "Dogecoin",   "min_notional": 10.0, "decimals": 0},
-    "LINKUSDT":  {"name": "Chainlink",  "min_notional": 10.0, "decimals": 3},
-    "ADAUSDT":   {"name": "Cardano",    "min_notional": 10.0, "decimals": 1},
-    "DOTUSDT":   {"name": "Polkadot",   "min_notional": 10.0, "decimals": 3},
-    # ── Your current holdings — always tracked + tradeable ────
-    "FETUSDT":   {"name": "Fetch.ai",   "min_notional": 10.0, "decimals": 1},
-    "SHIBUSDT":  {"name": "Shiba Inu",  "min_notional": 10.0, "decimals": 0},
-    "AUDIOUSDT": {"name": "Audius",     "min_notional": 10.0, "decimals": 1},
-    "KAVAUSDT":  {"name": "Kava",       "min_notional": 10.0, "decimals": 3},
-    "RVNUSDT":   {"name": "Ravencoin",  "min_notional": 10.0, "decimals": 0},
+    # ── Tier 1: High volume majors ────────────────────────────
+    "BTCUSDT":   {"name": "Bitcoin",      "min_notional": 10.0, "decimals": 5},
+    "ETHUSDT":   {"name": "Ethereum",     "min_notional": 10.0, "decimals": 4},
+    "XRPUSDT":   {"name": "XRP",          "min_notional": 10.0, "decimals": 0},
+    "SOLUSDT":   {"name": "Solana",       "min_notional": 10.0, "decimals": 3},
+    "ADAUSDT":   {"name": "Cardano",      "min_notional": 10.0, "decimals": 1},
+    "DOGEUSDT":  {"name": "Dogecoin",     "min_notional": 10.0, "decimals": 0},
+    "AVAXUSDT":  {"name": "Avalanche",    "min_notional": 10.0, "decimals": 3},
+    "LINKUSDT":  {"name": "Chainlink",    "min_notional": 10.0, "decimals": 3},
+    "DOTUSDT":   {"name": "Polkadot",     "min_notional": 10.0, "decimals": 3},
+    "LTCUSDT":   {"name": "Litecoin",     "min_notional": 10.0, "decimals": 3},
+    # ── Tier 2: Layer 1/2 ecosystems ─────────────────────────
+    "MATICUSDT": {"name": "Polygon",      "min_notional": 10.0, "decimals": 0},
+    "ATOMUSDT":  {"name": "Cosmos",       "min_notional": 10.0, "decimals": 2},
+    "NEARUSDT":  {"name": "NEAR Protocol","min_notional": 10.0, "decimals": 1},
+    "ALGOUSDT":  {"name": "Algorand",     "min_notional": 10.0, "decimals": 0},
+    "UNIUSDT":   {"name": "Uniswap",      "min_notional": 10.0, "decimals": 2},
+    # ── Tier 3: Meme coins (high volatility = high opportunity) ─
+    "SHIBUSDT":  {"name": "Shiba Inu",    "min_notional": 10.0, "decimals": 0},
+    "PEPEUSDT":  {"name": "Pepe",         "min_notional": 10.0, "decimals": 0},
+    # ── Your current holdings — always tracked ────────────────
+    "FETUSDT":   {"name": "Fetch.ai",     "min_notional": 10.0, "decimals": 1},
+    "AUDIOUSDT": {"name": "Audius",       "min_notional": 10.0, "decimals": 1},
+    "KAVAUSDT":  {"name": "Kava",         "min_notional": 10.0, "decimals": 3},
+    "RVNUSDT":   {"name": "Ravencoin",    "min_notional": 10.0, "decimals": 0},
 }
 
 # ── Crypto Trading Rules ──────────────────────────────────────
@@ -211,6 +221,54 @@ def get_all_crypto_stats() -> list:
         except Exception:
             continue
     return sorted(stats, key=lambda x: abs(x["change_pct"]), reverse=True)
+
+
+def scan_binance_market(min_volume_usdt: float = 500_000,
+                        top_n: int = 10) -> list:
+    """
+    Scan ALL USDT pairs on Binance.US for top movers.
+    Returns top_n coins by momentum that have enough volume to trade.
+    This lets the AI discover opportunities OUTSIDE our fixed universe.
+
+    Returns list of dicts with symbol, change_pct, volume, price.
+    """
+    try:
+        # Get all 24h tickers in one call
+        all_tickers = binance_get("/api/v3/ticker/24hr", {})
+        if not isinstance(all_tickers, list):
+            return []
+
+        # Filter: USDT pairs only, min volume, exclude stablecoins
+        stables = {"USDT", "BUSD", "DAI", "USDC", "TUSD", "USDP"}
+        candidates = []
+        for t in all_tickers:
+            sym = t.get("symbol", "")
+            if not sym.endswith("USDT"):
+                continue
+            asset = sym.replace("USDT", "")
+            if asset in stables:
+                continue
+            vol = float(t.get("quoteVolume", 0))
+            if vol < min_volume_usdt:
+                continue
+            change = float(t.get("priceChangePercent", 0))
+            candidates.append({
+                "symbol":     sym,
+                "asset":      asset,
+                "price":      float(t.get("lastPrice", 0)),
+                "change_pct": change,
+                "volume_m":   round(vol / 1_000_000, 1),
+                "in_universe": sym in CRYPTO_UNIVERSE,
+            })
+
+        # Sort by absolute momentum — biggest movers first
+        candidates.sort(key=lambda x: abs(x["change_pct"]), reverse=True)
+
+        # Return top N — mix of universe + new discoveries
+        return candidates[:top_n]
+
+    except Exception:
+        return []
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1491,15 +1549,33 @@ class CryptoTrader:
             self._log(f"   ⚠️ Wallet read failed: {e}")
             return 0
 
-        if crypto_pool < CRYPTO_RULES["min_trade_usdt"] and not tradeable:
-            self._log(f"   Insufficient USDT (${crypto_pool:.2f}) and no holdings — skipping")
+        # Check if we have anything to work with
+        # Either USDT to buy directly, OR coins we can sell first
+        all_holdings = wallet.get("tradeable", []) + wallet.get("non_tradeable", [])
+        sellable_coins = [h for h in all_holdings
+                         if h.get("free", 0) > 0
+                         and h.get("value_usdt", 0) >= CRYPTO_RULES["min_trade_usdt"]]
+
+        has_usdt   = crypto_pool >= CRYPTO_RULES["min_trade_usdt"]
+        has_coins  = len(sellable_coins) > 0
+
+        if not has_usdt and not has_coins:
+            self._log(f"   ⚠️ Nothing to trade — USDT=${crypto_pool:.2f} "
+                      f"and no coins worth ≥${CRYPTO_RULES['min_trade_usdt']}")
             return 0
+
+        if not has_usdt and has_coins:
+            coin_summary = [(h["asset"], f'${h["value_usdt"]:.2f}') for h in sellable_coins[:3]]
+            self._log(f"   💡 No USDT but have sellable coins: {coin_summary}")
+            self._log(f"   🔄 AI will decide: sell weak coins → buy stronger ones")
 
         # Get market data + crypto projections
         self._log("   📊 Computing crypto projections...")
         try:
             self._projections = get_all_crypto_projections()
             stats             = get_all_crypto_stats()
+            # Scan full Binance.US market for top movers (not just our universe)
+            market_scan       = scan_binance_market(min_volume_usdt=500_000, top_n=10)
         except Exception as e:
             self._log(f"   ⚠️ Market data failed: {e}")
             return 0
@@ -1508,6 +1584,24 @@ class CryptoTrader:
         stats_text = [(s["symbol"], f"{s['change_pct']:+.2f}%",
                        f"vol={s['quote_volume']/1e6:.1f}M")
                       for s in stats[:8]]
+
+        # Format market scan for AI — shows coins OUTSIDE our universe too
+        scan_text = ""
+        if market_scan:
+            new_discoveries = [c for c in market_scan if not c["in_universe"]]
+            scan_lines = ["MARKET SCAN — Top movers on Binance.US right now:"]
+            for c in market_scan[:8]:
+                tag = "★ NEW" if not c["in_universe"] else "  ·"
+                scan_lines.append(
+                    f"  {tag} {c['symbol']}: {c['change_pct']:+.1f}% "
+                    f"@ ${c['price']} | vol=${c['volume_m']}M"
+                )
+            if new_discoveries:
+                scan_lines.append(
+                    f"\n  ⚡ {len(new_discoveries)} coins trending OUTSIDE our normal universe — "
+                    f"AI can recommend buying any of these if setup looks good"
+                )
+            scan_text = "\n".join(scan_lines)
 
         # ── Crypto-specific situation classification ──────────
         # IMPORTANT: crypto uses its OWN classifier — not the stock one.
@@ -1527,26 +1621,34 @@ class CryptoTrader:
                               if self.total_pnl != 0 else 0.0)
 
             # Crypto situation modes — independent of stocks
+            # Total sellable value = USDT + all free coin holdings
+            total_sellable = crypto_pool + sum(
+                h.get("value_usdt", 0) for h in (wallet.get("tradeable", []) + wallet.get("non_tradeable", []))
+                if h.get("free", 0) > 0 and h.get("value_usdt", 0) >= CRYPTO_RULES["min_trade_usdt"]
+            )
+
             if near_stop:
                 situation_mode = "defensive"
                 focus = f"Crypto positions near stop: {near_stop}. Protect capital."
             elif crypto_pnl_pct <= -0.05:
-                # Only damage control if CRYPTO P&L is bad — not stock losses
                 situation_mode = "damage_control"
                 focus = f"Crypto P&L {crypto_pnl_pct*100:.1f}%. Review positions."
             elif near_tp:
                 situation_mode = "harvest_profits"
                 focus = f"Crypto positions near TP: {near_tp}. Lock in gains."
-            elif crypto_pool >= CRYPTO_RULES["min_trade_usdt"] * 2:
-                # Have enough USDT — look for opportunities including dips
+            elif total_sellable >= CRYPTO_RULES["min_trade_usdt"]:
+                # Have USDT OR coins worth selling → can trade
                 situation_mode = "opportunity_seeking"
-                focus = "USDT available. Seek 2-3 day momentum setups. Dips are entries."
+                if crypto_pool >= CRYPTO_RULES["min_trade_usdt"]:
+                    focus = f"${crypto_pool:.2f} USDT ready. Seek best setups."
+                else:
+                    focus = f"${total_sellable:.2f} in coins. Sell weak → buy strong."
             elif self.positions:
                 situation_mode = "standard_monitoring"
                 focus = "Managing open crypto positions."
             else:
                 situation_mode = "capital_conservation"
-                focus = "Low USDT. Monitor only."
+                focus = "Insufficient funds to trade."
 
             self._log(f"   🧠 Crypto mode: {situation_mode.upper().replace('_',' ')} — {focus[:60]}")
 
@@ -1619,26 +1721,34 @@ class CryptoTrader:
         win_rate = round(self.wins / max(self.wins + self.losses, 1) * 100, 0)
 
         holdings_text = ""
-        if tradeable:
-            holdings_text = "\nEXISTING HOLDINGS (decide: hold/add/sell):\n"
-            for h in tradeable:
-                proj = self._projections.get(h["symbol"], {})
+        all_wallet_holdings = tradeable + wallet.get("non_tradeable", [])
+
+        if all_wallet_holdings:
+            holdings_text = "\nYOUR FULL WALLET HOLDINGS (decide: hold / sell-to-USDT / add):\n"
+            for h in all_wallet_holdings:
+                sym  = h.get("symbol", f"{h['asset']}USDT")
+                proj = self._projections.get(sym, {})
                 proj_note = ""
-                if proj and not proj.get("error"):
-                    curr = h["price"]
-                    ph   = proj.get("proj_high", 0)
-                    pl   = proj.get("proj_low", 0)
+                val  = h.get("value_usdt", 0)
+                price = h.get("price", 0)
+
+                if proj and not proj.get("error") and price > 0:
+                    ph = proj.get("proj_high", 0)
+                    pl = proj.get("proj_low", 0)
                     if ph and pl:
-                        if curr >= ph * 0.98:
-                            proj_note = f" ⚠️ NEAR PROJ HIGH ${ph} — consider selling"
-                        elif curr <= pl * 1.02:
-                            proj_note = f" 🟢 AT PROJ LOW ${pl} — good add zone"
+                        if price >= ph * 0.98:
+                            proj_note = f" ⚠️ NEAR PROJ HIGH ${ph} — consider selling to USDT"
+                        elif price <= pl * 1.02:
+                            proj_note = f" 🟢 AT PROJ LOW ${pl} — good hold/add zone"
                         else:
-                            dist_tp = round((ph - curr) / curr * 100, 1)
+                            dist_tp = round((ph - price) / price * 100, 1) if price > 0 else 0
                             proj_note = f" → {dist_tp:.1f}% to proj_high ${ph}"
-                holdings_text += (f"  {h['asset']}: {h['qty']:.4f} "
-                                  f"= ${h['value_usdt']:.2f} @ ${h['price']:.4f}"
-                                  f"{proj_note}\n")
+
+                if val > 0 or h.get("qty", 0) > 0:
+                    val_str = f"= ${val:.2f}" if val > 0.01 else "(no price data)"
+                    holdings_text += (f"  {h['asset']}: {h['qty']:.4f} "
+                                      f"{val_str} @ ${price:.6f}"
+                                      f"{proj_note}\n")
 
         # ── Build situation-aware system prompts ──────────────
         if prompt_builder:
@@ -1671,12 +1781,15 @@ Binance.US wallet total: ${crypto_equity:.2f}
 CRYPTO RULES:
 - Min profit: {CRYPTO_RULES['min_profit_pct']*100:.1f}% | Stop: {CRYPTO_RULES['stop_loss_pct']*100:.0f}% | Max hold: {CRYPTO_RULES['max_hold_hours']}h
 - Always LIMIT orders (0% maker fee) | Entry ≤ proj_low | Exit at proj_high
-- Only VIABLE projections (range > 2.5%)
-- CRYPTO IS INDEPENDENT: stock losses, SPY weakness, low Alpaca cash do NOT affect crypto decisions
-- DIPS ARE ENTRIES: bearish SPY or red stock day = potential crypto buying opportunity (oversold bounce)
-- Trade 24/7: weekend, afterhours, overnight — all valid if setup is right
+- COIN-TO-COIN TRADING: You CAN sell a weak coin to USDT, then buy a stronger coin
+  Example: DOGE looks weak → sell DOGE → use USDT → buy SHIB (stronger momentum)
+- NO USDT NEEDED TO START: If USDT=0 but you hold coins, sell the weakest coin first
+- DIPS ARE ENTRIES: weakness = buying opportunity if proj shows recovery
+- Trade 24/7: weekends, nights, always valid
 
-24H MOVERS: {stats_text}
+24H MOVERS (our universe): {stats_text}
+
+{scan_text}
 
 {proj_text}
 
@@ -1689,16 +1802,56 @@ CRYPTO RULES:
 {f"LEARNED CONTEXT (from past trades):{chr(10)}{lessons_text}" if lessons_text else ""}
 
 TASK:
-1. HOLDINGS: hold / add / sell each coin you own (use proj_high/low)
-2. NEW BUYS: 1-2 best 2-3 day setups — bullish momentum OR oversold dip near proj_low (RSI<45)
-3. DIPS: market weakness = entry opportunity if proj shows recovery potential
-4. AVOID: coins with bearish proj AND no recovery signal
+1. SELL WEAK COINS: If any holding looks bearish/weak → sell it to USDT now
+   - This gives you buying power for step 2 WITHOUT needing a deposit
+2. BUY STRONG COINS: Use available USDT (including from step 1 sells) to buy best setup
+3. HOLD STRONG: Keep coins with bullish momentum
+4. PRIORITY if USDT=0: Pick the WEAKEST coin to sell first → that unlocks buying power
 
-JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.0,"confidence":80,"entry_target":95000.0,"tp_target":97500.0,"rationale":"brief","owner":"claude"}}],"hold_decisions":[{{"symbol":"ETHUSDT","action":"hold","reason":"brief"}}],"sell_decisions":[{{"symbol":"SOLUSDT","action":"sell","reason":"near proj_high"}}],"avoid":["DOGEUSDT"],"market_note":"brief"}}"""
+COIN-TO-COIN EXAMPLE:
+  DOGE bearish → sell_decisions: [{symbol: DOGEUSDT, reason: "bearish, rotating to ADA"}]
+  ADA bullish  → crypto_trades:  [{symbol: ADAUSDT, action: buy, notional_usdt: 8.0}]
+  = You just swapped DOGE for ADA via USDT automatically
 
-        # ── Ask both AIs ──────────────────────────────────────
+JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.0,"confidence":80,"entry_target":95000.0,"tp_target":97500.0,"rationale":"brief","owner":"claude"}}],"hold_decisions":[{{"symbol":"ETHUSDT","action":"hold","reason":"brief"}}],"sell_decisions":[{{"symbol":"SOLUSDT","action":"sell","reason":"near proj_high"}}],"avoid":["DOGEUSDT"],"market_note":"brief"}}
+
+{f'GROK LIVE INTEL (from X/web search right now):{chr(10)}{grok_intel}' if grok_intel else ''}"""
+
+        # ── Step 1: Grok live research (X/web) ───────────────
+        # Grok searches Twitter/X and web for breaking crypto news
+        # This intel gets added to the main prompt for both AIs
+        grok_intel = ""
+        try:
+            self._log("   🔴 Grok searching X/web for crypto news...")
+            # Build list of coins we care about for targeted search
+            watch_coins = list(CRYPTO_UNIVERSE.keys())[:8]
+            wallet_coins = [h["asset"] for h in (wallet.get("tradeable", []) + wallet.get("non_tradeable", [])) if h.get("value_usdt", 0) > 1]
+            all_watch = list(set(
+                [s.replace("USDT","") for s in watch_coins] + wallet_coins
+            ))[:10]
+
+            research_prompt = f"""Search Twitter/X and crypto news RIGHT NOW for:
+1. Breaking news on: {', '.join(all_watch)}
+2. Any coins trending/pumping on X in the last 2 hours
+3. Whale movements, exchange listings, partnerships announced today
+4. Macro crypto news (BTC ETF flows, regulation, Fed impact on crypto)
+5. Any coins from this market scan worth watching: {[c['symbol'] for c in market_scan[:5]]}
+
+Reply in plain text, 3-5 bullet points MAX. Be specific — coin names, % moves, catalyst."""
+
+            raw_intel = ask_grok_fn(
+                research_prompt,
+                "You are Grok with live Twitter/X and web access. Search NOW for breaking crypto news. Plain text bullets only, no JSON.",
+            )
+            if raw_intel and len(raw_intel) > 20:
+                grok_intel = raw_intel[:600]
+                self._log(f"   🔴 Grok intel: {grok_intel[:200]}...")
+        except Exception as e:
+            self._log(f"   ⚠️ Grok research failed: {e}")
+
+        # ── Step 2: Ask both AIs with Grok intel included ─────
         self._log("   🔵 Claude analyzing crypto...")
-        self._log("   🔴 Grok analyzing crypto...")
+        self._log("   🔴 Grok making final crypto decisions...")
 
         claude_resp = None
         grok_resp   = None
@@ -1742,7 +1895,12 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
             self._log("   ⚠️ Both AIs failed — skipping crypto cycle")
             return 0
 
-        # ── Process SELL decisions on existing holdings ───────
+        # ── Process SELL decisions on ALL wallet holdings ─────
+        # AI can sell any coin in wallet — not just bot-tracked positions
+        # This allows converting weak holdings to USDT for better trades
+        all_wallet = wallet.get("tradeable", []) + wallet.get("non_tradeable", [])
+        wallet_map = {p["asset"]: p for p in all_wallet}  # asset → holding
+
         sell_decisions = []
         for ai_name, resp in [("claude", claude_resp), ("grok", grok_resp)]:
             if not resp or not isinstance(resp, dict):
@@ -1752,17 +1910,15 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
                 if sym:
                     sell_decisions.append((sym, sell.get("reason", "AI recommendation"), ai_name))
 
-        # Execute sells both AIs agree on (or single AI if holding is near proj_high)
+        # Execute sells both AIs agree on (or single AI if near proj_high)
         sell_counts = {}
         for sym, reason, ai in sell_decisions:
             sell_counts[sym] = sell_counts.get(sym, [])
             sell_counts[sym].append((reason, ai))
 
         for sym, decisions in sell_counts.items():
-            # Both AIs agree → sell
-            # Or single AI says sell AND price is within 1% of proj_high
-            both_agree = len(decisions) >= 2
-            proj = self._projections.get(sym, {})
+            both_agree    = len(decisions) >= 2
+            proj          = self._projections.get(sym, {})
             near_proj_high = False
             if proj and not proj.get("error"):
                 try:
@@ -1775,20 +1931,33 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
 
             if both_agree or near_proj_high:
                 reason = decisions[0][0]
-                self._log(f"   🔴 AI sell signal: {sym} — {reason} "
-                          f"({'both agreed' if both_agree else 'near proj_high'})")
+                self._log(f"   🔴 AI sell: {sym} — {reason} "
+                          f"({'both AIs agreed' if both_agree else 'near proj_high'})")
                 try:
-                    # Find qty from wallet
                     asset = sym.replace("USDT", "")
-                    wallet_pos = next((p for p in tradeable if p["asset"] == asset), None)
-                    if wallet_pos:
-                        curr  = get_crypto_price(sym)
-                        result = place_crypto_sell(sym, wallet_pos["qty"],
-                                                   round(curr * 1.001, 4))
+                    # Look in ALL wallet holdings (tradeable + non_tradeable)
+                    holding = wallet_map.get(asset)
+                    if holding and holding.get("free", 0) > 0:
+                        qty  = holding["free"]  # Only sell free (not locked/staked)
+                        try:
+                            curr = get_crypto_price(sym)
+                        except Exception:
+                            self._log(f"   ⚠️ Cannot get price for {sym} — skipping sell")
+                            continue
+                        result = place_crypto_sell(sym, qty, round(curr * 1.001, 4))
                         if result.get("orderId"):
-                            self._log(f"   ✅ Sell order placed for {sym}: {result['orderId']}")
+                            self._log(f"   ✅ Sell order: {sym} {qty:.4f} → USDT | "
+                                      f"order={result['orderId']}")
+                            # Log what this converts to
+                            usdt_est = round(qty * curr, 2)
+                            self._log(f"   💵 Est. proceeds: ~${usdt_est:.2f} USDT")
                         else:
-                            self._log(f"   ⚠️ Sell order failed: {result}")
+                            self._log(f"   ⚠️ Sell failed: {result}")
+                    elif holding and holding.get("locked", 0) > 0:
+                        self._log(f"   ⚠️ {asset} is locked/staked — cannot sell "
+                                  f"({holding['locked']:.4f} locked)")
+                    else:
+                        self._log(f"   ⚠️ {asset} not found in wallet or zero balance")
                 except Exception as e:
                     self._log(f"   ❌ Sell error for {sym}: {e}")
 
@@ -1818,7 +1987,12 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
                 tp    = t.get("tp_target")
 
                 if sym not in CRYPTO_UNIVERSE:
-                    continue
+                    # Allow coins discovered via market scan (has real volume on Binance.US)
+                    scan_syms = {c["symbol"] for c in market_scan}
+                    if sym not in scan_syms or not sym.endswith("USDT"):
+                        self._log(f"   ⚠️ {sym} not in universe or market scan — skipping")
+                        continue
+                    self._log(f"   🌟 {sym} discovered via market scan — new opportunity!")
                 if conf < CRYPTO_RULES["min_confidence"]:
                     continue
                 if sym in self.positions:
@@ -1897,6 +2071,8 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
         self._log(f"   📋 CRYPTO STRATEGY SUMMARY (Cycle #{self.cycle_count}):")
         self._log(f"   Mode: {situation_mode.upper().replace('_',' ')} | "
                   f"USDT: ${crypto_pool:.2f} | Wallet: ${crypto_equity:.2f}")
+        if grok_intel:
+            self._log(f"   🌐 Grok live intel: {grok_intel[:180].strip()}")
 
         for ai_name, resp in [("Claude", claude_resp), ("Grok", grok_resp)]:
             if not resp or not isinstance(resp, dict):
@@ -1916,9 +2092,11 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
                       + (f"| {note[:80]}" if note else ""))
 
         if not final_proposals:
-            if crypto_pool < CRYPTO_RULES["min_trade_usdt"]:
-                self._log(f"   💡 No trades: insufficient USDT (${crypto_pool:.2f}). "
-                          f"Convert holdings to USDT to enable buying.")
+            if not has_usdt and not has_coins:
+                self._log(f"   💡 No trades: nothing to trade.")
+            elif not has_usdt:
+                self._log(f"   💡 No buys executed — waiting for USDT from coin sales or deposit.")
+                self._log(f"      Tip: AI can sell coins to generate USDT if both AIs agree.")
             else:
                 self._log(f"   💡 No trades: AIs found no high-confidence setups this cycle.")
 
