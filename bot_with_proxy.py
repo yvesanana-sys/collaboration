@@ -1868,6 +1868,20 @@ def analyze_smart_money(pol_signals, investor_holdings, gainers):
 def estimate_fees(notional):
     return round(max(notional * 0.0000278, 0.01) + min(notional * 0.000145, 7.27), 4)
 
+def min_profitable_exit(entry_price: float, fee_pct: float = 0.0003,
+                         min_profit_pct: float = 0.005) -> float:
+    """
+    Returns the minimum exit price that covers fees AND a small profit.
+    Default: Alpaca ~0.03% round-trip fees + 0.5% minimum net profit.
+    Never sell for less than this — not even on a trailing stop.
+
+    Examples:
+      entry=$100  → min_exit=$100.80  (covers fees + 0.5%)
+      entry=$175  → min_exit=$176.40
+      entry=$20   → min_exit=$20.16
+    """
+    return round(entry_price * (1 + fee_pct + min_profit_pct), 2)
+
 # ── AI Calls ─────────────────────────────────────────────
 def ask_claude(prompt, system="You are a trading AI. Respond with ONLY a short valid JSON object under 500 characters. No markdown, no explanations, no extra text.", max_tokens=600):
     with httpx.Client(timeout=60) as http:
@@ -2271,6 +2285,13 @@ def check_exit_conditions(positions):
             peak_price     = shared_state["position_exits"][symbol].get("peak_price", current_price)
             trail_stop     = peak_price * (1 - trail_pct)
             profit_at_peak = (peak_price - entry_price) / entry_price
+
+            # ── Fee-aware floor: trailing stop never drops below entry + fees ──
+            # Once we're in profit, lock in at least fees + 0.5% net minimum
+            min_exit_price = min_profitable_exit(entry_price)
+            if trail_active and trail_stop < min_exit_price:
+                trail_stop = min_exit_price
+                log(f"   [B] {symbol}: trail stop floored to ${min_exit_price:.2f} (entry + fees + 0.5%)")
 
             # Trailing activates only once position is +3% profitable
             trail_active = profit_at_peak >= RULES["exit_B_trail_activates"]
