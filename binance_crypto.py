@@ -989,15 +989,21 @@ def get_full_wallet() -> dict:
                 else:
                     non_tradeable.append(entry)
             except Exception:
-                # Coin not tradeable against USDT on Binance.US
-                non_tradeable.append({
+                # Price lookup failed (delisted, rebranded, no USDT pair)
+                # Still track it — show qty so user knows it's seen
+                entry = {
                     "asset":       asset,
                     "symbol":      symbol,
                     "qty":         qty,
+                    "free":        free,
+                    "locked":      lock,
+                    "price":       0,
                     "value_usdt":  0,
                     "in_universe": False,
-                    "note":        "no USDT pair",
-                })
+                    "note":        "no USDT pair — held only",
+                }
+                positions.append(entry)
+                non_tradeable.append(entry)
 
         # ── BNB (fee discount coin — track separately) ────────
         bnb_bal  = balances.get("BNB", {})
@@ -1033,6 +1039,9 @@ def get_full_wallet() -> dict:
             for p in non_tradeable:
                 if p.get("value_usdt", 0) > 0.5:
                     lines.append(f"    {p['asset']}: {p['qty']:.4f} = ${p.get('value_usdt', 0):.2f}")
+                elif p.get("qty", 0) > 0:
+                    # Has quantity but no price (rebranded/delisted)
+                    lines.append(f"    {p['asset']}: {p['qty']:.4f} (no USDT price — check Binance.US)")
         if bnb_info:
             lines.append(f"  🔶 BNB (fee coin): {bnb_info['qty']:.4f} = ${bnb_info['value_usdt']:.2f}")
         if stablecoins:
@@ -1694,13 +1703,38 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
         claude_resp = None
         grok_resp   = None
 
+        def _parse_crypto_resp(raw):
+            """Parse JSON from AI crypto response."""
+            if not raw:
+                return None
+            if isinstance(raw, dict):
+                return raw  # Already parsed
+            try:
+                import json, re
+                # Strip markdown fences
+                clean = re.sub(r'```\w*', '', str(raw)).replace('```','').strip()
+                # Find JSON object
+                s = clean.find('{')
+                e = clean.rfind('}') + 1
+                if s >= 0 and e > s:
+                    return json.loads(clean[s:e])
+            except Exception:
+                pass
+            return None
+
         try:
-            claude_resp = ask_claude_fn(prompt, claude_system)
+            raw = ask_claude_fn(prompt, claude_system)
+            claude_resp = _parse_crypto_resp(raw)
+            if not claude_resp:
+                self._log(f"   ⚠️ Claude crypto parse failed: {str(raw)[:100]}")
         except Exception as e:
             self._log(f"   ⚠️ Claude crypto failed: {e}")
 
         try:
-            grok_resp = ask_grok_fn(prompt, grok_system)
+            raw = ask_grok_fn(prompt, grok_system)
+            grok_resp = _parse_crypto_resp(raw)
+            if not grok_resp:
+                self._log(f"   ⚠️ Grok crypto parse failed: {str(raw)[:100]}")
         except Exception as e:
             self._log(f"   ⚠️ Grok crypto failed: {e}")
 
