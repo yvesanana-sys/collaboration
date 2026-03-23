@@ -5032,56 +5032,51 @@ def trading_loop():
             log(f"❌ Loop error: {e}")
             interval = 5
 
-        # ── 🪙 CRYPTO — autonomous exit monitor runs every tick ──
-        # Full AI cycle only runs when AIs are SLEEPING (stocks inactive).
-        # When AIs are awake, crypto decisions are embedded in R1 (above).
+        # ── 🪙 CRYPTO — runs every tick, 24/7 independent of stocks ──
+        # AI cycle: first run on startup, then every 12 cycles (~1hr at 5min)
+        # Exit monitor: every single cycle — zero AI cost
+        # Completely independent of ai_sleeping and stock market hours
         try:
             if crypto_trader.is_enabled():
-                try:
-                    acct_eq = alpaca("GET", "/v2/account")
-                    eq_for_crypto = float(acct_eq["equity"])
-                except Exception:
-                    eq_for_crypto = shared_state.get("last_equity", 55.0)
+                spy_now      = shared_state.get("spy_trend", "neutral")
+                is_first_run = crypto_trader.cycle_count == 0
+                is_hourly    = (crypto_trader.cycle_count > 0 and
+                                crypto_trader.cycle_count % 12 == 0)
 
-                spy_now  = shared_state.get("spy_trend", "neutral")
-
-                if shared_state["ai_sleeping"]:
-                    # AIs asleep — crypto gets its own full cycle
-                    # Full AI cycle: first run always, then every 12 cycles (~1hr at 5min)
-                    # Crypto trades 24/7 — weekends and nights included
-                    is_first_run    = crypto_trader.cycle_count == 0
-                    is_hourly_tick  = (crypto_trader.cycle_count > 0 and
-                                       crypto_trader.cycle_count % 12 == 0)
-                    should_run_full = is_first_run or is_hourly_tick
-
-                    if should_run_full:
+                if is_first_run or is_hourly:
+                    # Full AI cycle — wallet read + projections + Claude + Grok
+                    if shared_state["ai_sleeping"]:
                         log("🪙 Crypto: AIs sleeping — running standalone cycle")
-                        crypto_trader.run_crypto_cycle(
-                            total_equity      = 0,   # Ignored — crypto uses Binance wallet
-                            ask_claude_fn     = ask_claude,
-                            ask_grok_fn       = ask_grok,
-                            spy_trend         = spy_now,
-                            prompt_builder    = prompt_builder,
-                            record_trade_fn   = record_trade,
-                            pol_text          = "",
-                            stock_projections = shared_state.get("last_projections", {}),
-                        )
                     else:
-                        # Exit monitor always runs — zero AI calls, manages open positions
-                        exits = crypto_trader.run_exit_monitor()
-                        if exits:
-                            log(f"🪙 Crypto: {exits} autonomous exit(s)")
+                        log("🪙 Crypto: running hourly cycle")
+                    crypto_trader.run_crypto_cycle(
+                        total_equity      = 0,   # Ignored — crypto uses Binance wallet
+                        ask_claude_fn     = ask_claude,
+                        ask_grok_fn       = ask_grok,
+                        spy_trend         = spy_now,
+                        prompt_builder    = prompt_builder,
+                        record_trade_fn   = record_trade,
+                        pol_text          = "",
+                        stock_projections = shared_state.get("last_projections", {}),
+                    )
                 else:
-                    # AIs awake — only run exit monitor here.
-                    # Crypto decisions already handled in R1 above.
+                    # Exit monitor every cycle — stops/TPs/72h always protected
                     exits = crypto_trader.run_exit_monitor()
                     if exits:
-                        log(f"🪙 Crypto: {exits} exit(s) monitored")
+                        log(f"🪙 Crypto: {exits} autonomous exit(s)")
 
         except Exception as ce:
             log(f"⚠️ Crypto loop error: {ce}")
 
         mode, interval = get_market_mode()
+
+        # ── Crypto keeps the bot alive 24/7 ──────────────────
+        # Crypto markets never close — cap sleep to 5 min when
+        # crypto is enabled so we catch moves on nights/weekends.
+        # Stock logic is unaffected — it checks mode before acting.
+        if crypto_trader.is_enabled() and interval > 5:
+            interval = 5
+
         log(f"Sleeping {interval} min [mode: {mode}]...")
         time.sleep(interval * 60)
 
