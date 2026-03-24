@@ -1551,17 +1551,22 @@ class CryptoTrader:
 
         # Check if we have anything to work with
         # Either USDT to buy directly, OR coins we can sell first
+        # Use $2 minimum for individual coins — they combine with existing USDT
         all_holdings = wallet.get("tradeable", []) + wallet.get("non_tradeable", [])
+        min_sellable = 2.0  # Lower threshold — coin sale proceeds add to existing USDT
         sellable_coins = [h for h in all_holdings
                          if h.get("free", 0) > 0
-                         and h.get("value_usdt", 0) >= CRYPTO_RULES["min_trade_usdt"]]
+                         and h.get("value_usdt", 0) >= min_sellable]
 
+        total_available = crypto_pool + sum(h.get("value_usdt", 0) for h in sellable_coins)
         has_usdt   = crypto_pool >= CRYPTO_RULES["min_trade_usdt"]
         has_coins  = len(sellable_coins) > 0
+        can_trade  = total_available >= CRYPTO_RULES["min_trade_usdt"]
 
-        if not has_usdt and not has_coins:
+        if not can_trade:
             self._log(f"   ⚠️ Nothing to trade — USDT=${crypto_pool:.2f} "
-                      f"and no coins worth ≥${CRYPTO_RULES['min_trade_usdt']}")
+                      f"+ coins=${total_available - crypto_pool:.2f} "
+                      f"= ${total_available:.2f} (min ${CRYPTO_RULES['min_trade_usdt']})")
             return 0
 
         if not has_usdt and has_coins:
@@ -1624,7 +1629,7 @@ class CryptoTrader:
             # Total sellable value = USDT + all free coin holdings
             total_sellable = crypto_pool + sum(
                 h.get("value_usdt", 0) for h in (wallet.get("tradeable", []) + wallet.get("non_tradeable", []))
-                if h.get("free", 0) > 0 and h.get("value_usdt", 0) >= CRYPTO_RULES["min_trade_usdt"]
+                if h.get("free", 0) > 0 and h.get("value_usdt", 0) >= 2.0
             )
 
             if near_stop:
@@ -1842,8 +1847,8 @@ TASK:
 4. PRIORITY if USDT=0: Pick the WEAKEST coin to sell first → that unlocks buying power
 
 COIN-TO-COIN EXAMPLE:
-  DOGE bearish → sell_decisions: [{symbol: DOGEUSDT, reason: "bearish, rotating to ADA"}]
-  ADA bullish  → crypto_trades:  [{symbol: ADAUSDT, action: buy, notional_usdt: 8.0}]
+  DOGE bearish → sell_decisions: [{{"symbol": "DOGEUSDT", "reason": "bearish, rotating to ADA"}}]
+  ADA bullish  → crypto_trades:  [{{"symbol": "ADAUSDT", "action": "buy", "notional_usdt": 8.0}}]
   = You just swapped DOGE for ADA via USDT automatically
 
 JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.0,"confidence":80,"entry_target":95000.0,"tp_target":97500.0,"rationale":"brief","owner":"claude"}}],"hold_decisions":[{{"symbol":"ETHUSDT","action":"hold","reason":"brief"}}],"sell_decisions":[{{"symbol":"SOLUSDT","action":"sell","reason":"near proj_high"}}],"avoid":["DOGEUSDT"],"market_note":"brief"}}
