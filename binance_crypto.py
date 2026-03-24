@@ -1776,40 +1776,100 @@ class CryptoTrader:
                     f"→ This is a bullish signal for BTC/ETH"
                 )
 
-        # ── Summarize existing holdings ───────────────────────
-        existing = [(s, p.pnl_pct(get_crypto_price(s)))
-                    for s, p in self.positions.items()] if self.positions else []
-        win_rate = round(self.wins / max(self.wins + self.losses, 1) * 100, 0)
+        # ── Binance fee constants ─────────────────────────────
+        # Binance.US maker=0% taker=0.1% → use 0.1% round-trip to be safe
+        BINANCE_FEE_RT = 0.001   # 0.1% round-trip (buy + sell)
+        MIN_NET_PROFIT = 0.015   # 1.5% minimum net profit after fees
 
+        # ── Bot-tracked positions with P&L ───────────────────
+        positions_text = ""
+        if self.positions:
+            positions_text = "\n🤖 BOT-TRACKED POSITIONS (must manage exits):\n"
+            for sym, pos in self.positions.items():
+                try:
+                    curr_price = get_crypto_price(sym)
+                    pnl_pct    = pos.pnl_pct(curr_price)
+                    pnl_usd    = round((curr_price - pos.entry_price) * pos.qty, 4)
+                    # Fee-aware minimum profitable exit
+                    min_exit   = round(pos.entry_price * (1 + BINANCE_FEE_RT + MIN_NET_PROFIT), 6)
+                    proj       = self._projections.get(sym, {})
+                    dist_tp    = ""
+                    if proj and not proj.get("error"):
+                        ph = proj.get("proj_high", 0)
+                        if ph:
+                            dist_tp = f" | {round((ph-curr_price)/curr_price*100,1)}% to proj_high ${ph}"
+                    positions_text += (
+                        f"  {sym}: entry=${pos.entry_price:.6f} now=${curr_price:.6f} "
+                        f"P&L={pnl_pct:+.1f}% (${pnl_usd:+.4f})\n"
+                        f"    stop=${pos.stop_price:.6f} | TP=${pos.tp_price:.6f} "
+                        f"| min_exit=${min_exit:.6f}{dist_tp}\n"
+                    )
+                except Exception:
+                    positions_text += f"  {sym}: entry=${pos.entry_price:.6f} (price unavailable)\n"
+
+        # ── Wallet holdings with fee-aware context ────────────
         holdings_text = ""
         all_wallet_holdings = tradeable + wallet.get("non_tradeable", [])
 
         if all_wallet_holdings:
-            holdings_text = "\nYOUR FULL WALLET HOLDINGS (decide: hold / sell-to-USDT / add):\n"
+            holdings_text = "\nWALLET HOLDINGS (decide: hold / sell-to-USDT / rotate):\n"
             for h in all_wallet_holdings:
-                sym  = h.get("symbol", f"{h['asset']}USDT")
-                proj = self._projections.get(sym, {})
-                proj_note = ""
-                val  = h.get("value_usdt", 0)
+                sym   = h.get("symbol", f"{h['asset']}USDT")
+                proj  = self._projections.get(sym, {})
+                val   = h.get("value_usdt", 0)
                 price = h.get("price", 0)
+                proj_note = ""
 
                 if proj and not proj.get("error") and price > 0:
                     ph = proj.get("proj_high", 0)
                     pl = proj.get("proj_low", 0)
                     if ph and pl:
+                        # Fee-aware minimum sell price
+                        min_sell = round(price * (1 + BINANCE_FEE_RT + 0.005), 6)
                         if price >= ph * 0.98:
-                            proj_note = f" ⚠️ NEAR PROJ HIGH ${ph} — consider selling to USDT"
+                            proj_note = f" ⚠️ AT PROJ HIGH — sell if ${ph} hit (profit-take)"
                         elif price <= pl * 1.02:
-                            proj_note = f" 🟢 AT PROJ LOW ${pl} — good hold/add zone"
+                            proj_note = f" 🟢 AT PROJ LOW — dip zone (good entry)"
                         else:
-                            dist_tp = round((ph - price) / price * 100, 1) if price > 0 else 0
-                            proj_note = f" → {dist_tp:.1f}% to proj_high ${ph}"
+                            upside = round((ph - price) / price * 100, 1)
+                            proj_note = f" → +{upside}% to proj_high ${ph} | min_sell=${min_sell}"
 
                 if val > 0 or h.get("qty", 0) > 0:
-                    val_str = f"= ${val:.2f}" if val > 0.01 else "(no price data)"
+                    val_str = f"= ${val:.2f}" if val > 0.01 else "(no price)"
+                    price_str = (f"${price:.8f}" if price > 0 and price < 0.001
+                                 else f"${price:.4f}" if price > 0 else "$0")
                     holdings_text += (f"  {h['asset']}: {h['qty']:.4f} "
-                                      f"{val_str} @ ${price:.6f}"
+                                      f"{val_str} @ {price_str}"
                                       f"{proj_note}\n")
+
+        # ── Determine trading mode ────────────────────────────
+        no_buying_power = crypto_pool < CRYPTO_RULES["min_trade_usdt"] and not has_coins
+        profit_focus    = no_buying_power and bool(self.positions)
+        rotation_mode   = not has_usdt and has_coins
+
+        if profit_focus:
+            mode_instruction = """
+🎯 PROFIT PROTECTION MODE — No buying power available.
+PRIORITY: Protect and grow what you already have.
+1. EXITS: Review all bot positions — are any near TP? Take profit if yes.
+2. TRAIL: If position is profitable, raise stop to entry price (lock in breakeven minimum)
+3. ROTATE only if a position has a clear sell signal AND a better coin is available
+4. WATCH: Note best opportunities for when USDT becomes available"""
+        elif rotation_mode:
+            mode_instruction = """
+🔄 ROTATION MODE — No USDT but have coins to work with.
+PRIORITY: Sell weakest coin → buy strongest opportunity.
+1. Identify your WEAKEST holding (bearish proj, near high, low momentum)
+2. Sell it → generates USDT → immediately buy the best current setup
+3. Always check: new coin must be projected to gain MORE than fee cost (>1.5%)
+4. Never sell a coin that's already profitable just to chase another — only rotate losers"""
+        else:
+            mode_instruction = """
+💰 OPPORTUNITY MODE — USDT available for buying.
+PRIORITY: Find best entry, buy low, plan exit above fees.
+1. Entry must be AT or BELOW proj_low
+2. TP must be at proj_high → minimum net gain after fees = 1.5%
+3. fee-aware rule: sell price must be > entry × 1.011 (fees + min profit)"""
 
         # ── Build situation-aware system prompts ──────────────
         if prompt_builder:
@@ -1830,7 +1890,6 @@ class CryptoTrader:
                              "sentiment access. ONLY valid JSON under 500 chars.")
 
         # ── Step 1: Grok live research BEFORE prompt assembly ─
-        # Must run here so grok_intel is defined when the prompt uses it
         grok_intel = ""
         try:
             self._log("   🔴 Grok searching X/web for crypto news...")
@@ -1838,8 +1897,9 @@ class CryptoTrader:
             wallet_coins = [h["asset"] for h in
                             (wallet.get("tradeable", []) + wallet.get("non_tradeable", []))
                             if h.get("value_usdt", 0) > 1]
+            position_coins = [s.replace("USDT","") for s in self.positions.keys()]
             all_watch = list(set(
-                [s.replace("USDT", "") for s in watch_coins] + wallet_coins
+                [s.replace("USDT", "") for s in watch_coins] + wallet_coins + position_coins
             ))[:10]
 
             research_prompt = (
@@ -1867,21 +1927,20 @@ class CryptoTrader:
         prompt = f"""=== CRYPTO TRADING — NOVATRADE 24/7 [{situation_mode.upper().replace('_',' ')}] ===
 {wallet_text}
 
-Available USDT: ${crypto_pool:.2f} | Bot positions: {existing or 'None'}
+Available USDT: ${crypto_pool:.2f} | Total wallet: ${crypto_equity:.2f}
 Crypto P&L: ${self.total_pnl:+.2f} | Win rate: {int(win_rate)}% ({self.wins}W/{self.losses}L)
-SPY trend: {spy_trend.upper()} (context only — crypto trades independently)
-Binance.US wallet total: ${crypto_equity:.2f}
+{positions_text}
 {holdings_text}
-CRYPTO RULES:
-- Min profit: {CRYPTO_RULES['min_profit_pct']*100:.1f}% | Stop: {CRYPTO_RULES['stop_loss_pct']*100:.0f}% | Max hold: {CRYPTO_RULES['max_hold_hours']}h
-- Always LIMIT orders (0% maker fee) | Entry ≤ proj_low | Exit at proj_high
-- COIN-TO-COIN TRADING: You CAN sell a weak coin to USDT, then buy a stronger coin
-  Example: DOGE looks weak → sell DOGE → use USDT → buy SHIB (stronger momentum)
-- NO USDT NEEDED TO START: If USDT=0 but you hold coins, sell the weakest coin first
-- DIPS ARE ENTRIES: weakness = buying opportunity if proj shows recovery
-- Trade 24/7: weekends, nights, always valid
+FEE RULES (CRITICAL — always factor into decisions):
+- Binance.US: 0.1% per trade → 0.2% round-trip (buy + sell)
+- Minimum profitable sell = entry × 1.011 (fees 0.2% + min profit 0.9%)
+- NEVER recommend selling below this floor — that's a loss after fees
+- For buys: entry ≤ proj_low | For sells: exit ≥ proj_high OR stop triggered
+- Example: buy SHIB @ $0.000006 → must sell above $0.0000066 to profit after fees
 
-24H MOVERS (our universe): {stats_text}
+{mode_instruction}
+
+24H MOVERS: {stats_text}
 
 {scan_text}
 
@@ -1893,19 +1952,18 @@ CRYPTO RULES:
 
 {smart_section}
 
-{f"LEARNED CONTEXT (from past trades):{chr(10)}{lessons_text}" if lessons_text else ""}
+{f"LEARNED CONTEXT:{chr(10)}{lessons_text}" if lessons_text else ""}
 
-TASK:
-1. SELL WEAK COINS: If any holding looks bearish/weak → sell it to USDT now
-   - This gives you buying power for step 2 WITHOUT needing a deposit
-2. BUY STRONG COINS: Use available USDT (including from step 1 sells) to buy best setup
-3. HOLD STRONG: Keep coins with bullish momentum
-4. PRIORITY if USDT=0: Pick the WEAKEST coin to sell first → that unlocks buying power
+TASK — [{situation_mode.upper().replace('_',' ')}]:
+1. POSITIONS: For each bot position above — hold, raise stop, or take profit?
+2. WALLET: For each holding — hold, sell-to-rotate, or add?
+3. BUYS: Only if entry ≤ proj_low AND projected gain > 1.5% after fees
+4. CONSISTENCY: If you say HOLD a coin, do NOT also put it in sell_decisions
 
-COIN-TO-COIN EXAMPLE:
+COIN-TO-COIN EXAMPLE (fees included):
   DOGE bearish → sell_decisions: [{{"symbol": "DOGEUSDT", "reason": "bearish, rotating to ADA"}}]
   ADA bullish  → crypto_trades:  [{{"symbol": "ADAUSDT", "action": "buy", "notional_usdt": 8.0}}]
-  = You just swapped DOGE for ADA via USDT automatically
+  ADA must reach ${{"entry * 1.011"}} minimum to profit after fees
 
 JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.0,"confidence":80,"entry_target":95000.0,"tp_target":97500.0,"rationale":"brief","owner":"claude"}}],"hold_decisions":[{{"symbol":"ETHUSDT","action":"hold","reason":"brief"}}],"sell_decisions":[{{"symbol":"SOLUSDT","action":"sell","reason":"near proj_high"}}],"avoid":["DOGEUSDT"],"market_note":"brief"}}
 
@@ -2080,11 +2138,27 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
                 atr       = proj.get("atr", 0)
                 entry_px  = entry or proj["proj_low"]
                 if atr and atr > 0:
-                    tp_px  = tp or round(entry_px + 3.5 * atr, 6)  # 3.5×ATR target
-                    stop_px= round(entry_px - 1.5 * atr, 6)         # 1.5×ATR stop
+                    tp_px  = tp or round(entry_px + 3.5 * atr, 6)
+                    stop_px= round(entry_px - 1.5 * atr, 6)
                 else:
                     tp_px  = tp or proj["proj_high"]
                     stop_px= round(entry_px * (1 - CRYPTO_RULES["stop_loss_pct"]), 6)
+
+                # ── Fee-aware profit check ────────────────────
+                # TP must be above entry + fees + min profit
+                # Binance.US: 0.1% taker per trade = 0.2% round-trip
+                fee_rt      = 0.002   # 0.2% round-trip
+                min_profit  = 0.009   # 0.9% minimum net profit
+                min_tp      = round(entry_px * (1 + fee_rt + min_profit), 8)
+                if tp_px < min_tp:
+                    tp_px = min_tp
+                    self._log(f"   📐 {sym} TP floored to ${tp_px:.8f} (fee-aware minimum)")
+
+                # Check projected gain is worth trading
+                net_gain_pct = round((tp_px - entry_px) / entry_px * 100 - fee_rt * 100, 2)
+                if net_gain_pct < 0.5:
+                    self._log(f"   ⚠️ {sym} net gain only {net_gain_pct:.1f}% after fees — skipping")
+                    continue
 
                 proposals.append({
                     "symbol":    sym,
