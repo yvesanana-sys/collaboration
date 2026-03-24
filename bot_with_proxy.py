@@ -255,6 +255,9 @@ shared_state = {
     "failover_mode":        None,   # None/claude_only/grok_only/autopilot
     "watch_mode_active":    False,
     "failed_sells":         {},      # {symbol: fail_count} — tracks persistent sell failures
+    # ── Timing ────────────────────────────────────────────────
+    "boot_time":            None,    # Set on startup — used for crypto 2.5min stagger
+    "crypto_last_run":      None,    # Wall-clock time of last crypto AI cycle
 }
 
 app = Flask(__name__)
@@ -5507,6 +5510,10 @@ def trading_loop():
     last_premarket  = None
     last_afterhours = None
 
+    # Record boot time — used for crypto 2.5min stagger offset
+    shared_state["boot_time"] = datetime.now(timezone.utc)
+    log("⏱️  Boot time recorded — crypto starts in 2.5 min (staggered)")
+
     # ── Background monitors (no AI needed) ──────────────────
     cash_check_interval = 60    # Check cash every 60 seconds
     trend_scan_interval = 3600  # Trend scan every 60 minutes
@@ -5660,16 +5667,24 @@ def trading_loop():
             log(f"❌ Loop error: {e}")
             interval = 5
 
-        # ── 🪙 CRYPTO — 24/7 wall-clock timer, never tied to stock sleep ──
-        # Uses real time NOT cycle_count — fires every 60 min exactly
-        # even when stock loop sleeps 60 min in afterhours/weekends
+        # ── 🪙 CRYPTO — 24/7 wall-clock timer, staggered 2.5min after stocks ──
+        # Offset: crypto first run starts 2.5 min after bot startup.
+        # Every run after that is exactly 60 min from last run.
+        # This staggers logs cleanly — stocks run first, crypto 2.5 min later.
         try:
             if crypto_trader.is_enabled():
-                spy_now  = shared_state.get("spy_trend", "neutral")
-                now_utc  = datetime.now(timezone.utc)
-                last_run = shared_state.get("crypto_last_run")
-                due      = (last_run is None or
-                            (now_utc - last_run).total_seconds() >= 3600)
+                spy_now     = shared_state.get("spy_trend", "neutral")
+                now_utc     = datetime.now(timezone.utc)
+                last_run    = shared_state.get("crypto_last_run")
+                boot_time   = shared_state.get("boot_time", now_utc)
+
+                # First run: wait 2.5 min after boot so stocks go first
+                # Subsequent runs: every 60 min from last run
+                if last_run is None:
+                    secs_since_boot = (now_utc - boot_time).total_seconds()
+                    due = secs_since_boot >= 150  # 2.5 min = 150 seconds
+                else:
+                    due = (now_utc - last_run).total_seconds() >= 3600
 
                 if due:
                     shared_state["crypto_last_run"] = now_utc
