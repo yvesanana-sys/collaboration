@@ -170,10 +170,42 @@ def binance_delete(path: str, params: dict) -> dict:
 # MARKET DATA
 # ══════════════════════════════════════════════════════════════
 
+# Known rebranded/migrated tokens — try alternate symbols if primary fails
+_SYMBOL_ALIASES = {
+    "FETUSDT":  ["FETUSDT", "AIUSDT"],   # FET → ASI Alliance (may trade as AI)
+    "OCEANUSDT":["OCEANUSDT"],
+    "AGIXUSDT": ["AGIXUSDT"],
+}
+
 def get_crypto_price(symbol: str) -> float:
-    """Get current price for a crypto symbol."""
-    data = binance_get("/api/v3/ticker/price", {"symbol": symbol})
-    return float(data["price"])
+    """
+    Get current price for a crypto symbol.
+    Uses 24hr ticker as fallback (more reliable than ticker/price for some pairs).
+    Handles rebranded tokens with aliases.
+    """
+    # Try primary symbol first
+    symbols_to_try = _SYMBOL_ALIASES.get(symbol, [symbol])
+
+    for sym in symbols_to_try:
+        try:
+            # Primary: fast single-price endpoint
+            data = binance_get("/api/v3/ticker/price", {"symbol": sym})
+            price = float(data.get("price", 0))
+            if price > 0:
+                return price
+        except Exception:
+            pass
+
+        try:
+            # Fallback: 24hr ticker (returns lastPrice, more reliable)
+            data = binance_get("/api/v3/ticker/24hr", {"symbol": sym})
+            price = float(data.get("lastPrice", 0))
+            if price > 0:
+                return price
+        except Exception:
+            pass
+
+    raise ValueError(f"Cannot get price for {symbol} (tried: {symbols_to_try})")
 
 def get_crypto_bars(symbol: str, interval: str = "1h", limit: int = 168) -> list:
     """
@@ -1047,21 +1079,32 @@ def get_full_wallet() -> dict:
                 else:
                     non_tradeable.append(entry)
             except Exception:
-                # Price lookup failed (delisted, rebranded, no USDT pair)
-                # Still track it — show qty so user knows it's seen
+                # Price lookup failed — try to estimate from known position
+                # (e.g. FET rebranded, use entry price if we have a position)
+                est_price = 0.0
+                if hasattr(self, 'positions') and symbol in self.positions:
+                    est_price = self.positions[symbol].entry_price
+                est_value = round(qty * est_price, 2) if est_price > 0 else 0
+
+                if est_value > 0:
+                    total_value += est_value
+
                 entry = {
                     "asset":       asset,
                     "symbol":      symbol,
                     "qty":         qty,
                     "free":        free,
                     "locked":      lock,
-                    "price":       0,
-                    "value_usdt":  0,
-                    "in_universe": False,
-                    "note":        "no USDT pair — held only",
+                    "price":       est_price,
+                    "value_usdt":  est_value,
+                    "in_universe": in_universe,
+                    "note":        "price estimated from entry" if est_price > 0 else "no USDT price — check Binance.US",
                 }
                 positions.append(entry)
-                non_tradeable.append(entry)
+                if in_universe:
+                    tradeable.append(entry)
+                else:
+                    non_tradeable.append(entry)
 
         # ── BNB (fee discount coin — track separately) ────────
         bnb_bal  = balances.get("BNB", {})
@@ -1096,10 +1139,11 @@ def get_full_wallet() -> dict:
             lines.append(f"  📦 Other holdings ({len(non_tradeable)}) — hold only:")
             for p in non_tradeable:
                 if p.get("value_usdt", 0) > 0.5:
-                    lines.append(f"    {p['asset']}: {p['qty']:.4f} = ${p.get('value_usdt', 0):.2f}")
+                    note = f" ({p['note']})" if p.get("note") else ""
+                    lines.append(f"    {p['asset']}: {p['qty']:.4f} = ${p.get('value_usdt', 0):.2f}{note}")
                 elif p.get("qty", 0) > 0:
-                    # Has quantity but no price (rebranded/delisted)
-                    lines.append(f"    {p['asset']}: {p['qty']:.4f} (no USDT price — check Binance.US)")
+                    note = p.get("note", "no USDT price — check Binance.US")
+                    lines.append(f"    {p['asset']}: {p['qty']:.4f} ({note})")
         if bnb_info:
             lines.append(f"  🔶 BNB (fee coin): {bnb_info['qty']:.4f} = ${bnb_info['value_usdt']:.2f}")
         if stablecoins:
