@@ -5707,6 +5707,12 @@ def trading_loop():
                     exits = crypto_trader.run_exit_monitor()
                     if exits:
                         log(f"🪙 Crypto: {exits} autonomous exit(s)")
+                    else:
+                        # Show countdown to next AI cycle
+                        secs_since = (now_utc - last_run).total_seconds()
+                        secs_left  = max(0, 3600 - secs_since)
+                        m, s       = int(secs_left // 60), int(secs_left % 60)
+                        log(f"🪙 Crypto: exit monitor OK | next AI cycle in {m}m {s}s")
 
         except Exception as ce:
             log(f"⚠️ Crypto loop error: {ce}")
@@ -5714,12 +5720,36 @@ def trading_loop():
         mode, interval = get_market_mode()
 
         # ── Crypto keeps the bot alive 24/7 ──────────────────
-        # Crypto markets never close — cap sleep to 5 min when
-        # crypto is enabled so we catch moves on nights/weekends.
-        # Stock logic is unaffected — it checks mode before acting.
         if crypto_trader.is_enabled() and interval > 5:
             interval = 5
 
+        # ── Countdown timers ─────────────────────────────────
+        now_utc          = datetime.now(timezone.utc)
+        next_stock_time  = now_utc + timedelta(minutes=interval)
+        next_stock_str   = next_stock_time.astimezone(
+                               ZoneInfo("America/New_York")
+                           ).strftime("%H:%M:%S ET")
+
+        # Crypto: next AI cycle
+        crypto_last      = shared_state.get("crypto_last_run")
+        boot_time        = shared_state.get("boot_time", now_utc)
+        if crypto_last is None:
+            # Still waiting for first run (2.5 min stagger)
+            secs_elapsed = (now_utc - boot_time).total_seconds()
+            secs_left    = max(0, 150 - secs_elapsed)
+            next_crypto_str = f"first run in {int(secs_left)}s"
+        else:
+            secs_since_crypto = (now_utc - crypto_last).total_seconds()
+            secs_to_crypto    = max(0, 3600 - secs_since_crypto)
+            mins_to_crypto    = int(secs_to_crypto // 60)
+            secs_rem          = int(secs_to_crypto % 60)
+            next_crypto_ai    = (now_utc + timedelta(seconds=secs_to_crypto)
+                                 ).astimezone(ZoneInfo("America/New_York")
+                                 ).strftime("%H:%M:%S ET")
+            next_crypto_str   = f"{mins_to_crypto}m {secs_rem}s → AI cycle @ {next_crypto_ai}"
+
+        log(f"⏱  Stock next: {interval}m → {next_stock_str} | "
+            f"Crypto next: {next_crypto_str}")
         log(f"Sleeping {interval} min [mode: {mode}]...")
         time.sleep(interval * 60)
 
