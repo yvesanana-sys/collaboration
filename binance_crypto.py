@@ -1079,26 +1079,18 @@ def get_full_wallet() -> dict:
                 else:
                     non_tradeable.append(entry)
             except Exception:
-                # Price lookup failed — try to estimate from known position
-                # (e.g. FET rebranded, use entry price if we have a position)
-                est_price = 0.0
-                if hasattr(self, 'positions') and symbol in self.positions:
-                    est_price = self.positions[symbol].entry_price
-                est_value = round(qty * est_price, 2) if est_price > 0 else 0
-
-                if est_value > 0:
-                    total_value += est_value
-
+                # Price lookup failed (rebranded, delisted, no USDT pair)
+                # Still show the holding so user knows it exists
                 entry = {
                     "asset":       asset,
                     "symbol":      symbol,
                     "qty":         qty,
                     "free":        free,
                     "locked":      lock,
-                    "price":       est_price,
-                    "value_usdt":  est_value,
+                    "price":       0,
+                    "value_usdt":  0,
                     "in_universe": in_universe,
-                    "note":        "price estimated from entry" if est_price > 0 else "no USDT price — check Binance.US",
+                    "note":        "no USDT price — check Binance.US",
                 }
                 positions.append(entry)
                 if in_universe:
