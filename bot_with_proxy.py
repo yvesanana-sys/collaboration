@@ -256,7 +256,7 @@ shared_state = {
     "watch_mode_active":    False,
     "failed_sells":         {},      # {symbol: fail_count} — tracks persistent sell failures
     # ── Timing ────────────────────────────────────────────────
-    "boot_time":            None,    # Set on startup — used for crypto 2.5min stagger
+    "boot_time":            None,    # Set at startup — datetime.now(timezone.utc)
     "crypto_last_run":      None,    # Wall-clock time of last crypto AI cycle
 }
 
@@ -5676,7 +5676,8 @@ def trading_loop():
                 spy_now     = shared_state.get("spy_trend", "neutral")
                 now_utc     = datetime.now(timezone.utc)
                 last_run    = shared_state.get("crypto_last_run")
-                boot_time   = shared_state.get("boot_time", now_utc)
+                # Use 'or' not .get() default — shared_state["boot_time"] is None initially
+                boot_time   = shared_state.get("boot_time") or now_utc
 
                 # First run: wait 2.5 min after boot so stocks go first
                 # Subsequent runs: every 60 min from last run
@@ -5708,7 +5709,7 @@ def trading_loop():
                     if exits:
                         log(f"🪙 Crypto: {exits} autonomous exit(s)")
                     else:
-                        # Show countdown to next AI cycle
+                        # Countdown to next AI cycle
                         secs_since = (now_utc - last_run).total_seconds()
                         secs_left  = max(0, 3600 - secs_since)
                         m, s       = int(secs_left // 60), int(secs_left % 60)
@@ -5732,7 +5733,7 @@ def trading_loop():
 
         # Crypto: next AI cycle
         crypto_last      = shared_state.get("crypto_last_run")
-        boot_time        = shared_state.get("boot_time", now_utc)
+        boot_time        = shared_state.get("boot_time") or now_utc
         if crypto_last is None:
             # Still waiting for first run (2.5 min stagger)
             secs_elapsed = (now_utc - boot_time).total_seconds()
