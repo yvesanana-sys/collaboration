@@ -1777,6 +1777,8 @@ class CryptoTrader:
                 )
 
         # ── Binance fee constants ─────────────────────────────
+        win_rate = round(self.wins / max(self.wins + self.losses, 1) * 100, 0)
+
         # Binance.US maker=0% taker=0.1% → use 0.1% round-trip to be safe
         BINANCE_FEE_RT = 0.001   # 0.1% round-trip (buy + sell)
         MIN_NET_PROFIT = 0.015   # 1.5% minimum net profit after fees
