@@ -1552,35 +1552,55 @@ class CryptoTrader:
 
         # Get available USDT + full wallet
         self._log("   💼 Reading full Binance.US wallet...")
+        wallet = {}
+        crypto_pool   = 0.0
+        wallet_text   = ""
+        tradeable     = []
+        crypto_equity = 0.0
         try:
             wallet        = get_full_wallet()
+            if wallet.get("error"):
+                self._log(f"   ⚠️ Wallet error: {wallet['error']} — retrying once...")
+                import time as _t; _t.sleep(2)
+                wallet = get_full_wallet()  # One retry
+                if wallet.get("error"):
+                    self._log(f"   ❌ Wallet read failed twice: {wallet['error']}")
+                    return 0
+
             crypto_pool   = wallet["usdt_free"]
             wallet_text   = wallet["wallet_summary"]
             tradeable     = wallet["tradeable"]
-            # Use Binance wallet total as crypto equity — independent of Alpaca
-            crypto_equity = wallet.get("total_value", max(total_equity * 0.3, crypto_pool))
+            crypto_equity = wallet.get("total_value",
+                            max(total_equity * 0.3, crypto_pool))
 
-            # ── Always log what we found ──────────────────────
-            if wallet.get("error"):
-                self._log(f"   ⚠️ Wallet error: {wallet['error']}")
-            else:
-                self._log(f"   💵 USDT free: ${crypto_pool:.2f} | "
-                          f"Total wallet: ${crypto_equity:.2f}")
-                if tradeable:
-                    for h in tradeable[:4]:
-                        self._log(f"   🪙 {h['asset']}: {h['qty']:.4f} "
-                                  f"= ${h['value_usdt']:.2f} @ ${h['price']:.4f}")
-                elif crypto_pool < CRYPTO_RULES["min_trade_usdt"]:
-                    self._log(f"   ℹ️  No crypto holdings, USDT=${crypto_pool:.2f} "
-                              f"(min ${CRYPTO_RULES['min_trade_usdt']})")
-                if wallet.get("bnb"):
-                    bnb = wallet["bnb"]
-                    self._log(f"   🔶 BNB: {bnb['qty']:.4f} = ${bnb['value_usdt']:.2f}")
-                staked = [s for s in wallet.get("non_tradeable", [])
-                          if s.get("value_usdt", 0) > 1]
-                if staked:
-                    staked_summary = [(s["asset"], f'${s["value_usdt"]:.2f}') for s in staked[:3]]
-                    self._log(f"   📦 Other holdings: {staked_summary}")
+            # ── Log full wallet ──────────────────────────────────
+            self._log(f"   💵 USDT free: ${crypto_pool:.2f} | "
+                      f"Total wallet: ${crypto_equity:.2f}")
+
+            # Show ALL tradeable coins
+            for h in tradeable:
+                price_str = (f"${h['price']:.8f}" if h['price'] < 0.001
+                             else f"${h['price']:.4f}")
+                self._log(f"   🪙 {h['asset']}: {h['qty']:.4f} "
+                          f"= ${h['value_usdt']:.2f} @ {price_str}")
+
+            # Show non-tradeable / held coins (FET, AUDIO, etc.)
+            non_td = wallet.get("non_tradeable", [])
+            visible = [p for p in non_td if p.get("qty", 0) > 0]
+            for p in visible[:6]:
+                if p.get("value_usdt", 0) > 0.01:
+                    price_str = (f"${p['price']:.8f}" if p.get('price', 0) < 0.001
+                                 else f"${p['price']:.4f}")
+                    self._log(f"   📦 {p['asset']}: {p['qty']:.4f} "
+                              f"= ${p['value_usdt']:.2f} @ {price_str}")
+                else:
+                    note = p.get("note", "no price")
+                    self._log(f"   📦 {p['asset']}: {p['qty']:.4f} ({note})")
+
+            if wallet.get("bnb"):
+                bnb = wallet["bnb"]
+                self._log(f"   🔶 BNB: {bnb['qty']:.4f} = ${bnb['value_usdt']:.2f}")
+
         except Exception as e:
             self._log(f"   ⚠️ Wallet read failed: {e}")
             return 0
