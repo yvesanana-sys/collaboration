@@ -172,35 +172,50 @@ def binance_delete(path: str, params: dict) -> dict:
 
 # Known rebranded/migrated tokens — try alternate symbols if primary fails
 _SYMBOL_ALIASES = {
-    "FETUSDT":  ["FETUSDT", "AIUSDT"],   # FET → ASI Alliance (may trade as AI)
-    "OCEANUSDT":["OCEANUSDT"],
-    "AGIXUSDT": ["AGIXUSDT"],
+    # FET merged into ASI Alliance — try multiple possible symbols
+    "FETUSDT":  ["FETUSDT", "AIUSDT", "ASIUSDT"],
+    "OCEANUSDT":["OCEANUSDT", "ASIUSDT"],
+    "AGIXUSDT": ["AGIXUSDT", "ASIUSDT"],
 }
+
+# Cache: if we successfully bought/sold a symbol, it definitely works
+_VERIFIED_SYMBOLS: set = set()
 
 def get_crypto_price(symbol: str) -> float:
     """
     Get current price for a crypto symbol.
-    Uses 24hr ticker as fallback (more reliable than ticker/price for some pairs).
-    Handles rebranded tokens with aliases.
+    Uses 24hr ticker as fallback. Handles rebranded tokens with aliases.
+    Caches verified symbols so we don't retry dead aliases.
     """
-    # Try primary symbol first
-    symbols_to_try = _SYMBOL_ALIASES.get(symbol, [symbol])
-
-    for sym in symbols_to_try:
+    # If we've already verified this symbol works, use it directly
+    if symbol in _VERIFIED_SYMBOLS:
         try:
-            # Primary: fast single-price endpoint
-            data = binance_get("/api/v3/ticker/price", {"symbol": sym})
+            data = binance_get("/api/v3/ticker/price", {"symbol": symbol})
             price = float(data.get("price", 0))
             if price > 0:
                 return price
         except Exception:
             pass
 
+    symbols_to_try = _SYMBOL_ALIASES.get(symbol, [symbol])
+
+    for sym in symbols_to_try:
         try:
-            # Fallback: 24hr ticker (returns lastPrice, more reliable)
-            data = binance_get("/api/v3/ticker/24hr", {"symbol": sym})
+            data  = binance_get("/api/v3/ticker/price", {"symbol": sym})
+            price = float(data.get("price", 0))
+            if price > 0:
+                _VERIFIED_SYMBOLS.add(symbol)  # Remember what worked
+                if sym != symbol:
+                    _VERIFIED_SYMBOLS.add(sym)
+                return price
+        except Exception:
+            pass
+
+        try:
+            data  = binance_get("/api/v3/ticker/24hr", {"symbol": sym})
             price = float(data.get("lastPrice", 0))
             if price > 0:
+                _VERIFIED_SYMBOLS.add(symbol)
                 return price
         except Exception:
             pass
@@ -1597,6 +1612,22 @@ class CryptoTrader:
                     note = p.get("note", "no price")
                     self._log(f"   📦 {p['asset']}: {p['qty']:.4f} ({note})")
 
+            # ── Show staked coins clearly ─────────────────────
+            try:
+                staking_positions = get_staking_info()
+                if staking_positions and not staking_positions[0].get("error"):
+                    for s in staking_positions:
+                        rewards = s.get("rewards_pending", 0)
+                        unbond  = s.get("unbonding_days", "?")
+                        val     = s.get("staked_value", 0)
+                        self._log(
+                            f"   🔒 {s['asset']} STAKED: {s['staked_qty']:.4f} "
+                            f"= ${val:.2f} | rewards={rewards:.4f} | "
+                            f"unbond={unbond}d ← LOCKED, cannot sell directly"
+                        )
+            except Exception:
+                pass
+
             if wallet.get("bnb"):
                 bnb = wallet["bnb"]
                 self._log(f"   🔶 BNB: {bnb['qty']:.4f} = ${bnb['value_usdt']:.2f}")
@@ -1608,13 +1639,33 @@ class CryptoTrader:
         # Check if we have anything to work with
         # Either USDT to buy directly, OR coins we can sell first
         # Use $2 minimum for individual coins — they combine with existing USDT
+        # NOTE: FET and other coins with price lookup failures still have qty
+        # — we try to get their price live at sell time, not at filter time
         all_holdings = wallet.get("tradeable", []) + wallet.get("non_tradeable", [])
-        min_sellable = 2.0  # Lower threshold — coin sale proceeds add to existing USDT
+        min_sellable = 2.0
+
+        def _estimate_value(h: dict) -> float:
+            """Get best value estimate — try live price if stored is 0."""
+            val = h.get("value_usdt", 0)
+            if val > 0:
+                return val
+            # value=0 means price lookup failed at wallet read time
+            # Try a fresh price lookup now
+            sym = h.get("symbol", f"{h['asset']}USDT")
+            qty = h.get("free", 0) + h.get("locked", 0)
+            if qty <= 0:
+                return 0
+            try:
+                price = get_crypto_price(sym)
+                return round(qty * price, 2)
+            except Exception:
+                return 0
+
         sellable_coins = [h for h in all_holdings
                          if h.get("free", 0) > 0
-                         and h.get("value_usdt", 0) >= min_sellable]
+                         and _estimate_value(h) >= min_sellable]
 
-        total_available = crypto_pool + sum(h.get("value_usdt", 0) for h in sellable_coins)
+        total_available = crypto_pool + sum(_estimate_value(h) for h in sellable_coins)
         has_usdt   = crypto_pool >= CRYPTO_RULES["min_trade_usdt"]
         has_coins  = len(sellable_coins) > 0
         can_trade  = total_available >= CRYPTO_RULES["min_trade_usdt"]
@@ -1684,8 +1735,10 @@ class CryptoTrader:
             # Crypto situation modes — independent of stocks
             # Total sellable value = USDT + all free coin holdings
             total_sellable = crypto_pool + sum(
-                h.get("value_usdt", 0) for h in (wallet.get("tradeable", []) + wallet.get("non_tradeable", []))
-                if h.get("free", 0) > 0 and h.get("value_usdt", 0) >= 2.0
+                (_estimate_value(h) if _estimate_value(h) > 0 else h.get("value_usdt", 0))
+                for h in (wallet.get("tradeable", []) + wallet.get("non_tradeable", []))
+                if h.get("free", 0) > 0 and (h.get("value_usdt", 0) >= 2.0 or
+                    h.get("symbol", "") in _VERIFIED_SYMBOLS)
             )
 
             if near_stop:
@@ -1782,6 +1835,32 @@ class CryptoTrader:
         # Binance.US maker=0% taker=0.1% → use 0.1% round-trip to be safe
         BINANCE_FEE_RT = 0.001   # 0.1% round-trip (buy + sell)
         MIN_NET_PROFIT = 0.015   # 1.5% minimum net profit after fees
+
+        # ── Staking summary for AI context ───────────────────
+        staking_text = ""
+        try:
+            staking_positions = get_staking_info()
+            if staking_positions and not staking_positions[0].get("error"):
+                total_staked_val = sum(s.get("staked_value", 0) for s in staking_positions)
+                staking_lines    = [f"\n🔒 STAKED COINS (LOCKED — cannot sell directly):"]
+                for s in staking_positions:
+                    rewards = s.get("rewards_pending", 0)
+                    unbond  = s.get("unbonding_days", "?")
+                    val     = s.get("staked_value", 0)
+                    staking_lines.append(
+                        f"  {s['asset']}: {s['staked_qty']:.4f} = ${val:.2f} | "
+                        f"pending rewards={rewards:.4f} | unbond={unbond}d"
+                    )
+                staking_lines.append(
+                    f"  Total locked: ${total_staked_val:.2f} "
+                    f"| To access: unstake (wait unbonding days) OR claim rewards only"
+                )
+                staking_lines.append(
+                    f"  REWARDS are claimable immediately without unstaking!"
+                )
+                staking_text = "\n".join(staking_lines)
+        except Exception:
+            pass
 
         # ── Bot-tracked positions with P&L ───────────────────
         positions_text = ""
@@ -1933,6 +2012,7 @@ Available USDT: ${crypto_pool:.2f} | Total wallet: ${crypto_equity:.2f}
 Crypto P&L: ${self.total_pnl:+.2f} | Win rate: {int(win_rate)}% ({self.wins}W/{self.losses}L)
 {positions_text}
 {holdings_text}
+{staking_text}
 FEE RULES (CRITICAL — always factor into decisions):
 - Binance.US: 0.1% per trade → 0.2% round-trip (buy + sell)
 - Minimum profitable sell = entry × 1.011 (fees 0.2% + min profit 0.9%)
@@ -2272,6 +2352,8 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.
                     self.positions[sym] = pos
                     crypto_pool -= notional
                     new_positions += 1
+                    # Mark as verified — price lookups will use this symbol directly
+                    _VERIFIED_SYMBOLS.add(sym)
                     self._log(f"   ✅ Order placed: {result.get('orderId')} | "
                               f"stop=${pos.stop_price:.6f} TP=${pos.tp_price:.6f}")
                 else:
