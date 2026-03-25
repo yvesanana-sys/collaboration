@@ -707,6 +707,173 @@ UNBONDING_PERIODS = {
     "FET":   21,   # 21 days
 }
 
+def liquidate_all_to_usdt(log_fn=None) -> dict:
+    """
+    SPOT-ONLY LIQUIDATION — sells all free spot coin balances to USDT.
+
+    Deliberately SKIPS:
+      - Staked assets (FET/AUDIO/KAVA) — keep earning APY
+      - BNB — needed for fee discounts
+      - Stablecoins (USDT/BUSD/USDC) — already USDT
+
+    Only sells: free spot balances (SHIB, DOGE, RVN, KAVA spot, etc.)
+    Uses MARKET orders for instant fills — no price dependency.
+
+    Returns summary dict with sold amounts and new USDT balance.
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(f"[LIQUIDATE] {msg}")
+        else:
+            print(f"[LIQUIDATE] {msg}", flush=True)
+
+    _log("💵 SPOT LIQUIDATION — converting free coins to USDT")
+    _log("   (Staked assets kept — they stay earning APY)")
+    _log("=" * 55)
+
+    results = {
+        "sold":        [],
+        "skipped":     [],
+        "failed":      [],
+        "usdt_gained": 0.0,
+        "usdt_final":  0.0,
+        "status":      "ok",
+    }
+
+    import time as _time
+
+    # ── Read wallet ───────────────────────────────────────────
+    try:
+        data     = binance_get("/api/v3/account", signed=True)
+        balances = {b["asset"]: b for b in data["balances"]}
+    except Exception as e:
+        _log(f"❌ Cannot read wallet: {e}")
+        results["status"] = "failed"
+        return results
+
+    # ── Skip list ─────────────────────────────────────────────
+    skip_always = {"USDT", "BUSD", "USDC", "TUSD", "USDP", "BNB"}
+
+    # Get staked asset names so we don't try to sell them
+    staked_assets = set()
+    try:
+        staking = get_staking_info()
+        for s in staking:
+            if not s.get("error") and s.get("staked_qty", 0) > 0:
+                staked_assets.add(s["asset"])
+                _log(f"   🔒 {s['asset']}: staked {s['staked_qty']:.4f} "
+                     f"= ${s.get('staked_value', 0):.2f} — KEEPING (earns APY)")
+    except Exception as e:
+        _log(f"   ⚠️ Could not read staking info: {e} — will skip no staked assets")
+
+    _log("")
+
+    # ── Sell all free spot balances ───────────────────────────
+    for asset, bal in sorted(balances.items()):
+        if asset in skip_always:
+            continue
+
+        free = float(bal.get("free", "0"))
+        if free < 0.000001:
+            continue
+
+        sym = f"{asset}USDT"
+
+        # Skip staked assets — their spot balance may be 0 anyway
+        # but be explicit
+        if asset in staked_assets:
+            results["skipped"].append({"asset": asset, "reason": "staked"})
+            continue
+
+        # Get price
+        price = 0.0
+        try:
+            price = get_crypto_price(sym)
+        except Exception:
+            pass
+
+        if price <= 0:
+            # Try 24hr ticker directly as last resort
+            try:
+                ticker = binance_get("/api/v3/ticker/24hr", {"symbol": sym})
+                price  = float(ticker.get("lastPrice", 0))
+            except Exception:
+                pass
+
+        if price <= 0:
+            _log(f"   ⚠️ {asset}: no price found — skipping")
+            results["skipped"].append({"asset": asset, "reason": "no_price",
+                                        "qty": free})
+            continue
+
+        val = free * price
+        if val < 1.0:
+            _log(f"   ⚠️ {asset}: ${val:.4f} dust — skipping")
+            results["skipped"].append({"asset": asset, "reason": "dust",
+                                        "qty": free, "value": val})
+            continue
+
+        # Truncate to exchange precision
+        decimals = CRYPTO_UNIVERSE.get(sym, {}).get("decimals", 4)
+        qty      = float(f"{free:.{decimals}f}")
+        if qty <= 0:
+            continue
+
+        try:
+            result = binance_post("/api/v3/order", {
+                "symbol":    sym,
+                "side":      "SELL",
+                "type":      "MARKET",
+                "quantity":  str(qty),
+                "timestamp": _timestamp(),
+            })
+
+            if result.get("orderId"):
+                usdt_est = round(qty * price, 2)
+                _log(f"   ✅ SOLD {asset}: {qty} @ ${price:.8f} "
+                     f"→ ~${usdt_est:.2f} USDT | order {result['orderId']}")
+                results["sold"].append({
+                    "asset":      asset,
+                    "qty":        qty,
+                    "price":      price,
+                    "usdt_value": usdt_est,
+                    "order_id":   result["orderId"],
+                })
+                results["usdt_gained"] += usdt_est
+                _time.sleep(0.5)  # Rate limit protection
+            else:
+                _log(f"   ❌ SELL {asset} failed: {result}")
+                results["failed"].append(f"sell_{asset}: {result}")
+        except Exception as e:
+            _log(f"   ❌ SELL {asset} error: {e}")
+            results["failed"].append(f"sell_{asset}: {e}")
+
+    # ── Read final USDT balance ───────────────────────────────
+    try:
+        data     = binance_get("/api/v3/account", signed=True)
+        balances = {b["asset"]: b for b in data["balances"]}
+        usdt_bal = float(balances.get("USDT", {}).get("free", 0))
+        results["usdt_final"] = round(usdt_bal, 2)
+    except Exception as e:
+        _log(f"   ⚠️ Could not read final USDT: {e}")
+
+    # ── Summary ───────────────────────────────────────────────
+    _log("=" * 55)
+    _log(f"✅ LIQUIDATION COMPLETE")
+    _log(f"   Sold:       {len(results['sold'])} coins "
+         f"→ ~${results['usdt_gained']:.2f} USDT")
+    _log(f"   Skipped:    {len(results['skipped'])} "
+         f"(staked/dust/no-price)")
+    _log(f"   Final USDT: ${results['usdt_final']:.2f}")
+    if results["failed"]:
+        _log(f"   ⚠️ Failures: {results['failed']}")
+    if staked_assets:
+        _log(f"   🔒 Staked (untouched): {', '.join(staked_assets)}")
+        _log(f"      → Still earning APY. Claim rewards from Binance.US → Earn")
+
+    return results
+
+
 def get_staking_info(asset: str = None) -> list:
     """
     Get staking balance, APY, rewards, and auto-restake status.
