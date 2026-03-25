@@ -361,6 +361,156 @@ def health():
 
 @app.route("/pdt")
 def pdt_status_endpoint():
+    """Check PDT status and active hold plans."""
+    try:
+        account = alpaca("GET", "/v2/account")
+        equity  = float(account.get("equity", 55))
+        status  = get_pdt_status(equity)
+        guidance = {}
+        projections = shared_state.get("last_projections", {})
+        for sym in status.get("intraday_buys", []):
+            proj = projections.get(sym, {})
+            if proj and not proj.get("error"):
+                guidance[sym] = {
+                    "bias":       proj.get("bias", "unknown"),
+                    "confidence": proj.get("confidence", 0),
+                    "proj_high":  proj.get("proj_high"),
+                    "proj_low":   proj.get("proj_low"),
+                    "recommendation": (
+                        "HOLD OVERNIGHT — bullish projection"
+                        if proj.get("bias") == "bullish"
+                        else "CONSIDER SELLING — bearish projection"
+                        if proj.get("bias") == "bearish"
+                        else "HOLD — neutral, set tight stop"
+                    ),
+                }
+        status["projection_guidance"] = guidance
+        hold_plans = {k.replace("pdt_hold_", ""): v
+                      for k, v in shared_state.items()
+                      if k.startswith("pdt_hold_")}
+        status["active_hold_plans"] = hold_plans
+        status["explanation"] = (
+            "PDT rule: accounts < $25,000 limited to 3 day trades per 5 business days."
+        )
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+def liquidate_endpoint():
+    """
+    MANUAL LIQUIDATION ENDPOINT
+    Converts all Binance.US crypto holdings to USDT for pure trading.
+
+    Safety: requires confirm=yes parameter to prevent accidental trigger.
+
+    GET  /liquidate          → shows current holdings + what would be liquidated
+    GET  /liquidate?confirm=yes → EXECUTES full liquidation
+    POST /liquidate          → same as GET with confirm=yes (for programmatic use)
+
+    WARNING: This initiates unstaking (21-day wait for FET/KAVA).
+             Spot coins are sold immediately via MARKET orders.
+    """
+    from binance_crypto import liquidate_all_to_usdt, get_full_wallet, get_staking_info
+
+    confirm = request.args.get("confirm", "").lower() == "yes" \
+              or request.method == "POST"
+
+    if not confirm:
+        # Preview mode — show what would be sold, nothing executed
+        try:
+            wallet  = get_full_wallet()
+            staking = get_staking_info()
+
+            # Staked assets — show as PROTECTED
+            staked_assets = {}
+            for s in staking:
+                if not s.get("error") and s.get("staked_qty", 0) > 0:
+                    staked_assets[s["asset"]] = s
+
+            # Spot coins that would be sold
+            spot_to_sell = []
+            spot_to_skip = []
+            for h in wallet.get("positions", []):
+                asset = h["asset"]
+                if asset in staked_assets:
+                    continue  # Staked — protected
+                free = h.get("free", 0)
+                val  = h.get("value_usdt", 0)
+                if free > 0 and val >= 1.0:
+                    spot_to_sell.append({
+                        "asset":      asset,
+                        "qty":        free,
+                        "value_usdt": val,
+                        "price":      h.get("price", 0),
+                        "action":     "SELL → USDT (market order, instant)",
+                    })
+                elif free > 0:
+                    spot_to_skip.append({
+                        "asset":  asset,
+                        "qty":    free,
+                        "value":  val,
+                        "reason": "dust < $1",
+                    })
+
+            total_spot   = sum(h["value_usdt"] for h in spot_to_sell)
+            usdt_now     = wallet.get("usdt_free", 0)
+            usdt_after   = round(usdt_now + total_spot, 2)
+            total_staked = sum(s.get("staked_value", 0)
+                               for s in staked_assets.values())
+
+            staked_summary = [
+                {
+                    "asset":       a,
+                    "staked_qty":  s["staked_qty"],
+                    "value_usdt":  s.get("staked_value", 0),
+                    "rewards":     s.get("rewards_pending", 0),
+                    "unbond_days": s.get("unbonding_days", "?"),
+                    "action":      "PROTECTED — earning APY, not touched",
+                }
+                for a, s in staked_assets.items()
+            ]
+
+            return jsonify({
+                "status":          "PREVIEW — add ?confirm=yes to execute",
+                "warning":         "Sells all free spot coins to USDT via market orders. Staked assets (FET/AUDIO/KAVA) are left untouched.",
+                "usdt_now":        round(usdt_now, 2),
+                "usdt_after_sale": usdt_after,
+                "spot_to_sell":    spot_to_sell,
+                "spot_to_skip":    spot_to_skip,
+                "staked_protected": staked_summary,
+                "staked_total_value": round(total_staked, 2),
+                "tip":             "Claim staking rewards separately from Binance.US → Earn → Staking",
+                "execute_url":     "/liquidate?confirm=yes",
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # ── EXECUTE liquidation ───────────────────────────────────
+    log("🔴 LIQUIDATION REQUESTED via /liquidate endpoint")
+    log("   Converting all crypto holdings to USDT for pure trading...")
+
+    try:
+        result = liquidate_all_to_usdt(log_fn=log)
+
+        # Store liquidation timestamp so bot knows to trade fresh
+        shared_state["last_liquidation"] = datetime.now(timezone.utc).isoformat()
+        shared_state["liquidation_result"] = result
+
+        return jsonify({
+            "status":      "LIQUIDATION EXECUTED",
+            "coins_sold":  result["sold"],
+            "skipped":     result["skipped"],
+            "usdt_gained": result["usdt_gained"],
+            "usdt_final":  result["usdt_final"],
+            "failures":    result["failed"],
+            "note":        (
+                "All free spot coins sold to USDT. "
+                "Staked assets (FET/AUDIO/KAVA) untouched — still earning APY. "
+                "Claim staking rewards from Binance.US → Earn → Staking for extra USDT."
+            ),
+        })
+    except Exception as e:
+        log(f"❌ Liquidation error: {e}")
+        return jsonify({"error": str(e), "status": "FAILED"}), 500
     """
     Check PDT (Pattern Day Trader) status.
     Shows day trades used, remaining, intraday buys, and projection guidance.
