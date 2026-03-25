@@ -2303,25 +2303,49 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                     holding = wallet_map.get(asset)
                     if holding and holding.get("free", 0) > 0:
                         qty = holding["free"]
+
+                        # Get price — fallback to wallet stored price for micro-price coins
+                        curr = 0.0
                         try:
                             curr = get_crypto_price(sym)
                         except Exception:
-                            self._log(f"   ⚠️ Cannot get price for {sym} — skipping sell")
-                            continue
-                        val = qty * curr
-                        # Skip dust positions
-                        if val < 2.0:
+                            pass
+                        if curr <= 0:
+                            curr = holding.get("price", 0)
+                            if curr > 0:
+                                self._log(f"   ℹ️ {sym} using wallet price ${curr:.8f}")
+
+                        val = qty * curr if curr > 0 else 0
+
+                        # Skip dust
+                        if curr > 0 and val < 2.0:
                             self._log(f"   ⚠️ {sym} dust (${val:.4f}) — skipping sell")
                             continue
+
                         # Truncate to exchange precision
                         decimals = CRYPTO_UNIVERSE.get(sym, {}).get("decimals", 4)
                         qty = float(f"{qty:.{decimals}f}")
                         if qty <= 0:
                             self._log(f"   ⚠️ {sym} rounded to 0 qty — skipping")
                             continue
-                        result = place_crypto_sell(sym, qty, round(curr * 1.001, 4))
+
+                        if curr > 0:
+                            # LIMIT sell with enough decimal places for micro-price coins
+                            sell_price = round(curr * 1.001, 8)
+                            result = place_crypto_sell(sym, qty, sell_price)
+                        else:
+                            # No price available — MARKET sell
+                            self._log(f"   ⚠️ {sym} no price — using MARKET sell")
+                            result = binance_post("/api/v3/order", {
+                                "symbol":    sym,
+                                "side":      "SELL",
+                                "type":      "MARKET",
+                                "quantity":  str(qty),
+                                "timestamp": _timestamp(),
+                            })
+
                         if result.get("orderId"):
-                            usdt_est = round(qty * curr, 2)
+                            usdt_est = round(qty * curr, 2) if curr > 0 else 0
                             self._log(f"   ✅ Sell order: {sym} {qty} → ~${usdt_est:.2f} USDT | "
                                       f"order={result['orderId']}")
                         else:
@@ -2466,26 +2490,55 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                     if not holding or holding.get("free", 0) <= 0:
                         continue
                     try:
-                        curr_price = get_crypto_price(sell_sym)
-                        qty        = holding["free"]
-                        val        = qty * curr_price
-                        # Skip dust — Binance won't accept tiny orders
-                        if val < 2.0:
+                        # Try live price first, fall back to wallet stored price
+                        curr_price = 0.0
+                        try:
+                            curr_price = get_crypto_price(sell_sym)
+                        except Exception:
+                            pass
+
+                        # Fallback: use wallet's stored price (already read this cycle)
+                        if curr_price <= 0:
+                            curr_price = holding.get("price", 0)
+                            if curr_price > 0:
+                                self._log(f"   ℹ️ {sell_sym} using wallet price ${curr_price:.8f}")
+
+                        qty = holding["free"]
+                        val = qty * curr_price if curr_price > 0 else 0
+
+                        # Skip dust
+                        if curr_price > 0 and val < 2.0:
                             self._log(f"   ⚠️ {sell_sym} dust (${val:.4f}) — skipping sell")
                             continue
-                        # Truncate qty to exchange precision to avoid qty=0.0 errors
+
+                        # Truncate to exchange precision
                         decimals = CRYPTO_UNIVERSE.get(sell_sym, {}).get("decimals", 4)
                         qty = float(f"{qty:.{decimals}f}")
                         if qty <= 0:
                             self._log(f"   ⚠️ {sell_sym} rounded to 0 qty — skipping")
                             continue
-                        result = place_crypto_sell(sell_sym, qty,
-                                                   round(curr_price * 1.001, 6))
+
+                        if curr_price > 0:
+                            # LIMIT sell — price + 0.1% so it fills quickly
+                            sell_price = round(curr_price * 1.001, 8)
+                            result = place_crypto_sell(sell_sym, qty, sell_price)
+                        else:
+                            # No price at all — use MARKET sell
+                            self._log(f"   ⚠️ {sell_sym} no price — using MARKET sell")
+                            result = binance_post("/api/v3/order", {
+                                "symbol":      sell_sym,
+                                "side":        "SELL",
+                                "type":        "MARKET",
+                                "quantity":    str(qty),
+                                "timestamp":   _timestamp(),
+                            })
+
                         if result.get("orderId"):
-                            sold_usdt  += val
-                            crypto_pool += val
-                            self._log(f"   🔄 Sold {sell_sym} {qty} ~${val:.2f} → USDT "
-                                      f"to fund {sym} buy")
+                            est_val     = val if val > 0 else 0
+                            sold_usdt  += est_val
+                            crypto_pool += est_val
+                            self._log(f"   🔄 Sold {sell_sym} {qty} ~${est_val:.2f} → USDT "
+                                      f"to fund {sym} buy | order={result['orderId']}")
                             import time as _t; _t.sleep(1.5)
                         else:
                             self._log(f"   ⚠️ Pre-sell failed for {sell_sym}: {result}")
