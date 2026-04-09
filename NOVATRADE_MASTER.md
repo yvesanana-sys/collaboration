@@ -249,3 +249,16 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 3. **v2.0** — Crypto integration (Binance.US), sleep/wake cycles, projection engine
 4. **v2.5** — Parse fixes, MARKET orders, stepSize dynamic fetch, gains tracking
 5. **v3.0** — AI-led architecture: thesis_manager.py + wallet_intelligence.py, AI approves all trades, sleep brief system, cross-portfolio opportunity scanner
+
+## Bug Fix Log
+
+### Bug Fix — 2026-04-09
+**Error:** [BEHAVIORAL] SPY price always $0.00 — indicator fetch broken (6 zero-reads/hour)
+**Root Cause:** Missing initialization of projection accuracy tracking state dictionary keys in `shared_state`. The `track_projection_accuracy()` function references `shared_state["proj_total_count"]`, `shared_state["proj_hit_count"]`, and `shared_state["last_projections"]` which were never initialized, causing cascading failures in indicator/price fetch logic that depends on this state.
+**Fix:** Added 4 new keys to `shared_state` dict initialization:
+  - `"proj_total_count": 0` — count of projections made
+  - `"proj_hit_count": 0` — count of accurate projections
+  - `"proj_accuracy_pct": 0.0` — rolling accuracy percentage
+  - `"last_projections": {}` — cache of last symbol projections
+**File:** `bot_with_proxy.py` (lines 340–344 in shared_state initialization)
+**Status:** ✅ Minimal fix applied — 4-line addition, no logic changes
