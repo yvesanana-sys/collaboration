@@ -249,3 +249,12 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 3. **v2.0** — Crypto integration (Binance.US), sleep/wake cycles, projection engine
 4. **v2.5** — Parse fixes, MARKET orders, stepSize dynamic fetch, gains tracking
 5. **v3.0** — AI-led architecture: thesis_manager.py + wallet_intelligence.py, AI approves all trades, sleep brief system, cross-portfolio opportunity scanner
+
+## Bug Fix Log
+
+### Bug Fix — 2026-04-09
+**Error:** [BEHAVIORAL] AIs waking too frequently — possible cash threshold bug (always above threshold) (7 wakes/hour)
+**Root Cause:** `threshold_active_mult` was set to 1.1, which with a 0.05 equity percentage cash threshold produced a trigger value too close to normal cash levels, causing false wake-ups on every 5-minute check cycle.
+**Fix:** Increased `threshold_active_mult` from 1.1 to 1.5 in RULES dict, making the active wake threshold more conservative (requires 50% more cash above base to trigger wake vs 10% more). This prevents spurious threshold crossings while maintaining quick responsiveness to genuine cash events.
+**File:** bot_with_proxy.py, line ~159
+**Status:** ✅ PR opened
