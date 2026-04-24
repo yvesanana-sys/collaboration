@@ -263,6 +263,15 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 
 ## Bug Fix Log
 
+### Bug Fix — 2026-04-24 (Auto-repair)
+**Error:** NameError — `name 'st' is not defined` in `get_crypto_24h_stats()` function signature
+**Root cause:** Incomplete function signature — parameter type hint was cut off mid-word (`st` instead of `str`)
+**Fix:** Completed the function signature from `def get_crypto_24h_stats(symbol: st` → `def get_crypto_24h_stats(symbol: str) -> dict:`
+**File:** binance_crypto.py
+**Impact:** Module would not import; any code calling `get_crypto_24h_stats()` would crash with NameError at module load time
+**Status:** ✅ Fixed — file is now syntactically valid and complete
+
+
 ### 🔧 Bug Fix — 2026-04-24 (pt 2) — Symbol Normalization + Buy Safety Buffer
 **Errors (observed live after first patch deployed):**
 1. `❌ Sell error for UNI: ... symbol=UNI&side=SELL ...` → 400 Bad Request. Claude's `sell_decisions` returned `"symbol": "UNI"` (bare asset) instead of `"UNIUSDT"`. Binance has no `UNI` pair → rejection.
