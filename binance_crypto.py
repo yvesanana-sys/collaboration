@@ -1475,6 +1475,11 @@ def place_crypto_buy(symbol: str, notional_usdt: float,
         return {"error": f"Notional ${notional_usdt:.2f} below minimum $10"}
 
     # Method 1: quoteOrderQty — Binance spends exact USDT, handles qty internally
+    # NOTE: not all Binance.US pairs support quoteOrderQty for MARKET BUY.
+    # We detect success by the presence of 'orderId' in the response dict,
+    # NOT by scanning for "error" substring (which can false-negative if
+    # a valid response happens to contain an 'error' field or if the response
+    # body is a string).
     try:
         result = binance_post("/api/v3/order", {
             "symbol":        symbol,
@@ -1482,19 +1487,26 @@ def place_crypto_buy(symbol: str, notional_usdt: float,
             "type":          "MARKET",
             "quoteOrderQty": str(round(notional_usdt, 2)),
         })
-        if "error" not in str(result).lower():
+        if isinstance(result, dict) and result.get("orderId"):
             return result
-    except Exception as e:
+        # Otherwise fall through to Method 2
+    except Exception:
         pass  # Fall through to method 2
 
-    # Method 2: qty-based MARKET order
+    # Method 2: qty-based MARKET order (with safety buffer)
+    # ── Apply 0.5% buffer so tiny price ticks between read and fill don't
+    # ── trigger INSUFFICIENT_BALANCE 400 errors. Better to slightly
+    # ── under-spend than to get rejected entirely.
     try:
         filters   = get_symbol_filters(symbol)
         step_size = filters["step_size"]
         price     = get_crypto_price(symbol)
         if price <= 0:
             return {"error": f"Cannot get price for {symbol}"}
-        raw_qty = notional_usdt / price
+
+        effective_notional = notional_usdt * 0.995  # 0.5% safety buffer
+        raw_qty = effective_notional / price
+
         import math as _math
         if step_size > 0:
             qty_rounded = _math.floor(raw_qty / step_size) * step_size
@@ -1505,6 +1517,12 @@ def place_crypto_buy(symbol: str, notional_usdt: float,
             qty = _round_qty(raw_qty, symbol)
         if qty <= 0:
             return {"error": f"Quantity rounded to 0 for {symbol}"}
+
+        # Re-check notional: qty * price must still meet minimum
+        est_notional = qty * price
+        if est_notional < CRYPTO_RULES["min_trade_usdt"]:
+            return {"error": f"Buffered qty notional ${est_notional:.2f} below minimum $10 for {symbol}"}
+
         return binance_post("/api/v3/order", {
             "symbol":   symbol,
             "side":     "BUY",
@@ -2770,7 +2788,14 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             for sell in resp.get("sell_decisions", []):
                 sym = sell.get("symbol", "")
                 if sym:
-                    sell_decisions.append((sym, sell.get("reason", "AI recommendation"), ai_name))
+                    # ── Normalize: AI sometimes returns bare asset (UNI, ETH) ──
+                    # instead of trading pair (UNIUSDT, ETHUSDT). Binance rejects
+                    # symbol=UNI with 400 Bad Request. Auto-append USDT unless
+                    # symbol already ends in a known quote (USDT, USDC, BUSD, USD).
+                    sym_upper = sym.upper().strip()
+                    if not sym_upper.endswith(("USDT", "USDC", "BUSD", "USD")):
+                        sym_upper = sym_upper + "USDT"
+                    sell_decisions.append((sym_upper, sell.get("reason", "AI recommendation"), ai_name))
 
         # Execute sells — both AIs agree OR single AI for weak/small coins
         sell_counts = {}
@@ -2900,6 +2925,12 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             trades = resp.get("crypto_trades", [])
             for t in trades:
                 sym   = t.get("symbol", "")
+                # ── Normalize to trading pair (same reason as sell_decisions) ──
+                if sym:
+                    sym_up = sym.upper().strip()
+                    if not sym_up.endswith(("USDT", "USDC", "BUSD", "USD")):
+                        sym_up = sym_up + "USDT"
+                    sym = sym_up
                 conf  = t.get("confidence", 0)
                 notional = t.get("notional_usdt", 0)
                 entry = t.get("entry_target")
@@ -3335,6 +3366,12 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                 continue
             for t in resp.get("crypto_trades", []):
                 sym      = t.get("symbol", "")
+                # ── Normalize to trading pair ──
+                if sym:
+                    sym_up = sym.upper().strip()
+                    if not sym_up.endswith(("USDT", "USDC", "BUSD", "USD")):
+                        sym_up = sym_up + "USDT"
+                    sym = sym_up
                 conf     = t.get("confidence", 0)
                 notional = t.get("notional_usdt", 0)
                 entry    = t.get("entry_target")
