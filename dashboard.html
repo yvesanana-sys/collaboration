@@ -1,0 +1,1324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NovaTrade — Live Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:#0a0c0f;--bg2:#111318;--bg3:#181c23;
+    --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.12);
+    --text:#e8eaf0;--muted:#6b7280;
+    --green:#22c97a;--red:#f04f4f;--amber:#f5a623;
+    --blue:#4a9eff;--purple:#a78bfa;--teal:#2dd4bf;
+    --font:'SF Mono','Fira Code','Cascadia Code',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;min-height:100vh;}
+  header{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 24px;height:52px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;}
+  .logo{font-size:15px;font-weight:700;letter-spacing:0.05em;color:#fff;}
+  .logo span{color:var(--teal);}
+  .header-right{display:flex;align-items:center;gap:16px;}
+  .status-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);animation:pulse 2s infinite;}
+  .status-dot.offline{background:var(--red);box-shadow:0 0 6px var(--red);animation:none;}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+  .last-update{color:var(--muted);font-size:11px;}
+  .refresh-btn{background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--font);font-size:11px;padding:5px 12px;border-radius:6px;cursor:pointer;}
+  .refresh-btn:hover{border-color:var(--teal);color:var(--teal);}
+  .page{padding:20px 24px;max-width:1400px;margin:0 auto;}
+  .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;}
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
+  .grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;}
+  @media(max-width:900px){.grid-4{grid-template-columns:1fr 1fr;}.grid-3{grid-template-columns:1fr 1fr;}.grid-2{grid-template-columns:1fr;}}
+  @media(max-width:500px){.grid-4,.grid-3{grid-template-columns:1fr;}}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;}
+  .card-label{font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;}
+  .card-value{font-size:24px;font-weight:700;color:#fff;line-height:1;}
+  .card-value.green{color:var(--green);}.card-value.red{color:var(--red);}
+  .card-sub{font-size:11px;color:var(--muted);margin-top:4px;}
+  .section-title{font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;padding-bottom:8px;border-bottom:1px solid var(--border);}
+  .ai-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);}
+  .ai-row:last-child{border-bottom:none;}
+  .ai-name{font-size:12px;color:var(--text);font-weight:600;}
+  .ai-budget{font-size:12px;color:var(--muted);}
+  .badge{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600;letter-spacing:0.04em;}
+  .badge.green{background:rgba(34,201,122,0.12);color:var(--green);}
+  .badge.red{background:rgba(240,79,79,0.12);color:var(--red);}
+  .badge.amber{background:rgba(245,166,35,0.12);color:var(--amber);}
+  .badge.blue{background:rgba(74,158,255,0.12);color:var(--blue);}
+  .badge.purple{background:rgba(167,139,250,0.12);color:var(--purple);}
+  .badge.teal{background:rgba(45,212,191,0.12);color:var(--teal);}
+  .pos-table{width:100%;border-collapse:collapse;}
+  .pos-table th{font-size:10px;letter-spacing:0.06em;text-transform:uppercase;color:var(--muted);text-align:left;padding:0 0 8px;border-bottom:1px solid var(--border);}
+  .pos-table td{padding:10px 0;font-size:12px;border-bottom:1px solid var(--border);}
+  .pos-table tr:last-child td{border-bottom:none;}
+  .symbol{font-weight:700;color:#fff;}
+  .owner-tag{font-size:9px;padding:1px 5px;border-radius:3px;margin-left:5px;font-weight:600;}
+  .owner-claude{background:rgba(74,158,255,0.15);color:var(--blue);}
+  .owner-grok{background:rgba(167,139,250,0.15);color:var(--purple);}
+  .progress-wrap{margin:6px 0;}
+  .progress-label{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:4px;}
+  .progress-bar{height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;}
+  .progress-fill{height:100%;border-radius:2px;transition:width 0.6s ease;}
+  .fill-green{background:var(--green);}.fill-red{background:var(--red);}.fill-amber{background:var(--amber);}
+  .fill-blue{background:var(--blue);}.fill-purple{background:var(--purple);}.fill-teal{background:var(--teal);}
+  .chart-wrap{position:relative;height:180px;}
+  .crypto-pos{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);}
+  .crypto-pos:last-child{border-bottom:none;}
+  .crypto-symbol{font-weight:700;font-size:13px;color:#fff;}
+  .crypto-entry{font-size:11px;color:var(--muted);margin-top:2px;}
+  .crypto-pnl{text-align:right;}
+  .holding-row{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:12px;}
+  .holding-row:last-child{border-bottom:none;}
+  /* gains grid */
+  .gains-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px;}
+  .gain-cell{text-align:center;background:var(--bg3);border-radius:6px;padding:8px 4px;}
+  .gain-label{font-size:9px;color:var(--muted);margin-bottom:3px;letter-spacing:0.05em;text-transform:uppercase;}
+  .gain-val{font-size:13px;font-weight:700;}
+  /* symbol perf */
+  .sym-row{display:grid;grid-template-columns:80px 1fr 65px 55px 40px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:11px;}
+  .sym-row:last-child{border-bottom:none;}
+  .sym-head{font-size:10px;color:var(--muted);letter-spacing:0.05em;text-transform:uppercase;}
+  /* trade history */
+  .badge-open{background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);}
+  .badge-tp{background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);}
+  .trade-row{display:grid;grid-template-columns:70px 55px 65px 1fr 55px;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11px;align-items:center;}
+  .trade-row:last-child{border-bottom:none;}
+  .trade-header{color:var(--muted);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;}
+  .empty{color:var(--muted);font-size:12px;padding:16px 0;text-align:center;}
+  .config-row{display:flex;gap:8px;margin-bottom:16px;align-items:center;}
+  .url-input{flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--font);font-size:12px;padding:8px 12px;border-radius:6px;outline:none;}
+  .url-input:focus{border-color:var(--teal);}
+  .connect-btn{background:var(--teal);color:#0a0c0f;border:none;font-family:var(--font);font-size:12px;font-weight:700;padding:8px 16px;border-radius:6px;cursor:pointer;}
+  .sleep-banner{background:rgba(245,166,35,0.08);border:1px solid rgba(245,166,35,0.2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;margin-bottom:14px;font-size:12px;color:var(--amber);}
+  .wake-banner{background:rgba(34,201,122,0.08);border:1px solid rgba(34,201,122,0.2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;margin-bottom:14px;font-size:12px;color:var(--green);}
+  .loader{color:var(--muted);font-size:12px;padding:40px;text-align:center;}
+  .period-tabs{display:flex;gap:4px;}
+  .period-tab{font-size:10px;padding:3px 10px;border-radius:4px;border:1px solid var(--border);cursor:pointer;color:var(--muted);background:transparent;font-family:var(--font);}
+  .period-tab.active{background:var(--bg3);color:var(--teal);border-color:var(--teal);}
+  .repair-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px;}
+  .repair-row:last-child{border-bottom:none;}
+
+  /* ── AI BATTLE / LEADERBOARD ─────────────────────────────── */
+  .battle-card{
+    background:linear-gradient(135deg,rgba(74,158,255,0.04) 0%,var(--bg2) 50%,rgba(167,139,250,0.04) 100%);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:18px 20px;
+    margin-bottom:16px;
+    position:relative;
+    overflow:hidden;
+  }
+  .battle-card::before{
+    content:'';position:absolute;top:0;left:50%;width:1px;height:100%;
+    background:linear-gradient(180deg,transparent,var(--border2),transparent);
+  }
+  .battle-header{
+    display:flex;justify-content:space-between;align-items:center;
+    margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border);
+  }
+  .battle-title{
+    font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);
+    display:flex;align-items:center;gap:8px;
+  }
+  .battle-title .vs-icon{
+    color:var(--amber);font-weight:700;letter-spacing:0.08em;
+    background:rgba(245,166,35,0.08);padding:2px 8px;border-radius:3px;font-size:10px;
+  }
+  .leader-pill{
+    font-size:10px;padding:3px 10px;border-radius:20px;font-weight:700;letter-spacing:0.05em;
+    background:rgba(245,166,35,0.12);color:var(--amber);border:1px solid rgba(245,166,35,0.3);
+  }
+  .leader-pill.tie{background:var(--bg3);color:var(--muted);border-color:var(--border);}
+  .battle-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;}
+  @media(max-width:700px){.battle-grid{grid-template-columns:1fr;gap:14px;}}
+  .ai-side{position:relative;}
+  .ai-side .ai-avatar{
+    display:flex;align-items:center;gap:10px;margin-bottom:14px;
+  }
+  .ai-side .ai-orb{
+    width:32px;height:32px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    font-size:14px;font-weight:700;
+  }
+  .ai-claude .ai-orb{
+    background:radial-gradient(circle at 30% 30%,rgba(74,158,255,0.4),rgba(74,158,255,0.08));
+    border:1px solid rgba(74,158,255,0.4);color:var(--blue);
+    box-shadow:0 0 12px rgba(74,158,255,0.15);
+  }
+  .ai-grok .ai-orb{
+    background:radial-gradient(circle at 30% 30%,rgba(167,139,250,0.4),rgba(167,139,250,0.08));
+    border:1px solid rgba(167,139,250,0.4);color:var(--purple);
+    box-shadow:0 0 12px rgba(167,139,250,0.15);
+  }
+  .ai-side .ai-name-big{font-size:15px;font-weight:700;color:#fff;letter-spacing:0.02em;}
+  .ai-side .ai-role{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;}
+  .ai-pnl-block{margin-bottom:12px;}
+  .ai-pnl-big{font-size:28px;font-weight:700;line-height:1;letter-spacing:-0.01em;}
+  .ai-pnl-sub{font-size:11px;color:var(--muted);margin-top:4px;}
+  .ai-stats-row{
+    display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;
+  }
+  .ai-stat-chip{
+    background:var(--bg3);border:1px solid var(--border);
+    padding:6px 4px;border-radius:5px;text-align:center;
+  }
+  .ai-stat-val{font-size:13px;font-weight:700;color:#fff;line-height:1;}
+  .ai-stat-lbl{font-size:9px;color:var(--muted);margin-top:3px;letter-spacing:0.04em;text-transform:uppercase;}
+  .ai-pool-bar{
+    margin-top:12px;background:var(--bg3);border-radius:3px;height:5px;overflow:hidden;
+    position:relative;
+  }
+  .ai-pool-fill{height:100%;border-radius:3px;transition:width 0.6s ease;}
+  .ai-claude .ai-pool-fill{background:linear-gradient(90deg,var(--blue),rgba(74,158,255,0.6));}
+  .ai-grok .ai-pool-fill{background:linear-gradient(90deg,var(--purple),rgba(167,139,250,0.6));}
+  .ai-pool-label{
+    display:flex;justify-content:space-between;font-size:10px;color:var(--muted);
+    margin-bottom:4px;letter-spacing:0.04em;
+  }
+  /* Per-AI trade history rows */
+  .ai-trade-history{margin-top:16px;padding-top:14px;border-top:1px solid var(--border);}
+  .ai-trade-history-title{
+    font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);
+    margin-bottom:8px;display:flex;justify-content:space-between;
+  }
+  .ai-trade-row{
+    display:grid;grid-template-columns:14px 60px 1fr auto;gap:8px;padding:6px 0;
+    border-bottom:1px solid var(--border);font-size:11px;align-items:center;
+  }
+  .ai-trade-row:last-child{border-bottom:none;}
+  .ai-trade-dot{width:6px;height:6px;border-radius:50%;}
+  .ai-trade-dot.claude{background:var(--blue);box-shadow:0 0 4px rgba(74,158,255,0.5);}
+  .ai-trade-dot.grok{background:var(--purple);box-shadow:0 0 4px rgba(167,139,250,0.5);}
+  .ai-trade-sym{font-weight:700;color:#fff;}
+  .ai-trade-meta{color:var(--muted);font-size:10px;}
+  .ai-trade-pnl{font-weight:700;font-size:11px;}
+  /* Battle competition status banner */
+  .comp-status{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+    background:var(--bg3);border:1px solid var(--border);
+    padding:8px 12px;border-radius:6px;font-size:11px;color:var(--muted);
+    margin-bottom:14px;
+  }
+  .comp-status .comp-on{color:var(--green);font-weight:700;}
+  .comp-status .comp-off{color:var(--amber);font-weight:700;}
+  /* Sparkline divider */
+  .battle-divider{
+    height:1px;background:linear-gradient(90deg,transparent,var(--border2),transparent);
+    margin:14px 0 10px;
+  }
+
+  /* ── AI BRAIN / MEMORY PANEL ───────────────────────────── */
+  .brain-card{
+    background:linear-gradient(135deg,rgba(45,212,191,0.03) 0%,var(--bg2) 60%,rgba(74,158,255,0.03) 100%);
+    border-color:rgba(45,212,191,0.15);
+  }
+  .brain-stats{
+    display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px;
+  }
+  @media(max-width:700px){.brain-stats{grid-template-columns:repeat(2,1fr);}}
+  .brain-stat{
+    background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+    padding:12px 8px;text-align:center;position:relative;overflow:hidden;
+  }
+  .brain-stat::after{
+    content:'';position:absolute;left:0;right:0;bottom:0;height:1px;
+    background:linear-gradient(90deg,transparent,var(--teal),transparent);opacity:0.4;
+  }
+  .brain-stat-val{
+    font-size:22px;font-weight:700;color:#fff;line-height:1;letter-spacing:-0.01em;
+  }
+  .brain-stat-lbl{
+    font-size:9px;color:var(--muted);margin-top:5px;
+    letter-spacing:0.08em;text-transform:uppercase;
+  }
+  .brain-grid{
+    display:grid;grid-template-columns:1fr 1fr;gap:24px;
+  }
+  @media(max-width:700px){.brain-grid{grid-template-columns:1fr;gap:14px;}}
+  .brain-subtitle{
+    font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);
+    margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border);
+  }
+  .brain-divider{
+    height:1px;background:linear-gradient(90deg,transparent,var(--border2),transparent);
+    margin:18px 0 14px;
+  }
+  /* Symbol row */
+  .brain-sym-row{
+    display:grid;grid-template-columns:1fr auto auto auto;gap:10px;
+    padding:7px 0;border-bottom:1px solid var(--border);font-size:11px;align-items:center;
+  }
+  .brain-sym-row:last-child{border-bottom:none;}
+  .brain-sym-name{font-weight:700;color:#fff;}
+  .brain-sym-trades{color:var(--muted);font-size:10px;}
+  .brain-sym-wr-bar{
+    width:50px;height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;
+  }
+  .brain-sym-wr-fill{height:100%;border-radius:2px;}
+  .brain-sym-pnl{font-weight:700;font-size:11px;text-align:right;min-width:55px;}
+  /* Lesson row */
+  .brain-lesson-row{
+    padding:8px 0;border-bottom:1px solid var(--border);font-size:11px;
+    display:flex;align-items:flex-start;gap:8px;
+  }
+  .brain-lesson-row:last-child{border-bottom:none;}
+  .brain-lesson-icon{flex-shrink:0;font-size:12px;margin-top:1px;}
+  .brain-lesson-text{flex:1;line-height:1.4;color:var(--text);}
+  .brain-lesson-meta{
+    font-size:9px;color:var(--muted);margin-top:2px;letter-spacing:0.04em;
+  }
+  /* Persona row */
+  .brain-persona-row{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:8px 0;border-bottom:1px solid var(--border);font-size:11px;
+  }
+  .brain-persona-row:last-child{border-bottom:none;}
+  .brain-persona-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:8px;}
+  .brain-persona-dot.claude{background:var(--blue);box-shadow:0 0 4px rgba(74,158,255,0.4);}
+  .brain-persona-dot.grok{background:var(--purple);box-shadow:0 0 4px rgba(167,139,250,0.4);}
+  .brain-persona-name{font-weight:700;color:#fff;}
+  /* ── CORE RESERVE PANEL ────────────────────────────────── */
+  .core-reserve-card{
+    background:linear-gradient(135deg,rgba(245,166,35,0.04) 0%,var(--bg2) 50%,rgba(74,158,255,0.04) 100%);
+    border-color:rgba(245,166,35,0.18);
+  }
+  .core-slice-row{
+    display:grid;grid-template-columns:24px 1fr auto auto;gap:10px;
+    padding:9px 0;border-bottom:1px solid var(--border);font-size:11px;align-items:center;
+  }
+  .core-slice-row:last-child{border-bottom:none;}
+  .core-slice-icon{font-size:14px;text-align:center;}
+  .core-slice-name{font-weight:700;color:#fff;}
+  .core-slice-pct{
+    color:var(--muted);font-size:10px;margin-top:2px;letter-spacing:0.04em;
+  }
+  .core-slice-bar{
+    width:60px;height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;
+  }
+  .core-slice-fill-btc{height:100%;background:linear-gradient(90deg,#f7931a,#ffb84d);}
+  .core-slice-fill-spy{height:100%;background:linear-gradient(90deg,var(--blue),rgba(74,158,255,0.6));}
+  .core-slice-fill-cash{height:100%;background:linear-gradient(90deg,var(--teal),rgba(45,212,191,0.6));}
+  .core-slice-value{font-weight:700;text-align:right;min-width:60px;}
+  /* Event row */
+  .core-event-row{
+    padding:7px 0;border-bottom:1px solid var(--border);font-size:11px;
+    display:flex;align-items:flex-start;gap:8px;line-height:1.35;
+  }
+  .core-event-row:last-child{border-bottom:none;}
+  .core-event-icon{flex-shrink:0;width:14px;text-align:center;}
+  .core-event-text{flex:1;color:var(--text);}
+  .core-event-time{font-size:9px;color:var(--muted);margin-top:2px;letter-spacing:0.04em;}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">NOVA<span>TRADE</span></div>
+  <div class="header-right">
+    <div id="status-dot" class="status-dot offline"></div>
+    <span class="last-update" id="last-update">Not connected</span>
+    <button class="refresh-btn" onclick="fetchAll()">Refresh</button>
+  </div>
+</header>
+<div class="page">
+  <div class="config-row">
+    <input class="url-input" id="bot-url" type="text" value="" placeholder="leave blank to auto-detect — or enter Railway URL"/>
+    <button class="connect-btn" onclick="fetchAll()">Connect</button>
+  </div>
+  <div id="ai-banner"></div>
+
+  <!-- Top Metrics -->
+  <div class="grid-4">
+    <div class="card"><div class="card-label">Portfolio</div><div class="card-value" id="m-equity">—</div><div class="card-sub" id="m-pnl">Loading...</div></div>
+    <div class="card"><div class="card-label">Cash</div><div class="card-value" id="m-cash">—</div><div class="card-sub" id="m-mode">—</div></div>
+    <div class="card"><div class="card-label">Crypto Wallet</div><div class="card-value" id="m-crypto">—</div><div class="card-sub" id="m-usdt">—</div></div>
+    <div class="card"><div class="card-label">Open Positions</div><div class="card-value" id="m-pos">—</div><div class="card-sub" id="m-stops">—</div></div>
+  </div>
+
+  <!-- Time-based Gains -->
+  <div class="card" style="margin-bottom:16px;">
+    <div class="section-title">Portfolio gains — time based</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+      <div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:0.05em;text-transform:uppercase;margin-bottom:6px;">Stocks</div>
+        <div class="gains-grid">
+          <div class="gain-cell"><div class="gain-label">Day</div><div class="gain-val" id="sg-day">—</div><div style="font-size:10px;color:var(--muted)" id="sg-day-u">—</div></div>
+          <div class="gain-cell"><div class="gain-label">Week</div><div class="gain-val" id="sg-week">—</div><div style="font-size:10px;color:var(--muted)" id="sg-week-u">—</div></div>
+          <div class="gain-cell"><div class="gain-label">Month</div><div class="gain-val" id="sg-month">—</div><div style="font-size:10px;color:var(--muted)" id="sg-month-u">—</div></div>
+          <div class="gain-cell"><div class="gain-label">YTD</div><div class="gain-val" id="sg-ytd">—</div><div style="font-size:10px;color:var(--muted)" id="sg-ytd-u">—</div></div>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:0.05em;text-transform:uppercase;margin-bottom:6px;">Crypto</div>
+        <div class="gains-grid">
+          <div class="gain-cell"><div class="gain-label">Day</div><div class="gain-val" id="cg-day">—</div><div style="font-size:10px;color:var(--muted)" id="cg-day-u">—</div></div>
+          <div class="gain-cell"><div class="gain-label">Week</div><div class="gain-val" id="cg-week">—</div><div style="font-size:10px;color:var(--muted)" id="cg-week-u">—</div></div>
+          <div class="gain-cell"><div class="gain-label">Month</div><div class="gain-val" id="cg-month">—</div><div style="font-size:10px;color:var(--muted)" id="cg-month-u">—</div></div>
+          <div class="gain-cell"><div class="gain-label">YTD</div><div class="gain-val" id="cg-ytd">—</div><div style="font-size:10px;color:var(--muted)" id="cg-ytd-u">—</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stocks + AI -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="section-title">Stock Positions</div>
+      <div id="stock-positions"><div class="loader">Loading...</div></div>
+    </div>
+    <div class="card">
+      <div class="section-title">AI Managers</div>
+      <div id="ai-managers"><div class="loader">Loading...</div></div>
+    </div>
+  </div>
+
+  <!-- ═══ CLAUDE vs GROK — CRYPTO BATTLE ═══════════════════ -->
+  <div class="battle-card">
+    <div class="battle-header">
+      <div class="battle-title">
+        <span>🥊 Claude</span>
+        <span class="vs-icon">VS</span>
+        <span>Grok — Crypto Head-to-Head</span>
+      </div>
+      <div id="leader-pill" class="leader-pill tie">— No closes yet —</div>
+    </div>
+    <div id="comp-status" class="comp-status">
+      <span>Competition mode: <span id="comp-mode-label">checking…</span></span>
+      <span id="comp-pool-split">Pool split: —</span>
+    </div>
+    <div id="reserve-status" class="comp-status" style="background:linear-gradient(90deg,rgba(34,201,122,0.04),rgba(245,166,35,0.04));border-color:rgba(245,166,35,0.2);">
+      <span>🛡️ Wallet reserve: <span id="reserve-pct-label" style="color:var(--amber);font-weight:700">—</span></span>
+      <span id="reserve-detail-label" style="font-size:10px;">checking combined wallet…</span>
+    </div>
+    <div class="battle-grid">
+      <!-- ── CLAUDE side ── -->
+      <div class="ai-side ai-claude">
+        <div class="ai-avatar">
+          <div class="ai-orb">C</div>
+          <div>
+            <div class="ai-name-big">Claude</div>
+            <div class="ai-role" id="claude-role">Autonomous trader · Tier 0 (Probation)</div>
+          </div>
+        </div>
+        <div class="ai-pnl-block">
+          <div class="ai-pnl-big" id="claude-pnl">—</div>
+          <div class="ai-pnl-sub" id="claude-pnl-sub">awaiting first close</div>
+        </div>
+        <div class="ai-stats-row">
+          <div class="ai-stat-chip"><div class="ai-stat-val" id="claude-trades">0</div><div class="ai-stat-lbl">Trades</div></div>
+          <div class="ai-stat-chip"><div class="ai-stat-val" id="claude-wr">—</div><div class="ai-stat-lbl">Win Rate</div></div>
+          <div class="ai-stat-chip"><div class="ai-stat-val" id="claude-wins">0</div><div class="ai-stat-lbl">Wins</div></div>
+          <div class="ai-stat-chip"><div class="ai-stat-val" id="claude-open">0</div><div class="ai-stat-lbl">Open</div></div>
+        </div>
+        <div class="ai-pool-label" style="margin-top:14px;">
+          <span>Buying power slice</span>
+          <span id="claude-pool-val">—</span>
+        </div>
+        <div class="ai-pool-bar"><div class="ai-pool-fill" id="claude-pool-fill" style="width:50%"></div></div>
+      </div>
+
+      <!-- ── GROK side ── -->
+      <div class="ai-side ai-grok">
+        <div class="ai-avatar">
+          <div class="ai-orb">G</div>
+          <div>
+            <div class="ai-name-big">Grok</div>
+            <div class="ai-role" id="grok-role">Autonomous trader · Tier 0 (Probation)</div>
+          </div>
+        </div>
+        <div class="ai-pnl-block">
+          <div class="ai-pnl-big" id="grok-pnl">—</div>
+          <div class="ai-pnl-sub" id="grok-pnl-sub">awaiting first close</div>
+        </div>
+        <div class="ai-stats-row">
+          <div class="ai-stat-chip"><div class="ai-stat-val" id="grok-trades">0</div><div class="ai-stat-lbl">Trades</div></div>
+          <div class="ai-stat-chip"><div class="ai-stat-val" id="grok-wr">—</div><div class="ai-stat-lbl">Win Rate</div></div>
+          <div class="ai-stat-chip"><div class="ai-stat-val" id="grok-wins">0</div><div class="ai-stat-lbl">Wins</div></div>
+          <div class="ai-stat-chip"><div class="ai-stat-val" id="grok-open">0</div><div class="ai-stat-lbl">Open</div></div>
+        </div>
+        <div class="ai-pool-label" style="margin-top:14px;">
+          <span>Buying power slice</span>
+          <span id="grok-pool-val">—</span>
+        </div>
+        <div class="ai-pool-bar"><div class="ai-pool-fill" id="grok-pool-fill" style="width:50%"></div></div>
+      </div>
+    </div>
+
+    <!-- Per-AI trade history side-by-side -->
+    <div class="battle-divider"></div>
+    <div class="battle-grid">
+      <div class="ai-side ai-claude">
+        <div class="ai-trade-history-title">
+          <span>🔵 Claude — Recent Crypto Trades</span>
+          <span id="claude-trade-count">0 closes</span>
+        </div>
+        <div id="claude-trades-list"><div class="empty">No closed trades yet</div></div>
+      </div>
+      <div class="ai-side ai-grok">
+        <div class="ai-trade-history-title">
+          <span>🔴 Grok — Recent Crypto Trades</span>
+          <span id="grok-trade-count">0 closes</span>
+        </div>
+        <div id="grok-trades-list"><div class="empty">No closed trades yet</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Crypto -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="section-title">Crypto Positions</div>
+      <div id="crypto-positions"><div class="loader">Loading...</div></div>
+    </div>
+    <div class="card">
+      <div class="section-title">Wallet Holdings</div>
+      <div id="wallet-holdings"><div class="loader">Loading...</div></div>
+    </div>
+  </div>
+
+  <!-- Performance by Symbol -->
+  <div class="card" style="margin-bottom:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+      <div style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);">Performance by symbol (closed trades)</div>
+      <div class="period-tabs">
+        <button class="period-tab active" onclick="setSymPeriod('all',this)">All</button>
+        <button class="period-tab" onclick="setSymPeriod('stocks',this)">Stocks</button>
+        <button class="period-tab" onclick="setSymPeriod('crypto',this)">Crypto</button>
+      </div>
+    </div>
+    <div id="sym-perf-block"><div class="empty">No closed trades yet</div></div>
+  </div>
+
+  <!-- ═══ CORE RESERVE — LONG-TERM COMPOUNDER ════════════════ -->
+  <div class="card core-reserve-card" style="margin-bottom:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border);">
+      <div class="section-title" style="margin:0;border:0;padding:0;">🏦 Core Reserve — Long-term Compounder</div>
+      <div id="core-status-pill" class="leader-pill tie">checking…</div>
+    </div>
+    <div id="core-banner" class="comp-status" style="background:linear-gradient(90deg,rgba(245,166,35,0.04),rgba(74,158,255,0.04));border-color:rgba(245,166,35,0.2);">
+      <span>Walled off from tactical AIs — rule-based watcher</span>
+      <span id="core-target-info" style="font-size:10px;">checking activation…</span>
+    </div>
+    <!-- Top stats -->
+    <div class="brain-stats" id="core-stats">
+      <div class="brain-stat"><div class="brain-stat-val" id="core-total">—</div><div class="brain-stat-lbl">Reserve Value</div></div>
+      <div class="brain-stat"><div class="brain-stat-val" id="core-pnl">—</div><div class="brain-stat-lbl">All-time P&L</div></div>
+      <div class="brain-stat"><div class="brain-stat-val" id="core-contributions">—</div><div class="brain-stat-lbl">Total Deposited</div></div>
+      <div class="brain-stat"><div class="brain-stat-val" id="core-target-pct">—</div><div class="brain-stat-lbl">Target Reserve %</div></div>
+    </div>
+    <!-- Slice breakdown -->
+    <div class="brain-grid">
+      <div>
+        <div class="brain-subtitle">📊 Allocation Slices</div>
+        <div id="core-slices"><div class="empty">awaiting activation</div></div>
+      </div>
+      <div>
+        <div class="brain-subtitle">⚡ Recent Contingency Events</div>
+        <div id="core-events"><div class="empty">No events yet</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ AI BRAIN / MEMORY ════════════════════════════════ -->
+  <div class="card brain-card" style="margin-bottom:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border);">
+      <div class="section-title" style="margin:0;border:0;padding:0;">🧠 AI Brain — Persistent Learning Memory</div>
+      <div id="brain-save-status" style="font-size:10px;color:var(--muted);">checking storage…</div>
+    </div>
+    <!-- Top stats row -->
+    <div class="brain-stats" id="brain-stats">
+      <div class="brain-stat"><div class="brain-stat-val" id="brain-lessons">—</div><div class="brain-stat-lbl">Lessons</div></div>
+      <div class="brain-stat"><div class="brain-stat-val" id="brain-closes">—</div><div class="brain-stat-lbl">Closed Trades</div></div>
+      <div class="brain-stat"><div class="brain-stat-val" id="brain-winrate">—</div><div class="brain-stat-lbl">Win Rate</div></div>
+      <div class="brain-stat"><div class="brain-stat-val" id="brain-symbols">—</div><div class="brain-stat-lbl">Symbols Tracked</div></div>
+    </div>
+    <!-- Two-column body: top symbols + recent lessons -->
+    <div class="brain-grid">
+      <div>
+        <div class="brain-subtitle">📊 Top Symbols by Trades</div>
+        <div id="brain-symbols-list"><div class="empty">No data yet</div></div>
+      </div>
+      <div>
+        <div class="brain-subtitle">📚 Recent Lessons Learned</div>
+        <div id="brain-lessons-list"><div class="empty">No lessons yet — building from this point forward</div></div>
+      </div>
+    </div>
+    <div class="brain-divider"></div>
+    <!-- AI personas + market regime -->
+    <div class="brain-grid">
+      <div>
+        <div class="brain-subtitle">🥊 AI Persona Performance</div>
+        <div id="brain-personas"><div class="empty">Need 3+ closes per AI</div></div>
+      </div>
+      <div>
+        <div class="brain-subtitle">🌤️ Market Regime Performance</div>
+        <div id="brain-regimes"><div class="empty">No regime data yet</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats + History -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="section-title">Trade statistics</div>
+      <div id="performance-panel"><div class="loader">Loading...</div></div>
+    </div>
+    <div class="card">
+      <div class="section-title">Trade history (closes only)</div>
+      <div id="trade-history"><div class="loader">Loading...</div></div>
+    </div>
+    <div class="card">
+      <div class="section-title">Exchange history (Binance)</div>
+      <div id="binance-history"><div class="loader">Loading...</div></div>
+    </div>
+  </div>
+
+  <!-- Budget + Repair -->
+  <div class="grid-2">
+    <div class="card" style="margin-bottom:16px;">
+      <div class="section-title">Budget Allocation</div>
+      <div id="budget-bars"><div class="loader">Loading...</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="section-title">Self-repair monitor</div>
+      <div id="repair-panel"><div class="loader">Loading...</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BOT_DEFAULT='https://collaboration-production-cba3.up.railway.app';
+let _perfData=null,_symPeriod='all';
+
+function getUrl(){
+  const v=document.getElementById('bot-url').value.trim();
+  if(v) return v.replace(/\/$/,'');
+  const o=window.location.origin;
+  if(o&&o!=='null'&&!o.startsWith('file://')) return o;
+  return BOT_DEFAULT;
+}
+async function apiFetch(path){
+  const r=await fetch(getUrl()+path,{mode:'cors',headers:{'Cache-Control':'no-cache'}});
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  return r.json();
+}
+function fmt$(v){return'$'+Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
+function fmtPct(v){const n=parseFloat(v||0);return(n>=0?'+':'')+n.toFixed(2)+'%';}
+function clr(v){return parseFloat(v||0)>=0?'var(--green)':'var(--red)';}
+
+function setGainCell(id,uid,pct,usd){
+  const el=document.getElementById(id),uel=document.getElementById(uid);
+  if(el){el.textContent=fmtPct(pct);el.style.color=parseFloat(pct||0)>=0?'var(--green)':'var(--red)';}
+  if(uel) uel.textContent=fmt$(usd||0);
+}
+
+function renderBanner(sleeping,reason,wake_reason){
+  const el=document.getElementById('ai-banner');
+  if(sleeping){el.innerHTML=`<div class="sleep-banner"><span>ZZ</span><span>AIs sleeping — ${reason||'market closed'}</span></div>`;}
+  else{el.innerHTML=`<div class="wake-banner"><span>ON</span><span>${wake_reason?'AIs awake — woke: '+wake_reason:'AIs awake — active session'}</span></div>`;}
+}
+
+function renderTopMetrics(stats,crypto){
+  const eq=parseFloat(stats.equity||0),pnl=parseFloat(stats.pnl||0),pnlPct=parseFloat(stats.pnl_pct||0);
+  document.getElementById('m-equity').textContent=fmt$(eq);
+  document.getElementById('m-pnl').innerHTML=`<span style="color:${clr(pnl)}">${fmtPct(pnlPct)} today</span>`;
+  document.getElementById('m-cash').textContent=fmt$(stats.cash||0);
+  document.getElementById('m-mode').textContent='Mode: '+(stats.mode||'—');
+  const cw=crypto?.wallet?.total_value||0,cu=crypto?.wallet?.usdt_free||0;
+  document.getElementById('m-crypto').textContent=fmt$(cw);
+  document.getElementById('m-usdt').textContent=fmt$(cu)+' USDT free';
+  document.getElementById('m-pos').textContent=(stats.positions||[]).length+(crypto?.position_count||0);
+  document.getElementById('m-stops').textContent=(stats.stops_fired_today||0)+' stops today';
+}
+
+function renderGains(stats,crypto){
+  const sg=stats.gains||{};
+  setGainCell('sg-day','sg-day-u',  stats.day_gain_pct||sg.day_pct||0,   stats.day_gain||sg.day||0);
+  setGainCell('sg-week','sg-week-u',stats.week_gain_pct||sg.week_pct||0, stats.week_gain||sg.week||0);
+  setGainCell('sg-month','sg-month-u',stats.month_gain_pct||sg.month_pct||0,stats.month_gain||sg.month||0);
+  setGainCell('sg-ytd','sg-ytd-u',  stats.ytd_gain_pct||sg.ytd_pct||0,  stats.ytd_gain||sg.ytd||0);
+  const cg=crypto?.gains||{};
+  setGainCell('cg-day','cg-day-u',  cg.day_pct||0,  cg.day||0);
+  setGainCell('cg-week','cg-week-u',cg.week_pct||0, cg.week||0);
+  setGainCell('cg-month','cg-month-u',cg.month_pct||0,cg.month||0);
+  setGainCell('cg-ytd','cg-ytd-u',  cg.ytd_pct||0,  cg.ytd||0);
+}
+
+function renderStockPositions(positions){
+  const el=document.getElementById('stock-positions');
+  if(!positions||!positions.length){el.innerHTML='<div class="empty">No open stock positions</div>';return;}
+  let h=`<table class="pos-table"><tr class="trade-header"><th>Symbol</th><th>Entry</th><th>Now</th><th>P&L</th><th>Strat</th></tr>`;
+  for(const p of positions){
+    const pnl=parseFloat(p.pnl_pct||0);
+    const oc=(p.owner||'').toLowerCase().includes('claude')?'owner-claude':'owner-grok';
+    h+=`<tr><td><span class="symbol">${p.symbol}</span><span class="owner-tag ${oc}">${p.owner||'?'}</span></td><td>${fmt$(p.entry_price||p.avg_entry_price||0)}</td><td>${fmt$(p.current_price||0)}</td><td style="color:${clr(pnl)};font-weight:700">${fmtPct(pnl)} <span style="color:var(--muted);font-size:10px">${p.pnl_usd!=null?fmt$(p.pnl_usd):''}</span></td><td><span class="badge ${pnl>=0?'green':'amber'}">${p.strategy||p.strat||'A'}</span></td></tr>`;
+  }
+  el.innerHTML=h+'</table>';
+}
+
+function renderAIManagers(stats){
+  const el=document.getElementById('ai-managers');
+  const sleeping=stats.ai_sleeping;
+  const rows=[
+    {name:'Claude (Haiku)',pnl:stats.claude_daily_pnl,ok:stats.claude_healthy,budget:stats.claude_budget,total:stats.claude_total_pnl},
+    {name:'Grok (Mini)',pnl:stats.grok_daily_pnl,ok:stats.grok_healthy,budget:stats.grok_budget,total:stats.grok_total_pnl},
+  ];
+  let h='';
+  for(const r of rows){
+    const pnl=parseFloat(r.pnl||0),tot=parseFloat(r.total||0),ok=r.ok!==false;
+    h+=`<div class="ai-row"><div><div class="ai-name">${r.name}</div><div class="ai-budget">${fmt$(r.budget||0)} budget · all-time ${tot>=0?'+':''}${fmt$(tot)}</div></div><div style="text-align:right"><div style="color:${clr(pnl)};font-weight:700;font-size:13px">${fmtPct(pnl)} today</div><span class="badge ${ok?'green':'red'}">${ok?'healthy':'down'}</span><span class="badge ${sleeping?'amber':'teal'}" style="margin-left:4px">${sleeping?'sleeping':'awake'}</span></div></div>`;
+  }
+  el.innerHTML=h;
+}
+
+function renderCryptoPositions(crypto){
+  const el=document.getElementById('crypto-positions');
+  const positions=crypto?.bot_positions||[];
+  if(!positions.length){el.innerHTML='<div class="empty">No open crypto positions</div>';return;}
+  let h='';
+  for(const p of positions){
+    const pnl=parseFloat(p.pnl_pct||0),held=p.held_hours?p.held_hours.toFixed(1)+'h':'';
+    const stopPct=Math.abs(parseFloat(p.stop_pct||20)),tpPct=parseFloat(p.tp_pct||50);
+    const progress=Math.min(100,Math.max(0,((pnl+stopPct)/(stopPct+tpPct))*100));
+    h+=`<div class="crypto-pos"><div><div class="crypto-symbol">${(p.symbol||'?').replace('USDT','')}</div><div class="crypto-entry">entry ${fmt$(p.entry_price||0)} · ${held} · qty ${p.qty||'?'}</div><div style="margin-top:6px"><div class="progress-bar" style="width:140px"><div class="progress-fill ${pnl>=0?'fill-green':'fill-amber'}" style="width:${progress.toFixed(1)}%"></div></div><div style="font-size:9px;color:var(--muted);margin-top:2px">SL ${fmt$(p.stop_price||0)} / TP ${fmt$(p.tp_price||0)}</div></div></div><div class="crypto-pnl"><div style="color:${clr(pnl)};font-weight:700;font-size:14px">${fmtPct(pnl)}</div><div style="color:var(--muted);font-size:11px">${fmt$(p.pnl_usd||0)}</div></div></div>`;
+  }
+  el.innerHTML=h;
+}
+
+function renderWallet(crypto){
+  const el=document.getElementById('wallet-holdings');
+  const tradeable=crypto?.wallet?.tradeable||[];
+  if(!tradeable.length){el.innerHTML='<div class="empty">No holdings data</div>';return;}
+
+  // Split into active vs dust ($1 threshold matches MIN_DISPLAY_VALUE)
+  const MIN_DISPLAY=1.00;
+  const active=tradeable.filter(h=>(h.value_usdt||0)>=MIN_DISPLAY);
+  const dust  =tradeable.filter(h=>(h.value_usdt||0)<MIN_DISPLAY && (h.qty||h.free||0)>0.000001);
+
+  let h='';
+  if(active.length){
+    for(const hld of active.slice(0,12)){
+      const locked=hld.locked||0,free=hld.free||hld.qty||0;
+      const bot=hld.bot_tracked?`<span class="badge blue" style="font-size:9px;margin-left:4px">bot</span>`:'';
+      const lk=locked>0.0001?`<span style="color:var(--amber);font-size:10px;margin-left:4px">locked ${locked.toFixed(4)}</span>`:'';
+      h+=`<div class="holding-row"><div><span style="font-weight:700;color:#fff">${hld.asset}</span>${bot}${lk}</div><div style="text-align:right"><div style="color:#fff;font-weight:600">${fmt$(hld.value_usdt||0)}</div><div style="color:var(--muted);font-size:10px">${Number(free).toFixed(4)} @ ${fmt$(hld.price||0)}</div></div></div>`;
+    }
+  } else {
+    h+='<div class="empty">No active holdings</div>';
+  }
+
+  // Dust summary line — single row, lists assets, total value
+  if(dust.length){
+    const dustTotal=dust.reduce((s,d)=>s+(d.value_usdt||0),0);
+    const dustNames=dust.slice(0,8).map(d=>d.asset).join(', ')+(dust.length>8?`, +${dust.length-8}`:'');
+    h+=`<div class="holding-row" style="opacity:0.6;border-top:1px dashed var(--border2);margin-top:6px;padding-top:10px"><div><span style="color:var(--muted)">🧹 Dust (${dust.length} coins)</span><div style="font-size:9px;color:var(--muted);margin-top:2px">${dustNames}</div></div><div style="text-align:right"><div style="color:var(--muted);font-weight:600">~${fmt$(dustTotal)}</div><div style="color:var(--muted);font-size:9px">below $${MIN_DISPLAY.toFixed(2)} threshold</div></div></div>`;
+  }
+  el.innerHTML=h;
+}
+
+// ── CLAUDE vs GROK BATTLE RENDERER ─────────────────────────
+function renderBattle(lb,crypto){
+  if(!lb||lb.error){
+    document.getElementById('comp-mode-label').innerHTML='<span class="comp-off">unavailable</span>';
+    return;
+  }
+  const c=lb.claude||{trades:0,wins:0,losses:0,total_pnl:0,win_rate:0,open_positions:0};
+  const g=lb.grok  ||{trades:0,wins:0,losses:0,total_pnl:0,win_rate:0,open_positions:0};
+
+  // Competition status banner
+  const compOn=lb.competition_enabled;
+  document.getElementById('comp-mode-label').innerHTML=
+    compOn?'<span class="comp-on">● ENABLED — independent pools</span>'
+          :'<span class="comp-off">○ DISABLED — shared pool</span>';
+
+  // Pool split percentages × current available USDT
+  const usdt=parseFloat(crypto?.wallet?.usdt_free||0);
+  const claudePct=lb.pool_split?.claude_pct||0.5;
+  const grokPct  =lb.pool_split?.grok_pct  ||0.5;
+  const claudeBuying=usdt*claudePct;
+  const grokBuying  =usdt*grokPct;
+  document.getElementById('comp-pool-split').textContent=
+    `Pool split: Claude ${(claudePct*100).toFixed(0)}% · Grok ${(grokPct*100).toFixed(0)}%  (USDT free $${usdt.toFixed(2)})`;
+
+  // Reserve banner — shows current scaling tier and how much is set aside
+  const r=lb.reserve||{};
+  const rPctEl=document.getElementById('reserve-pct-label');
+  const rDetEl=document.getElementById('reserve-detail-label');
+  if(r&&!r.error&&r.combined_wallet!==undefined){
+    const rpct=(r.reserve_pct||0)*100;
+    if(rpct===0){
+      rPctEl.textContent='0% — FULL FREEDOM';
+      rPctEl.style.color='var(--green)';
+      rDetEl.textContent=`Combined wallet $${(r.combined_wallet||0).toFixed(2)} < $${(r.free_threshold||1000).toFixed(0)} threshold`;
+    } else {
+      rPctEl.textContent=`${rpct.toFixed(0)}% ($${(r.reserve_usd||0).toFixed(2)} held)`;
+      rPctEl.style.color=rpct>=(r.cap_pct||0.30)*100?'var(--red)':'var(--amber)';
+      const cap=rpct>=(r.cap_pct||0.30)*100?' (CAP)':'';
+      rDetEl.textContent=`Wallet $${(r.combined_wallet||0).toFixed(0)} → tradeable $${(r.tradeable_usdt||0).toFixed(2)}${cap}`;
+    }
+  } else {
+    rPctEl.textContent='—';
+    rDetEl.textContent='reserve info unavailable';
+  }
+  document.getElementById('claude-pool-val').textContent=fmt$(claudeBuying);
+  document.getElementById('grok-pool-val').textContent  =fmt$(grokBuying);
+  document.getElementById('claude-pool-fill').style.width=(claudePct*100)+'%';
+  document.getElementById('grok-pool-fill').style.width  =(grokPct*100)+'%';
+
+  // Leader pill
+  const lp=document.getElementById('leader-pill');
+  if(lb.leader==='claude'){
+    lp.className='leader-pill';
+    lp.style.background='rgba(74,158,255,0.12)';
+    lp.style.color='var(--blue)';
+    lp.style.borderColor='rgba(74,158,255,0.4)';
+    lp.textContent=`👑 CLAUDE LEADS BY ${fmt$(lb.margin_usd||0)}`;
+  } else if(lb.leader==='grok'){
+    lp.className='leader-pill';
+    lp.style.background='rgba(167,139,250,0.12)';
+    lp.style.color='var(--purple)';
+    lp.style.borderColor='rgba(167,139,250,0.4)';
+    lp.textContent=`👑 GROK LEADS BY ${fmt$(lb.margin_usd||0)}`;
+  } else if((c.trades+g.trades)>0){
+    lp.className='leader-pill tie';
+    lp.textContent='🤝 TIED';
+  } else {
+    lp.className='leader-pill tie';
+    lp.textContent='— No closes yet —';
+  }
+
+  // Per-AI numbers
+  const setAI=(prefix,s)=>{
+    const pnlEl=document.getElementById(prefix+'-pnl');
+    const subEl=document.getElementById(prefix+'-pnl-sub');
+    if(s.trades===0){
+      pnlEl.textContent='—';
+      pnlEl.style.color='var(--muted)';
+      subEl.textContent=s.open_positions>0?
+        `${s.open_positions} position${s.open_positions>1?'s':''} working`:
+        'awaiting first close';
+    } else {
+      const sign=s.total_pnl>=0?'+':'';
+      pnlEl.textContent=sign+fmt$(Math.abs(s.total_pnl));
+      pnlEl.style.color=clr(s.total_pnl);
+      const avg=s.trades?(s.total_pnl/s.trades):0;
+      subEl.textContent=`avg ${fmt$(avg)}/trade · ${s.trades} closed`;
+    }
+    document.getElementById(prefix+'-trades').textContent=s.trades;
+    document.getElementById(prefix+'-wr').textContent=
+      s.trades?Math.round(s.win_rate)+'%':'—';
+    document.getElementById(prefix+'-wins').textContent=s.wins;
+    document.getElementById(prefix+'-open').textContent=s.open_positions;
+  };
+  setAI('claude',c);
+  setAI('grok',g);
+
+  // Per-AI recent trade lists (filter recent_trades by owner)
+  const recent=lb.recent_trades||[];
+  const claudeTrades=recent.filter(t=>(t.owner||'').toLowerCase()==='claude').slice(-8).reverse();
+  const grokTrades  =recent.filter(t=>(t.owner||'').toLowerCase()==='grok').slice(-8).reverse();
+
+  document.getElementById('claude-trade-count').textContent=`${c.trades} close${c.trades===1?'':'s'} total`;
+  document.getElementById('grok-trade-count').textContent  =`${g.trades} close${g.trades===1?'':'s'} total`;
+
+  const renderTradeList=(trades,owner)=>{
+    if(!trades.length) return '<div class="empty" style="font-size:11px;padding:10px 0">No closed trades yet</div>';
+    let html='';
+    for(const t of trades){
+      const sym=(t.symbol||'').replace('USDT','');
+      const pnl=parseFloat(t.pnl_usd||0);
+      const pct=parseFloat(t.pnl_pct||0);
+      const sign=pnl>=0?'+':'';
+      const time=(t.time||'').slice(5,16).replace('T',' ');
+      html+=`<div class="ai-trade-row"><span class="ai-trade-dot ${owner}"></span><span class="ai-trade-sym">${sym}</span><span class="ai-trade-meta">${time}</span><span class="ai-trade-pnl" style="color:${clr(pnl)}">${sign}${fmt$(Math.abs(pnl))} <span style="font-size:9px;color:var(--muted);font-weight:400">(${(pct>=0?'+':'')+pct.toFixed(2)}%)</span></span></div>`;
+    }
+    return html;
+  };
+  document.getElementById('claude-trades-list').innerHTML=renderTradeList(claudeTrades,'claude');
+  document.getElementById('grok-trades-list').innerHTML  =renderTradeList(grokTrades,'grok');
+}
+
+function setSymPeriod(p,btn){
+  _symPeriod=p;
+  document.querySelectorAll('.period-tab').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  if(_perfData) renderSymPerf(_perfData);
+}
+
+function renderSymPerf(perf){
+  const el=document.getElementById('sym-perf-block');
+  const bySymbol=perf.by_symbol||{};
+  let entries=Object.entries(bySymbol);
+  if(_symPeriod==='stocks') entries=entries.filter(([s])=>!s.endsWith('USDT'));
+  if(_symPeriod==='crypto') entries=entries.filter(([s])=>s.endsWith('USDT'));
+  if(!entries.length){el.innerHTML='<div class="empty">No closed trades yet — data builds as positions close</div>';return;}
+  entries.sort((a,b)=>(b[1].total_pnl||0)-(a[1].total_pnl||0));
+  const maxAbs=Math.max(...entries.map(([,s])=>Math.abs(s.total_pnl||0)),1);
+  let h=`<div class="sym-row sym-head"><span>Symbol</span><span>P&L bar</span><span>Total P&L</span><span>Avg/trade</span><span>Win%</span></div>`;
+  for(const [sym,s] of entries){
+    const pnl=s.total_pnl||0,barW=Math.min(Math.abs(pnl)/maxAbs*100,100).toFixed(1);
+    const avg=s.avg_pnl_pct!=null?fmtPct(s.avg_pnl_pct):'—';
+    const wr=s.win_rate||0;
+    h+=`<div class="sym-row"><span style="font-weight:700;color:#fff">${sym.replace('USDT','')} <span style="font-size:9px;color:var(--muted)">${s.trades||0}t</span></span><span><div class="progress-bar" style="width:100%;max-width:120px"><div class="progress-fill ${pnl>=0?'fill-green':'fill-red'}" style="width:${barW}%"></div></div></span><span style="color:${clr(pnl)};font-weight:700">${pnl>=0?'+':''}${fmt$(pnl)}</span><span style="color:var(--muted)">${avg}</span><span style="color:${wr>=50?'var(--green)':'var(--red)'}">${wr.toFixed(0)}%</span></div>`;
+  }
+  el.innerHTML=h;
+}
+
+function renderPerformance(perf){
+  _perfData=perf;
+  renderSymPerf(perf);
+  const el=document.getElementById('performance-panel');
+  const s=perf.summary||perf||{};
+  const wr=parseFloat(s.win_rate_pct||0),pf=parseFloat(s.profit_factor||0),tot=parseFloat(s.total_pnl||0),trades=parseInt(s.total_closed_trades||s.total_buys||0);
+  let h=`<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px"><div style="text-align:center"><div style="font-size:10px;color:var(--muted);margin-bottom:3px">Win rate</div><div style="font-size:20px;font-weight:700;color:${wr>=50?'var(--green)':'var(--red)'}">${wr.toFixed(1)}%</div><div style="font-size:10px;color:var(--muted)">${trades} trades</div></div><div style="text-align:center"><div style="font-size:10px;color:var(--muted);margin-bottom:3px">Profit factor</div><div style="font-size:20px;font-weight:700;color:${pf>=1?'var(--green)':'var(--red)'}">${pf?pf.toFixed(2)+'x':'—'}</div></div><div style="text-align:center"><div style="font-size:10px;color:var(--muted);margin-bottom:3px">Total P&L</div><div style="font-size:20px;font-weight:700;color:${clr(tot)}">${fmt$(tot)}</div></div></div>`;
+  h+=`<div class="progress-wrap"><div class="progress-label"><span>Win rate (50% target)</span><span>${wr.toFixed(1)}%</span></div><div class="progress-bar"><div class="progress-fill ${wr>=50?'fill-green':'fill-red'}" style="width:${Math.min(wr,100).toFixed(1)}%"></div></div></div>`;
+  const byAI=perf.by_ai||{};
+  for(const [ai,d] of Object.entries(byAI)){
+    const awr=parseFloat(d.win_rate||d.win_rate_pct||0),col=ai.toLowerCase().includes('claude')?'fill-blue':'fill-purple';
+    h+=`<div class="progress-wrap" style="margin-top:8px"><div class="progress-label"><span>${ai}</span><span>${awr.toFixed(1)}% (${d.trades||0} trades · ${fmt$(d.total_pnl||0)})</span></div><div class="progress-bar"><div class="progress-fill ${col}" style="width:${Math.min(awr,100).toFixed(1)}%"></div></div></div>`;
+  }
+  if(!trades) h+='<div class="empty" style="margin-top:12px">No closed trades yet — builds as positions close</div>';
+  el.innerHTML=h;
+}
+
+function renderHistory(hist, stats){
+  const el=document.getElementById('trade-history');
+  const trades=(hist?.trades||[]).slice(0,15);
+  const openPos=(stats?.positions||[]);
+
+  let h='';
+
+  // Always show open positions at top as OPEN entries
+  if(openPos.length){
+    h+=`<div style="font-size:10px;color:var(--muted);letter-spacing:0.05em;text-transform:uppercase;margin-bottom:6px">Open positions</div>`;
+    h+=`<div class="trade-row trade-header"><span>Symbol</span><span>Status</span><span>P&L</span><span>Owner</span><span>Entry</span></div>`;
+    for(const p of openPos){
+      const pnl=parseFloat(p.pnl||0);
+      const pnlStr=(pnl>=0?'+':'')+fmt$(pnl);
+      const pc=`color:${clr(pnl)};font-weight:700`;
+      const pnlPct=parseFloat(p.pnl_pct||0);
+      h+=`<div class="trade-row">
+        <span style="font-weight:700;color:#fff">${p.symbol||'—'}</span>
+        <span><span class="badge badge-open">OPEN ${pnlPct>=0?'▲':'▼'}${Math.abs(pnlPct).toFixed(1)}%</span></span>
+        <span style="${pc}">${pnlStr}</span>
+        <span style="color:var(--muted);font-size:10px">${p.owner||'—'}</span>
+        <span style="color:var(--muted);font-size:10px">${p.strat||'A'}</span>
+      </div>`;
+    }
+  }
+
+  if(!trades.length){
+    h+=`<div style="margin-top:10px;font-size:10px;color:var(--muted);text-align:center">
+      No closed trades yet — history builds as positions close (TP/stop/sell)
+    </div>`;
+    el.innerHTML=h;
+    return;
+  }
+
+  h+=`<div style="font-size:10px;color:var(--muted);letter-spacing:0.05em;text-transform:uppercase;margin:12px 0 6px">Closed trades</div>`;
+  h+=`<div class="trade-row trade-header"><span>Symbol</span><span>Action</span><span>P&L</span><span>Reason</span><span>Time</span></div>`;
+  for(const t of trades){
+    const pnl=t.pnl_usd!=null?(t.pnl_usd>=0?'+':'')+fmt$(t.pnl_usd):'—';
+    const pc=t.pnl_usd!=null?`color:${clr(t.pnl_usd)};font-weight:700`:'color:var(--muted)';
+    const isBuy=(t.action||'')==='buy';
+    const isTP=(t.action||'').includes('take_profit')||t.action==='take_profit';
+    const isStop=(t.action||'').includes('stop');
+    const bc=isBuy?'badge-buy':isTP?'badge-tp':isStop?'badge-sell':'badge-sell';
+    h+=`<div class="trade-row"><span style="font-weight:700;color:#fff">${t.symbol||'—'}</span><span><span class="badge ${bc}">${t.action||'?'}</span></span><span style="${pc}">${pnl}</span><span style="color:var(--muted);font-size:10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${(t.reason||t.exit_reason||'—').slice(0,22)}</span><span style="color:var(--muted);font-size:10px">${(t.time_et||t.time||'').slice(5,16)}</span></div>`;
+  }
+  el.innerHTML=h;
+}
+
+function renderBudget(stats){
+  const el=document.getElementById('budget-bars');
+  const eq=parseFloat(stats.equity||50);
+  const items=[['Trading Pool',parseFloat(stats.trading_pool||0),'fill-teal','var(--teal)'],['Growth Reserve',parseFloat(stats.growth_reserve||0),'fill-amber','var(--amber)'],['Claude Budget',parseFloat(stats.claude_budget||0),'fill-blue','var(--blue)'],['Grok Budget',parseFloat(stats.grok_budget||0),'fill-purple','var(--purple)']];
+  let h='<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">';
+  for(const [lbl,val,cls,col] of items){
+    const pct=eq>0?Math.min((val/eq)*100,100):0;
+    h+=`<div class="progress-wrap"><div class="progress-label"><span style="color:${col}">${lbl}</span><span>${fmt$(val)} <span style="color:var(--muted)">${pct.toFixed(1)}%</span></span></div><div class="progress-bar"><div class="progress-fill ${cls}" style="width:${pct.toFixed(1)}%"></div></div></div>`;
+  }
+  el.innerHTML=h+'</div>';
+}
+
+function renderRepair(repair){
+  const el=document.getElementById('repair-panel');
+  if(!repair||!repair.configured){el.innerHTML='<div class="empty">Self-repair not configured — add GITHUB_TOKEN + GITHUB_REPO to Railway</div>';return;}
+  const checks=repair.behavioral_checks||{},log=repair.repair_log||[];
+  let h='';
+  for(const [key,c] of Object.entries(checks)){
+    const ok=c.status?.includes('OK'),warn=c.status?.includes('WARNING');
+    const col=ok?'var(--green)':warn?'var(--amber)':'var(--red)';
+    h+=`<div class="repair-row"><span style="color:${col}">${ok?'●':warn?'◐':'◉'} ${key.replace(/_/g,' ')}</span><span style="color:var(--muted)">${c.count_in_window||0}/${c.max_allowed} per ${c.window_mins}min</span></div>`;
+  }
+  if(log.length){
+    h+=`<div style="margin-top:10px;font-size:10px;color:var(--muted);padding-top:8px;border-top:1px solid var(--border)">Recent repairs</div>`;
+    for(const r of log.slice(0,3)){
+      const col=r.pr_url?'var(--teal)':'var(--muted)';
+      h+=`<div class="repair-row" style="font-size:10px"><span style="color:${col}">${(r.error||'—').slice(0,35)}</span><span style="color:var(--muted)">${(r.status||'—').slice(0,20)}</span></div>`;
+    }
+  }
+  el.innerHTML=h||'<div class="empty">All checks passing</div>';
+}
+
+// ── CORE RESERVE RENDERER ──────────────────────────────────
+function renderCoreReserve(cr){
+  const setText=(id,v)=>{const e=document.getElementById(id); if(e) e.textContent=v;};
+  if(!cr||cr.error||!cr.enabled){
+    setText('core-total','—');
+    setText('core-pnl','—');
+    setText('core-contributions','—');
+    setText('core-target-pct','—');
+    document.getElementById('core-status-pill').textContent='module unavailable';
+    return;
+  }
+
+  // Status pill
+  const pill=document.getElementById('core-status-pill');
+  if(cr.activated){
+    pill.className='leader-pill';
+    pill.style.background='rgba(34,201,122,0.12)';
+    pill.style.color='var(--green)';
+    pill.style.borderColor='rgba(34,201,122,0.3)';
+    pill.textContent='● ACTIVE';
+  } else {
+    const wallet=parseFloat(cr.combined_wallet||0);
+    const thresh=parseFloat(cr.activation_threshold||1000);
+    const remaining=Math.max(0,thresh-wallet);
+    pill.className='leader-pill tie';
+    pill.textContent=`Locked — $${remaining.toFixed(0)} to activation`;
+  }
+
+  // Banner detail
+  document.getElementById('core-target-info').textContent=
+    cr.activated?
+      `Target ${cr.target_reserve_pct.toFixed(0)}% = $${cr.target_reserve_value.toFixed(2)} of $${cr.combined_wallet.toFixed(2)} wallet`:
+      `Activates at $${(cr.activation_threshold||1000).toFixed(0)} combined wallet`;
+
+  // Top stats
+  setText('core-total', `$${cr.actual_reserve_value.toFixed(2)}`);
+  const pnlEl=document.getElementById('core-pnl');
+  if(cr.total_contributions>0){
+    const sign=cr.pnl_usd>=0?'+':'';
+    pnlEl.textContent=`${sign}$${cr.pnl_usd.toFixed(2)}`;
+    pnlEl.style.color=cr.pnl_usd>=0?'var(--green)':'var(--red)';
+    document.getElementById('core-contributions').textContent=`$${cr.total_contributions.toFixed(2)}`;
+    document.getElementById('core-pnl').title=`${(cr.pnl_pct||0).toFixed(2)}%`;
+  } else {
+    pnlEl.textContent='—';
+    pnlEl.style.color='var(--muted)';
+    setText('core-contributions','—');
+  }
+  setText('core-target-pct', `${(cr.target_reserve_pct||0).toFixed(0)}%`);
+
+  // Slice breakdown
+  const sl=cr.slices||{};
+  const sliceEl=document.getElementById('core-slices');
+  if(cr.actual_reserve_value>0||cr.activated){
+    let h='';
+    // BTC
+    h+=`<div class="core-slice-row">
+      <div class="core-slice-icon">₿</div>
+      <div>
+        <div class="core-slice-name">Bitcoin</div>
+        <div class="core-slice-pct">${(sl.btc_qty||0).toFixed(6)} BTC @ $${(sl.btc_price||0).toLocaleString()}</div>
+      </div>
+      <div class="core-slice-bar"><div class="core-slice-fill-btc" style="width:${Math.min(100,sl.btc_pct||0)}%"></div></div>
+      <div class="core-slice-value">$${(sl.btc_value||0).toFixed(2)} <span style="color:var(--muted);font-size:10px;font-weight:400">(${(sl.btc_pct||0).toFixed(0)}%)</span></div>
+    </div>`;
+    // SPY
+    h+=`<div class="core-slice-row">
+      <div class="core-slice-icon">📈</div>
+      <div>
+        <div class="core-slice-name">S&P 500 (SPY)</div>
+        <div class="core-slice-pct">${(sl.spy_qty||0).toFixed(4)} sh @ $${(sl.spy_price||0).toFixed(2)}</div>
+      </div>
+      <div class="core-slice-bar"><div class="core-slice-fill-spy" style="width:${Math.min(100,sl.spy_pct||0)}%"></div></div>
+      <div class="core-slice-value">$${(sl.spy_value||0).toFixed(2)} <span style="color:var(--muted);font-size:10px;font-weight:400">(${(sl.spy_pct||0).toFixed(0)}%)</span></div>
+    </div>`;
+    // Cash
+    h+=`<div class="core-slice-row">
+      <div class="core-slice-icon">💵</div>
+      <div>
+        <div class="core-slice-name">USDT Cash</div>
+        <div class="core-slice-pct">emergency liquidity + dry powder</div>
+      </div>
+      <div class="core-slice-bar"><div class="core-slice-fill-cash" style="width:${Math.min(100,sl.cash_pct||0)}%"></div></div>
+      <div class="core-slice-value">$${(sl.cash_value||0).toFixed(2)} <span style="color:var(--muted);font-size:10px;font-weight:400">(${(sl.cash_pct||0).toFixed(0)}%)</span></div>
+    </div>`;
+    sliceEl.innerHTML=h;
+  } else {
+    sliceEl.innerHTML='<div class="empty">awaiting first deposit at $1000 wallet</div>';
+  }
+
+  // Recent events
+  const evEl=document.getElementById('core-events');
+  const events=cr.recent_events||[];
+  if(events.length){
+    let h='';
+    for(const e of events.slice(0,8)){
+      const iconMap={
+        ACTIVATION:'🚀', DEPOSIT:'💰', BTC_BUY:'🟢', BTC_SELL:'🔴',
+        SPY_BUY:'🟢', SPY_SELL:'🔴',
+        DEFENSIVE_TRIM_BTC:'🛡️', DEFENSIVE_TRIM_SPY:'🛡️',
+        OPPORTUNITY_BUY_BTC:'⚡', OPPORTUNITY_BUY_SPY:'⚡',
+        TAKE_PROFIT_BTC:'💎', TAKE_PROFIT_SPY:'💎',
+        REBALANCE:'⚖️',
+      };
+      const icon=iconMap[e.type]||'•';
+      const ts=e.ts?new Date(e.ts):null;
+      const ago=ts?(()=>{
+        const m=Math.round((new Date()-ts)/60000);
+        return m<60?`${m}m ago`:m<1440?`${Math.round(m/60)}h ago`:`${Math.round(m/1440)}d ago`;
+      })():'';
+      h+=`<div class="core-event-row">
+        <div class="core-event-icon">${icon}</div>
+        <div class="core-event-text">
+          ${e.message||''}
+          <div class="core-event-time">${ago}</div>
+        </div>
+      </div>`;
+    }
+    evEl.innerHTML=h;
+  } else {
+    evEl.innerHTML='<div class="empty">No contingency events yet</div>';
+  }
+}
+
+// ── AI BRAIN / MEMORY RENDERER ─────────────────────────────
+function renderBrain(mem){
+  const setText=(id,v)=>{const e=document.getElementById(id); if(e) e.textContent=v;};
+  if(!mem||mem.error){
+    setText('brain-lessons','—'); setText('brain-closes','—');
+    setText('brain-winrate','—'); setText('brain-symbols','—');
+    setText('brain-save-status','memory unavailable');
+    return;
+  }
+  // Top stats
+  setText('brain-lessons', mem.lessons_count||0);
+  setText('brain-closes',  mem.total_closed||0);
+  const wr=parseFloat(mem.win_rate_overall||0);
+  const wrEl=document.getElementById('brain-winrate');
+  if(wrEl){
+    wrEl.textContent=mem.total_closed>0?`${wr.toFixed(0)}%`:'—';
+    wrEl.style.color=mem.total_closed===0?'var(--muted)':wr>=50?'var(--green)':'var(--red)';
+  }
+  setText('brain-symbols', mem.symbols_tracked||0);
+
+  // Save status
+  const saveEl=document.getElementById('brain-save-status');
+  if(saveEl){
+    if(mem.last_save_iso){
+      const dt=new Date(mem.last_save_iso);
+      const ago=Math.round((new Date()-dt)/60000); // minutes
+      const agoStr=ago<60?`${ago}m ago`:ago<1440?`${Math.round(ago/60)}h ago`:`${Math.round(ago/1440)}d ago`;
+      const bf=mem.backfilled?' · ✓ backfilled':'';
+      saveEl.innerHTML=`💾 saved ${agoStr}${bf} <span style="color:var(--teal)">${(mem.memory_file||'').replace('/data/','')}</span>`;
+    } else {
+      saveEl.textContent='💾 not saved yet';
+    }
+  }
+
+  // Top symbols list
+  const symEl=document.getElementById('brain-symbols-list');
+  const top=(mem.top_symbols||[]).filter(s=>s.trades>0);
+  if(top.length){
+    let h='';
+    for(const s of top.slice(0,7)){
+      const wrPct=s.win_rate||0;
+      const wrColor=wrPct>=60?'var(--green)':wrPct>=40?'var(--amber)':'var(--red)';
+      const pnlSign=s.avg_pnl_pct>=0?'+':'';
+      const pnlColor=s.avg_pnl_pct>=0?'var(--green)':'var(--red)';
+      const symShort=s.symbol.replace('USDT','');
+      h+=`<div class="brain-sym-row">
+        <div><span class="brain-sym-name">${symShort}</span><div class="brain-sym-trades">${s.trades} trade${s.trades>1?'s':''} · ${s.wins} wins</div></div>
+        <div class="brain-sym-wr-bar"><div class="brain-sym-wr-fill" style="width:${wrPct}%;background:${wrColor}"></div></div>
+        <div style="color:${wrColor};font-weight:700;font-size:11px">${wrPct.toFixed(0)}%</div>
+        <div class="brain-sym-pnl" style="color:${pnlColor}">${pnlSign}${s.avg_pnl_pct.toFixed(1)}%</div>
+      </div>`;
+    }
+    symEl.innerHTML=h;
+  } else {
+    symEl.innerHTML='<div class="empty">No symbol data yet</div>';
+  }
+
+  // Recent lessons
+  const lessEl=document.getElementById('brain-lessons-list');
+  const recent=mem.recent_lessons||[];
+  if(recent.length){
+    let h='';
+    for(const l of recent.slice(0,6)){
+      const icon=l.outcome==='win'?'✅':'❌';
+      const pnlSign=(l.pnl_pct||0)>=0?'+':'';
+      const pnlColor=(l.pnl_pct||0)>=0?'var(--green)':'var(--red)';
+      const owner=l.owner||'bot';
+      const ownerColor=owner==='claude'?'var(--blue)':owner==='grok'?'var(--purple)':'var(--muted)';
+      h+=`<div class="brain-lesson-row">
+        <div class="brain-lesson-icon">${icon}</div>
+        <div class="brain-lesson-text">
+          <div><strong>${(l.symbol||'?').replace('USDT','')}</strong> <span style="color:${pnlColor};font-weight:600">${pnlSign}${(l.pnl_pct||0).toFixed(1)}%</span> via ${l.strategy||'—'}</div>
+          <div class="brain-lesson-meta"><span style="color:${ownerColor};font-weight:600">${owner}</span> · ${l.situation||'standard'} · ${l.timestamp||''}</div>
+        </div>
+      </div>`;
+    }
+    lessEl.innerHTML=h;
+  } else {
+    lessEl.innerHTML='<div class="empty">No lessons yet — building from this point forward</div>';
+  }
+
+  // AI personas
+  const personasEl=document.getElementById('brain-personas');
+  const aip=mem.ai_patterns||{};
+  let personaH='';
+  for(const ai of ['claude','grok']){
+    const p=aip[ai]||{};
+    const tot=(p.wins||0)+(p.losses||0);
+    if(tot===0){
+      personaH+=`<div class="brain-persona-row"><div><span class="brain-persona-dot ${ai}"></span><span class="brain-persona-name">${ai.charAt(0).toUpperCase()+ai.slice(1)}</span><span class="brain-persona-record">no closed trades</span></div><div style="color:var(--muted);font-size:11px">—</div></div>`;
+    } else {
+      const wrColor=(p.win_rate||0)>=60?'var(--green)':(p.win_rate||0)>=40?'var(--amber)':'var(--red)';
+      personaH+=`<div class="brain-persona-row"><div><span class="brain-persona-dot ${ai}"></span><span class="brain-persona-name">${ai.charAt(0).toUpperCase()+ai.slice(1)}</span><span class="brain-persona-record">${p.wins||0}W / ${p.losses||0}L</span></div><div style="color:${wrColor};font-weight:700;font-size:12px">${(p.win_rate||0).toFixed(0)}%</div></div>`;
+      if(p.best_setup){
+        personaH+=`<div style="font-size:10px;color:var(--muted);padding:2px 0 6px 16px;font-style:italic">↳ best: ${p.best_setup.slice(0,50)}</div>`;
+      }
+    }
+  }
+  personasEl.innerHTML=personaH;
+
+  // Market regime performance
+  const regEl=document.getElementById('brain-regimes');
+  const regimes=mem.market_regimes||{};
+  let regH='';
+  let anyData=false;
+  for(const [name,r] of Object.entries(regimes)){
+    if(!r||!r.trades) continue;
+    anyData=true;
+    const wr=r.trades?Math.round(r.wins/r.trades*100):0;
+    const wrColor=wr>=60?'var(--green)':wr>=40?'var(--amber)':'var(--red)';
+    const icon=name==='bull'?'🐂':name==='bear'?'🐻':'➖';
+    regH+=`<div class="brain-persona-row"><div>${icon} <span class="brain-persona-name">${name.charAt(0).toUpperCase()+name.slice(1)}</span><span class="brain-persona-record">${r.wins||0}W / ${(r.trades-r.wins)||0}L</span></div><div style="color:${wrColor};font-weight:700;font-size:12px">${wr}%</div></div>`;
+  }
+  regEl.innerHTML=anyData?regH:'<div class="empty">No regime data yet — needs SPY trend tagging</div>';
+}
+
+// ── AI EVOLUTION TIER RENDERER ────────────────────────────
+// Pass A: updates the role labels under each AI's name with their
+// current tier + progress toward next tier. Tier badges are color-coded.
+// Pass B will add a full tier panel with proposal history.
+function renderEvolution(ev){
+  if(!ev||ev.error||!ev.enabled&&ev.enabled!==undefined){
+    return;
+  }
+  const tierColors={
+    0:'var(--muted)', 1:'var(--teal)', 2:'var(--blue)',
+    3:'var(--purple)', 4:'var(--green)',
+  };
+  const aiStates=ev.ai_states||{};
+  for(const ai of ['claude','grok']){
+    const data=aiStates[ai];
+    if(!data) continue;
+    const el=document.getElementById(`${ai}-role`);
+    if(!el) continue;
+    const tier=data.current_tier||0;
+    const tierName=data.current_tier_name||'Probation';
+    let label=`Autonomous trader · Tier ${tier} (${tierName})`;
+    if(data.next_tier!==null&&data.next_tier!==undefined){
+      const tradesNeeded=Math.max(0,data.trades_to_next||0);
+      const pnlNeeded=data.pnl_to_next_usd||0;
+      const parts=[];
+      if(tradesNeeded>0) parts.push(`${tradesNeeded} more trades`);
+      if(pnlNeeded>0) parts.push(`+$${pnlNeeded.toFixed(2)} P&L`);
+      if(parts.length){
+        label+=` · next: ${parts.join(' & ')}`;
+      } else if(data.eligible_tier>tier){
+        label+=` · ⬆ ready for Tier ${data.eligible_tier}`;
+      }
+    }
+    el.textContent=label;
+    el.style.color=tierColors[tier]||'var(--muted)';
+    el.style.fontWeight='600';
+  }
+}
+
+async function fetchAll(){
+  const dot=document.getElementById('status-dot'),upd=document.getElementById('last-update');
+  try{
+    const [stats,crypto,hist,perf,repair,bHist,leaderboard,memory,coreReserve,evolution]=await Promise.all([
+      apiFetch('/stats'),
+      apiFetch('/crypto_status').catch(()=>({})),
+      apiFetch('/history?limit=15').catch(()=>({})),
+      apiFetch('/performance').catch(()=>({})),
+      apiFetch('/repair_status').catch(()=>({})),
+      apiFetch('/binance_history?limit=20').catch(()=>({})),
+      apiFetch('/leaderboard').catch(()=>({error:true})),
+      apiFetch('/memory').catch(()=>({error:true})),
+      apiFetch('/core_reserve').catch(()=>({error:true})),
+      apiFetch('/evolution').catch(()=>({error:true})),
+    ]);
+    dot.className='status-dot';
+    upd.textContent='Updated '+new Date().toLocaleTimeString();
+    renderBanner(stats.ai_sleeping,stats.sleep_reason,stats.wake_reason);
+    renderTopMetrics(stats,crypto);
+    renderGains(stats,crypto);
+    renderStockPositions(stats.positions||[]);
+    renderAIManagers(stats);
+    renderBattle(leaderboard,crypto);
+    renderEvolution(evolution);
+    renderCoreReserve(coreReserve);
+    renderBrain(memory);
+    renderCryptoPositions(crypto);
+    renderWallet(crypto);
+    renderPerformance(perf.summary?perf:{summary:perf,by_symbol:perf.by_symbol||{},by_ai:perf.by_ai||{}});
+    renderHistory(hist, stats);
+    renderBudget(stats);
+    renderRepair(repair);
+    renderBinanceHistory(bHist);
+  }catch(e){
+    dot.className='status-dot offline';
+    upd.textContent='Connection failed — '+e.message;
+    document.getElementById('ai-banner').innerHTML=`<div class="sleep-banner">Cannot reach bot — ${e.message} &nbsp;|&nbsp; <a href="${getUrl()}/health" target="_blank" style="color:var(--amber)">${getUrl()}/health</a></div>`;
+  }
+}
+
+(function(){
+  const o=window.location.origin;
+  if(o&&o!=='null'&&!o.startsWith('file://')) document.getElementById('bot-url').placeholder='Auto: '+o+' (leave blank)';
+  else document.getElementById('bot-url').value=BOT_DEFAULT;
+})();
+fetchAll();
+setInterval(fetchAll,30000);
+
+function renderBinanceHistory(data){
+  const el=document.getElementById('binance-history');
+  if(!el) return;
+  const trades=(data?.trades||[]).slice(0,20);
+  const stats=data?.stats||{};
+  if(!trades.length){
+    el.innerHTML='<div class="empty">No Binance history yet — syncing on boot...</div>';
+    return;
+  }
+  let h=`<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;font-size:11px">`;
+  h+=`<div style="text-align:center"><div style="color:var(--muted);margin-bottom:2px">Total trades</div><div style="font-size:16px;font-weight:700;color:#fff">${stats.total_trades||0}</div></div>`;
+  h+=`<div style="text-align:center"><div style="color:var(--muted);margin-bottom:2px">Symbols</div><div style="font-size:16px;font-weight:700;color:#fff">${stats.symbols_traded||0}</div></div>`;
+  h+=`<div style="text-align:center"><div style="color:var(--muted);margin-bottom:2px">Since</div><div style="font-size:16px;font-weight:700;color:#fff">${stats.first_trade||'—'}</div></div>`;
+  h+=`</div>`;
+  if(stats.symbol_stats&&Object.keys(stats.symbol_stats).length){
+    h+=`<div style="margin-bottom:8px;font-size:10px;color:var(--muted);letter-spacing:0.05em;text-transform:uppercase">By coin</div>`;
+    for(const [sym,s] of Object.entries(stats.symbol_stats||{}).slice(0,8)){
+      const pnl=s.pnl_pct,clr=pnl===null?'var(--muted)':pnl>=0?'var(--green)':'var(--red)';
+      const pnlStr=pnl===null?'open':(pnl>=0?'+':'')+pnl.toFixed(2)+'%';
+      h+=`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="font-weight:700;color:#fff">${sym}</span><span style="color:var(--muted)">${s.buys}B/${s.sells}S</span><span style="color:var(--muted)">avg $${(s.avg_buy||0).toFixed(4)}</span><span style="color:${clr};font-weight:700">${pnlStr}</span></div>`;
+    }
+  }
+  h+=`<div style="margin:10px 0 6px;font-size:10px;color:var(--muted);letter-spacing:0.05em;text-transform:uppercase">Recent fills</div>`;
+  h+=`<div class="trade-row trade-header"><span>Symbol</span><span>Side</span><span>Price</span><span>Qty</span><span>Time</span></div>`;
+  for(const t of trades){
+    const bc=t.side==='buy'?'badge-buy':'badge-sell';
+    h+=`<div class="trade-row"><span style="font-weight:700;color:#fff">${(t.symbol||'').replace('USDT','')}</span><span><span class="badge ${bc}">${t.side||'?'}</span></span><span style="color:var(--muted)">$${parseFloat(t.price||0).toFixed(4)}</span><span style="color:var(--muted)">${parseFloat(t.qty||0).toFixed(2)}</span><span style="color:var(--muted);font-size:10px">${(t.time||'').slice(5,16)}</span></div>`;
+  }
+  el.innerHTML=h;
+}
+</script>
+</body>
+</html>
