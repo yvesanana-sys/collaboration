@@ -1,0 +1,690 @@
+# NovaTrade — Master Reference Document
+*Last updated: April 28, 2026*
+
+---
+
+## What Is NovaTrade?
+
+An AI-powered algorithmic trading bot that trades stocks via **Alpaca** and crypto via **Binance.US** simultaneously. Two AI models act as collaborative "managers" — Claude Haiku handles technical analysis, Grok-mini handles social/news intelligence. The bot is the "worker" that executes their instructions autonomously between sessions.
+
+---
+
+## Infrastructure
+
+| Item | Detail |
+|------|--------|
+| GitHub repo | `yvesanana-sys/collaboration` |
+| Deployment | Railway (`collaboration-production-cba3.up.railway.app`) |
+| Language | Python (Flask web server) |
+| Port | 8080 (must bind before trading loop starts) |
+| Stock API | Alpaca live trading |
+| Crypto API | Binance.US |
+| AI Models | Claude Haiku (technical) + Grok-mini (social/news) |
+
+---
+
+## Files — What Each One Does
+
+| File | Purpose |
+|------|---------|
+| `bot_with_proxy.py` | Main bot — orchestrator, Flask server, sleep/wake logic, route handlers |
+| `binance_crypto.py` | Crypto engine — 24/7 Binance.US trading, exit monitor, wallet reader, AI competition logic |
+| `prompt_builder.py` | AI prompt construction, persistent memory/lessons system, AI personas, brain stats |
+| `portfolio_manager.py` | Trade history persistence, Binance fill sync, reserve scaling, gain metrics, performance analytics |
+| `sleep_manager.py` | AI sleep/wake state, custom wake conditions, restriction cleanup |
+| `pdt_manager.py` | Pattern Day Trade tracking, intraday buy logging, hold council |
+| `ai_clients.py` | Claude/Grok HTTP clients, JSON parser with truncation recovery, response normalizer |
+| `market_data.py` | OHLCV bars, technical indicators (RSI/MACD/EMA/BB/ATR), SPY trend |
+| `intelligence.py` | Market news, politician trades, dark pool flow, Twitter/X intel |
+| `projection_engine.py` | 5-layer price projection model for stocks |
+| `thesis_manager.py` | v3.0 — AI sleep brief writer, custom wake conditions, position thesis storage |
+| `wallet_intelligence.py` | v3.0 — Cross-portfolio scanner, opportunity ranker, rotation finder |
+| `core_reserve.py` | **[v3.1]** Long-term wealth compounder — BTC/SPY/Cash, walled off from tactical AIs, rule-based watcher with 4 contingencies |
+| `github_deploy.py` | Push files to GitHub from `/deploy` endpoint |
+| `dashboard.html` | Live web dashboard — battle card, brain panel, core reserve, performance, history |
+
+**Files to NEVER delete from GitHub:**
+- All 14 `.py` modules above must always be present
+- `dashboard.html` for the web UI
+- `requirements.txt` for Railway dependencies
+- `v3_patches.py` — delete this (it was docs only, not needed on Railway)
+
+---
+
+## Architecture — How It Works
+
+### Sleep/Wake Cycle
+AIs sleep after executing trades. Bot runs autonomously. 7 wake conditions:
+
+1. Cash crosses active threshold
+2. All positions closed + cash available
+3. 2+ stop-losses fire (emergency)
+4. 8:30am premarket (always runs daily)
+5. SPY drops >2% suddenly (crash guard)
+6. AI custom wake instructions (price triggers AI sets before sleeping)
+7. **[v3.0]** Thesis conditions — AI-written per-position triggers
+
+### v3.0 AI-Led Architecture (current)
+- AI writes a **sleep brief** (JSON) before sleeping with custom wake conditions per position
+- Bot monitors every 5 minutes against thesis conditions
+- Bot wakes AI with rich context when conditions trigger
+- **Crypto never auto-exits** without AI approval — prevents wick stop-outs
+- Stocks auto-exit only at hard -10% circuit breaker if no thesis
+- Bot is dumb executor — AI approves ALL trades
+
+### Dual AI Collaboration (3 rounds)
+- **Round 1**: Both AIs propose trades independently
+- **Round 2**: Each AI reviews the other's proposals autonomously
+- **Round 3**: Collaborative big-ticket gate (locked until $3,000 equity)
+
+### AI Competition Mode (v3.1 — current)
+Claude and Grok are now treated as independent traders with separate capital pools, separate P&L tracking, and a head-to-head leaderboard.
+
+- **Pool split:** Available USDT divided 50/50 between Claude and Grok at the start of each cycle (`CLAUDE_POOL_PCT`, `GROK_POOL_PCT` in `binance_crypto.py`).
+- **No more "shared" merge:** When both AIs pick the same coin, the higher-confidence proposal wins the slot. The losing AI doesn't get charged but also doesn't double-up. Each fill is tagged with its true `owner` (claude or grok).
+- **Each AI sees only its own pool** as buying power. They cannot starve each other.
+- **Per-AI position cap:** If Claude's slice runs dry mid-cycle, it skips the slot and Grok takes the next pick.
+- **Leaderboard:** `/leaderboard` endpoint and dashboard battle card show each AI's wins/losses, win rate, total realized P&L, and current open positions. The leader is determined by realized P&L on closed crypto trades only.
+- **Kill switch:** Set `ENABLE_AI_COMPETITION = False` to revert to the legacy shared-pool merge.
+
+### Wallet-Scaling Reserve Rule (v3.1)
+Both stock and crypto sides honor a unified reserve that scales with combined wallet value:
+
+| Combined wallet | Reserve % | Tradeable % |
+|---|---|---|
+| < $1,000 | 0% (full freedom) | 100% |
+| $1,000 – $1,999 | 10% | 90% |
+| $2,000 – $2,999 | 11% | 89% |
+| ... | ... +1% per $1,000 ... | ... |
+| $20,000 – $20,999 | 29% | 71% |
+| $21,000+ | 30% (cap) | 70% |
+
+`get_wallet_reserve_pct(combined_wallet)` lives in `binance_crypto.py` and is the single source of truth — both `binance_crypto` (USDT pool sizing) and `portfolio_manager` (stock trading pool) call it. Below $1k the AIs trade 100% of available capital; above $1k the reserve ramps up to protect accumulated gains.
+
+### Core Reserve (v3.1) — Long-term Compounder
+A walled-off long-term wealth layer that activates at $1,000 combined wallet. **Tactical AIs cannot see it or trade against it.** Lives entirely in `core_reserve.py`.
+
+**Allocation:**
+- 50% BTC (Binance.US)
+- 30% SPY (Alpaca)
+- 20% USDT cash (Binance.US — emergency liquidity + dry powder)
+
+**Funding:** As wallet crosses each $1,000 threshold, the reserve grows by the incremental %. Money is split per allocation. Once deposited, the BTC and SPY positions are intended to compound long-term.
+
+**Four contingency triggers** (run hourly, rule-based, no AI calls):
+
+1. **Defensive trim** — BTC -20% or SPY -15% over 7 days → sell 30% of position (72h cooldown)
+2. **Opportunity buy** — BTC -30% from ATH or SPY -20% AND RSI < 30 → deploy 50% of cash slice (1-week cooldown)
+3. **Take-profit trim** — BTC +50% or SPY +30% from entry → trim 20% to cash (1-week cooldown)
+4. **Drift rebalance** — any slice drifts >15% from target → rebalance to target weights (30-day cooldown)
+
+**Persistence:** Full state saved to `/data/core_reserve.json` — entry prices, ATH per slice, last-trigger timestamps, audit log of all events (capped at 200).
+
+**Trade tagging:** All Core Reserve orders tagged with `owner="core_reserve"` so they appear in trade history but never pollute the Claude vs Grok leaderboard.
+
+---
+
+## Trading Rules
+
+### Stocks (Alpaca)
+| Rule | Value |
+|------|-------|
+| Stop loss | -10% |
+| Take profit | +20% |
+| Max positions | 2 |
+| Daily loss limit | 5% |
+| Strategy A | Fixed TP (breakout entries) |
+| Strategy B | Trailing stop (momentum — NVDA always uses B) |
+| Trail activates | +10% gain |
+| Trail pct | 8% from peak (12% volatile stocks, 6% stable) |
+| Time stop | 5 days |
+
+### Crypto (Binance.US)
+| Rule | Value |
+|------|-------|
+| Stop loss | ~20% below entry |
+| Take profit | ~25-30% above entry |
+| Max positions | 1 (Tier 1) |
+| Max hold | 72 hours |
+| Min profit (after fees) | 1.5% |
+| Trade size | 45% of wallet (Tier 1) |
+| Reserve | $10 USDT always kept |
+| Order type | MARKET default for all sells (LIMIT available via `force_limit=True`) |
+
+### Crypto Tiers
+| Tier | Wallet Size | Risk % | Max Positions | Universe |
+|------|------------|--------|---------------|---------|
+| 1 | <$100 | 45% | 1 | BTC/SOL only |
+| 2 | $100-$300 | 35% | 2 | Top 5 coins |
+| 3 | $300-$500 | 25% | 3 | All universe |
+| 4 | $500+ | 20% | 4 | All universe |
+
+### Autonomy Tiers (Stocks)
+| Tier | Equity | Claude Budget | Grok Budget |
+|------|--------|--------------|-------------|
+| 1 | $150 | $25 | $25 |
+| 2 | $300 | $50 | $50 |
+| 3 | $600 | $100 | $100 |
+| 4 | $1,200 | $200 | $200 |
+| 5 | $2,000 | $300 | $300 + shorts |
+
+---
+
+## Crypto Universe (Binance.US)
+
+BTC, ETH, SOL, AVAX, DOGE, LINK, ADA, DOT, ALGO, NEAR, KAVA, MATIC, ATOM, FET, UNI, PEPE, AVAX
+
+---
+
+## Technical Indicators Computed
+
+RSI-14, MACD (12/26/9), EMA 9/21, SMA 20/50, Bollinger Bands, ATR-14, Volume Ratio, OBV trend
+
+---
+
+## Persistent Storage (Railway `/data` volume)
+
+All learning, history, and state survives redeploys via the Railway volume mount at `/data`:
+
+| File | Purpose | Module |
+|---|---|---|
+| `/data/trade_history.json` | Every buy/sell ever executed (stocks + crypto), tagged by owner | `portfolio_manager.py` |
+| `/data/binance_trade_history.json` | Binance.US fill history from `/api/v3/myTrades` (last 6 months) | `portfolio_manager.py` |
+| `/data/ai_memory.json` | **AI learned lessons** — symbol win rates, persona stats, regime performance | `prompt_builder.py` |
+| `/data/shared_state.json` | AI sleep state, cash thresholds, gain baselines, allocations | `portfolio_manager.py` |
+| `/data/sleep_state.json` | Sleep/wake timing | `sleep_manager.py` |
+| `/data/core_reserve.json` | **[v3.1]** Core Reserve state — entries, ATH, triggers, audit log | `core_reserve.py` |
+| `/data/repair_log.json` | Self-repair history from Claude Code | `bot_with_proxy.py` |
+
+### AI Learning Loop
+
+1. Trade closes → `prompt_builder.on_trade_closed()` → `memory.record_outcome()` → auto-saves to `/data/ai_memory.json`
+2. Next AI cycle → `memory.format_for_prompt()` injects "LEARNED FROM PAST TRADES:" into both Claude and Grok prompts (up to 4 most-relevant lessons by symbol/situation/regime match)
+3. AIs see overall win rate, per-symbol performance, per-AI persona stats, bear-market warnings, situation-specific guidance
+
+### Boot-Time Backfill (v3.1)
+
+On first boot after deploying the v3.1 patches, `_replay_trade_history_into_memory()` does three things:
+1. Replays stored stock closes back into AI memory (if any)
+2. **One-time Binance history backfill** — converts pre-existing Binance fills into synthetic lessons via FIFO buy/sell matching, so the AIs start with a meaningful baseline rather than cold-starting at zero
+3. Logs full status: `🧠 AI Memory ready: N lessons | M closes (X% win rate) | Y symbols tracked`
+
+The `backfilled` flag in `ai_memory.json` ensures this only runs once per fresh deploy.
+
+---
+
+## Known Issues & Fixes
+
+| Issue | Status | Fix |
+|-------|--------|-----|
+| TSLA Alpaca 403 | Known — bot cannot sell TSLA | Manual close required |
+| AUDIO LIMIT order 400 error | Fixed — MARKET orders used | Already in code |
+| Claude JSON parse fail (compressed keys / truncation) | **Fixed v3.1** — bracket-balancing recovery + abbreviated key map | `ai_clients.py` |
+| Sleep brief parse fail (markdown fences) | Fixed April 7 | In `thesis_manager.py` |
+| Flask must bind before trading loop | Fixed — `_delayed_trading_start()` | In code |
+| Stale Binance cache phantom sell errors | Fixed — live balance check before every sell | In code |
+| BTCUSDT "projection not viable" | Expected — range too tight, protecting capital | Normal behavior |
+| ETH phantom sell order stuck unfilled | Fixed April 24 — `place_crypto_sell` defaults MARKET | `binance_crypto.py` |
+| AI sell decisions re-stacking limit orders | Fixed April 24 — cancel open orders + refresh wallet before sell | `binance_crypto.py` |
+| AI returns bare asset name (`UNI`, `ETH`) → 400 | Fixed April 24 — auto-append `USDT` if no quote suffix | `binance_crypto.py` |
+| Buy `INSUFFICIENT_BALANCE` on full-notional MARKET orders | Fixed April 24 — 0.5% safety buffer in Method 2 | `binance_crypto.py` |
+| Ghost positions spam exit-monitor every cycle | Fixed April 25 — pre-check + DUST_BALANCE handling | `binance_crypto.py` |
+| **Sleep manager `ZoneInfo` not imported** → AIs forcibly asleep | **Fixed v3.1** — added missing import + tuple-return guarantee | `sleep_manager.py` |
+| **Autonomous monitor `cannot unpack non-iterable NoneType`** | **Fixed v3.1** — `check_wake_conditions` always returns tuple | `sleep_manager.py` |
+| **Binance history sync returning 0 trades** | **Fixed v3.1** — `signed=True` was missing on `/api/v3/myTrades` | `portfolio_manager.py` |
+| **`round_trip_fee = 0.0002` (40× too low)** | **Fixed v3.1** — set to 0.008 (Binance.US 0.40% × 2 sides) | `binance_crypto.py` |
+| **ETH dumped at -1.38% on time_exit despite below fee floor** | **Fixed v3.1** — fee-floor guard extends hold up to `hard_max_hold_hours=72` | `binance_crypto.py` |
+| **Stock side ignored wallet-scaling reserve rule** | **Fixed v3.1** — `portfolio_manager.get_trading_pool()` calls `get_wallet_reserve_pct()` | `portfolio_manager.py` |
+| **Dust ($<$1) cluttering snapshot logs and AI prompts** | **Fixed v3.1** — `MIN_DISPLAY_VALUE = $1` filter + dust summary | `binance_crypto.py`, `bot_with_proxy.py` |
+
+---
+
+## Key Learnings
+
+- **Infrastructure bugs caused early losses**, not strategy failures. Math on 1:2 R/R (stocks) and 1:2.5 R/R (crypto) is sound.
+- **Stale API cache** causes phantom sell errors — always check live balance via `/api/v3/account` before sells.
+- **LIMIT orders on crypto cause two failure modes** — PRICE_FILTER rejections if price is off-tick, and unfilled resting orders if price is above market. `place_crypto_sell()` now defaults to MARKET; LIMIT requires explicit `force_limit=True`.
+- **Always cancel existing open orders for a symbol before placing a new sell.** Without this, prior unfilled limits leave balance locked (`🔒` in wallet), and the new order either fails on LOT_SIZE or stacks above market. After cancel, wait ~500ms and re-read wallet so the freed balance is usable.
+- **stepSize must be fetched dynamically** — hardcoded quantities cause order rejections.
+- **Both AIs sleep together** — early architecture had Claude solo watching, which was wrong.
+- **TSLA is Alpaca-restricted** — bot gets 403 on TSLA sells. Always watch manually.
+- **Trust the logs over the master doc when they disagree.** If a log shows `SELL ... filled=0.0000` reappearing across snapshots, that's a stale-limit problem, not a normal pending order.
+
+---
+
+## Rotation Mode (Crypto)
+
+When USDT hits zero but coins are held:
+1. Identify weakest holding by rotation score
+2. Sell it → generates USDT
+3. Immediately buy strongest breakout opportunity
+4. New coin must project >1.5% gain after fees
+5. Never rotate a profitable position — only rotate losers
+
+---
+
+## Sleep Brief System (v3.0)
+
+Before sleeping, AI writes JSON with per-position instructions:
+```json
+{
+  "portfolio_assessment": "...",
+  "stocks": {
+    "TSLA": {
+      "action": "HOLD",
+      "thesis": "Oversold RSI, hold above stop",
+      "emergency_below": 343.61,
+      "bullish_above": 360.0,
+      "time_review_hrs": 24,
+      "circuit_breaker": 305.0,
+      "bot_approved_action": null
+    }
+  },
+  "crypto": {
+    "AVAXUSDT": {
+      "action": "HOLD",
+      "emergency_below": 7.5,
+      "bot_approved_action": null
+    }
+  }
+}
+```
+
+Bot checks thesis conditions every 5 minutes and wakes AI with context when triggered.
+
+---
+
+## API Endpoints (Railway URL)
+
+Base URL: `https://collaboration-production-cba3.up.railway.app`
+
+### Core endpoints
+| Endpoint | What It Returns |
+|----------|----------------|
+| `/health` | Liveness probe (always 200) |
+| `/dashboard` (or `/`) | Live web dashboard |
+| `/stats` | Full portfolio snapshot — equity, cash, positions, AI sleep state |
+| `/crypto_status` | Binance.US positions, wallet, USDT free, day P&L |
+| `/history` | Recent trade history (closes) — filter: `?symbol=X`, `?owner=claude` |
+| `/performance` | Win rate, P&L analytics, by_symbol/by_AI/by_strategy breakdowns |
+| `/projection` | Stock projection engine output (5-layer model) |
+
+### v3.1 endpoints
+| Endpoint | What It Returns |
+|----------|----------------|
+| `/leaderboard` | **Claude vs Grok head-to-head** — wins/losses, win rate, total P&L, recent crypto closes, current leader, pool split, reserve info |
+| `/memory` | **AI Brain stats** — total lessons, win rate, top symbols, AI personas, market regimes, recent learned lessons |
+| `/core_reserve` | **Long-term compounder status** — BTC/SPY/cash split, target allocation, P&L vs contributions, ATH per slice, recent contingency events |
+| `/binance_history` | Binance fill history from `/api/v3/myTrades` (last 6 months) |
+| `/prompt_memory` | Legacy view of prompt memory state |
+
+### Operational
+| Endpoint | What It Returns |
+|----------|----------------|
+| `/storage` | Volume disk usage on `/data` |
+| `/repair_log` | Self-repair history from Claude Code |
+| `/repair_status` | Active/pending repair jobs |
+| `/pdt` | Pattern Day Trade status |
+| `/liquidate` | Emergency close all positions (POST) |
+| `/deploy` | Push files to GitHub (POST) |
+
+---
+
+## Current Portfolio (as of April 28, 2026)
+
+### Stocks (equity ~$53.28, cash ~$21.28)
+| Symbol | Entry | Current | P&L | Notes |
+|--------|-------|---------|-----|-------|
+| AMZN | $262.53 | ~$259.56 | -1.13% | Grok pick, strat A |
+| GOOGL | $350.25 | ~$349.72 | -0.15% | Claude pick, strat A |
+| NVDA | $209.19 | ~$210.82 | +0.78% | Claude pick, strat B |
+
+3 positions × ~$10.65 each = ~$32 deployed. Cash holds the rest. Stock side is at `max_positions=3` cap — once v3.1 deploys with the unified reserve rule, the cap is the constraint, not the reserve.
+
+### Crypto (wallet ~$57.68, USDT free ~$5.65)
+| Symbol | Entry | Current | P&L | Held | Notes |
+|--------|-------|---------|-----|------|-------|
+| ALGOUSDT | $0.1119 | ~$0.1140 | +1.88% | ~1.5h | Claude pick, near TP $0.1148 |
+| FETUSDT | $0.1977 | ~$0.1965 | -0.61% | ~1.5h | Bot-tracked, holding |
+| ATOMUSDT | $1.938 | ~$1.961 | +1.19% | ~1.5h | Bot-tracked, near TP $1.9819 |
+
+### Wallet dust (13 coins ~$0.62 — hidden from logs and AI prompts post-v3.1)
+ETH residual, NEAR, LTC, DOGE, UNI, AVAX, ATOM remnant, SOL, KAVA, RVN, SHIB, DOT, AUDIO — all under $1 threshold.
+
+### Combined wallet ~$110.96
+Below the $1,000 Core Reserve activation threshold. Phase 1.5 module loaded but inactive — dashboard shows "Locked — $889 to activation."
+
+---
+
+## Pending Manual Actions
+
+- [ ] **Deploy v3.1 patches to Railway** (8 files) — fixes the `ZoneInfo` cascade that's been keeping AIs forcibly asleep
+- [ ] **Verify Binance API key** has Spot Trading + history read permissions for the new `signed=True` `/api/v3/myTrades` calls
+- [ ] Watch TSLA if it returns — bot cannot sell due to Alpaca 403, must close manually
+- [ ] Claim FET staking rewards on Binance.US (~small USDT amount)
+- [ ] Add funding to Binance.US to unlock Tier 2 when ready
+
+---
+
+## Grok Research Sources
+
+Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, CoinTelegraph, Decrypt, The Block, Whale Alert, Lookonchain, CoinGecko/CMC trending
+
+---
+
+## Development History (Sessions)
+
+1. **v1.0** — Basic single-AI bot, basic stop/TP
+2. **v1.5** — Dual-AI collaboration (Claude + Grok), 3-round system
+3. **v2.0** — Crypto integration (Binance.US), sleep/wake cycles, projection engine
+4. **v2.5** — Parse fixes, MARKET orders, stepSize dynamic fetch, gains tracking
+5. **v3.0** — AI-led architecture: thesis_manager.py + wallet_intelligence.py, AI approves all trades, sleep brief system, cross-portfolio opportunity scanner
+6. **v3.1** — *(current)* Modularization complete. AI Competition mode (separate Claude/Grok pools + leaderboard). Wallet-scaling reserve rule unified across stocks + crypto. Persistent AI memory with Binance backfill. Core Reserve long-term compounder (BTC/SPY/Cash) with rule-based contingency watcher. Sleep manager + JSON parser bug fixes. Dust cleanup throughout. New `/leaderboard`, `/memory`, `/core_reserve` endpoints + dashboard panels.
+
+---
+
+## Roadmap (Upcoming)
+
+### Phase 1.6 (next — small, focused wins)
+- **Dust convert** — integrate Binance.US `/sapi/v1/asset/dust` to sweep <$10 holdings into USDT/BTC. Frees up otherwise stuck capital.
+- **Convert API** — use Binance.US OTC convert endpoints for crypto-to-crypto swaps in Rotation Mode. 0% fees vs current 0.80% round-trip = significant fee savings on every rotation.
+- **Aggressive + Creative AI prompts** — rewrite Claude/Grok system prompts to encourage bolder strategy choices, sharper persona differentiation (Claude = analytical contrarian, Grok = momentum chaser), and rewards for creative strategy naming.
+- **AI strategy push** (light version) — AIs propose custom indicator combinations beyond fixed RSI/MACD/EMA set; bot evaluates and executes within existing trade framework.
+
+### Phase 2 (further out)
+- **AI-negotiated pool split** — replace fixed 50/50 with each AI proposing its own % each cycle, system reconciles based on recent performance.
+- **Profit-minus-fees as exit driver** — make every exit decision compute `expected_pnl - round_trip_fees - slippage_estimate`, only fire if positive (or stop-loss).
+
+### Phase 4 (architectural shift)
+- **Full AI tool-calling autonomy** — agent loop where AIs request whichever indicators / data / asset class they want via tool calls. Moves from "prompt-and-parse" to true agentic architecture. Multiple-session refactor.
+
+---
+
+## Bug Fix Log
+
+### 🚀 v3.1 Release — 2026-04-28 — Phase 1 + 1.5 Major Update
+
+Comprehensive update touching 8 files with 7 critical fixes plus 3 major features. Sequence of events:
+
+1. **Logs analysis** revealed two errors firing every 5 minutes for 90+ minutes — `ZoneInfo not defined` in `sleep_manager.py` cascading into `cannot unpack non-iterable NoneType object` in the autonomous monitor.
+2. **Root cause:** missing `from zoneinfo import ZoneInfo` in `sleep_manager.py`, plus broken control flow in `check_wake_conditions` exception handler that returned `None` instead of a `(bool, str)` tuple.
+3. **Impact:** AIs were forcibly stuck asleep — `Wake triggers active: 3` showed up but never acted on because the check itself crashed before returning.
+
+**Phase 1 fixes (this release):**
+1. **Sleep manager** — added `ZoneInfo` import, rewrote exception handler to always return tuple, extracted orphaned cleanup into safe helper `_cleanup_stale_restrictions()`
+2. **JSON parser** — bracket-balancing truncation recovery in `ai_clients.py:parse_json()`. Tested against mid-string, mid-array, abbreviated-key, and well-formed inputs.
+3. **Binance history sync** — `signed=True` was missing on `/api/v3/myTrades` calls in `portfolio_manager.py`. Without HMAC signing, every symbol's history fetch silently returned 0 trades. Diagnostic logging added for first 3 errors so future failures aren't invisible.
+4. **Fee floor** — `round_trip_fee` was `0.0002` (0.02%, 40× too low). Set to `0.008` (Binance.US 0.40% maker/taker × 2 sides). The fee-floor exit guard was working but checking against a fee 40× too low, letting losing exits through.
+5. **Time-exit guard** — `should_time_exit` now extends hold up to `hard_max_hold_hours = 72` (instead of dumping at 24h regardless). When position is underwater AND below fee floor, log `⏳ time_exit skipped — extending hold`. Prevents the kind of dump we saw on ETH at -1.38%.
+6. **Wallet-scaling reserve unification** — `portfolio_manager.get_trading_pool()` now calls `binance_crypto.get_wallet_reserve_pct(combined_wallet)` instead of hardcoded `0.15`. Stocks and crypto now share the same reserve rule: `<$1k → 0%`, `$1k → 10%`, `+1% per $1k`, cap at 30% at $21k+. Below $1k the AIs trade with full freedom.
+7. **Dust filtering** — `MIN_DISPLAY_VALUE = $1.00` and `MIN_TRADABLE_VALUE = $10.00` constants. Hides dust from cycle logs, AI prompts (saves ~30% tokens), and dashboard wallet display. Dust summary line shows `🧹 Dust: 13 coins ~$0.62 — below $1.00 threshold`.
+
+**Phase 1 features:**
+- **AI Competition** — Claude and Grok now have separate USDT pools (50/50 split), separate P&L tracking, head-to-head leaderboard. No more "shared" merge — winning proposals stay tagged with their true `owner`. Kill switch: `ENABLE_AI_COMPETITION = False`.
+- **AI Memory + Backfill** — `prompt_builder.PromptMemory` now backfills lessons from existing Binance fill history via FIFO buy/sell matching. AIs no longer cold-start at zero. New `/memory` endpoint exposes full brain state. Dashboard "🧠 AI Brain" panel shows lessons, top symbols, win rates per AI, market regime stats.
+- **Boot status logging** — every boot now logs `🧠 AI Memory ready: N lessons | M closes (X% win rate) | Y symbols tracked | saved to /data/ai_memory.json`.
+
+**Phase 1.5 — Core Reserve (NEW MODULE):**
+- New `core_reserve.py` (~800 lines) — long-term wealth compounder, walled off from tactical AIs.
+- 50% BTC / 30% SPY / 20% USDT cash, activates at $1,000 combined wallet.
+- 4 contingency triggers (defensive trim, opportunity buy, take-profit trim, drift rebalance) — all rule-based, no AI calls, hourly cadence.
+- State persists to `/data/core_reserve.json` with full audit trail of events (capped at 200).
+- Trades tagged `owner="core_reserve"` so they don't pollute the Claude vs Grok leaderboard.
+- New `/core_reserve` endpoint and dashboard panel surface activation status, slice composition, P&L vs total contributions, recent contingency events.
+
+**Files touched:** `core_reserve.py` (new), `bot_with_proxy.py`, `binance_crypto.py`, `portfolio_manager.py`, `sleep_manager.py`, `ai_clients.py`, `prompt_builder.py`, `dashboard.html`
+
+**Status:** ✅ All files syntax-validated, backfill tested with synthetic data (FIFO matching across partial fills), reserve math verified across boundary cases.
+
+---
+
+### 🔧 Bug Fix — 2026-04-25 — Ghost Position Cleanup (LTC dust)
+**Symptom:** `[CRYPTO]    💡 LTCUSDT: requested sell qty 0.35 > live balance 0.00134000` appearing in every 5-min snapshot log; bot's internal `self.positions["LTCUSDT"]` showed `qty=0.35` and `+1.27% P&L` while wallet only held `0.00134 LTC` (~$0.07 dust).
+
+**Root cause:** LTC was sold outside the bot at some point — manual sale on Binance.US, prior partial liquidation, or similar. `self.positions` tracker was never cleared. At hour 25 the time-exit fired (`max_hold_hours=24`), `_execute_exit` called `place_crypto_sell(0.35)`, the live-balance safety check truncated qty to `0.00134`, and either `_round_qty_step` zeroed it or Binance would have rejected on `MIN_NOTIONAL`. The `_execute_exit` ghost-cleanup path only handled exact `ZERO_BALANCE` — dust ($0.07) wasn't zero, so the cleanup never fired and the cycle repeated every 5 minutes indefinitely. Also impacted: log noise, fake P&L in snapshots, potential false stop-loss/TP "fires" against a phantom position.
+
+**Fix (4 edits, all in `binance_crypto.py`):**
+1. `place_crypto_sell` returns new `DUST_BALANCE` error when `live_balance × current_price < $1.50` (well below Binance's $10 min notional).
+2. `place_crypto_stop` mirrors the same check.
+3. `run_exit_monitor` adds a pre-loop ghost-check: at the top of every per-symbol iteration, fetch live balance and price; if `qty == 0` or value `< $1.50`, silently `del self.positions[symbol]` and `continue`. This kills the per-cycle log spam permanently.
+4. `_execute_exit` ghost-cleanup expanded from just `ZERO_BALANCE` to a tuple `("ZERO_BALANCE", "DUST_BALANCE", "QTY_ROUNDED_TO_ZERO")` — any of these now clear the tracker and return success.
+
+**Threshold rationale:** $1.50 was chosen because Binance min notional is $10 — anything below that can't be sold anyway. Setting the dust threshold at $1.50 leaves a comfortable buffer for price ticks and avoids accidentally clearing a legitimate small position that's in temporary drawdown.
+
+**Files:** `binance_crypto.py` (4 edits, one file)
+**Status:** ✅ Syntax-validated
+
+---
+
+### 🔧 Bug Fix — 2026-04-24 (pt 2) — Symbol Normalization + Buy Safety Buffer
+**Errors (observed live after first patch deployed):**
+1. `❌ Sell error for UNI: ... symbol=UNI&side=SELL ...` → 400 Bad Request. Claude's `sell_decisions` returned `"symbol": "UNI"` (bare asset) instead of `"UNIUSDT"`. Binance has no `UNI` pair → rejection.
+2. `❌ Order failed for KAVAUSDT: ... quantity=238.0 ...` → 400 Bad Request. `place_crypto_buy` Method 2 fallback computed qty exactly at balance (`238 × $0.05936 ≈ $14.13 free`), and a tiny price tick between price-fetch and market-fill pushed actual cost over available → `INSUFFICIENT_BALANCE`.
+
+**Root cause:**
+1. `sell_decisions` parsing at line ~2770 used AI-returned symbol verbatim. AI output is inconsistent — sometimes `"UNIUSDT"`, sometimes just `"UNI"`. Same issue applies to buy paths if AI ever returns bare assets there.
+2. `place_crypto_buy` Method 2 used full `notional_usdt / price` with `math.floor`. At the exact boundary (qty × price == free balance), any positive price slippage triggers rejection. Also, Method 1 success check (`"error" not in str(result).lower()`) could false-negative on valid orderIds that contain "error" elsewhere in response, and false-positive on Binance error responses.
+
+**Fix:**
+1. Symbol normalization at three entry points (`sell_decisions` parse, `crypto_trades` parse, `execute_from_r1`): if symbol doesn't end in `USDT`/`USDC`/`BUSD`/`USD`, append `USDT`. Also `.upper().strip()` for good measure.
+2. `place_crypto_buy` Method 1: success detection now checks `isinstance(result, dict) and result.get("orderId")` — explicit, can't false-anything.
+3. `place_crypto_buy` Method 2: apply `effective_notional = notional_usdt * 0.995` (0.5% safety buffer) before qty computation. Also re-validates buffered qty still meets $10 min_notional. Better to slightly under-spend than get rejected.
+
+**Files:** `binance_crypto.py` (4 edits in one file)
+**Status:** ✅ Syntax-validated
+
+---
+
+### 🔧 Bug Fix — 2026-04-24 — ETH Phantom Sell Order / Stacked Limits
+**Error:** `SELL ETHUSDT 0.0061 @ $2333.020000 filled=0.0000` appearing in every 5-min snapshot; 0.0047 ETH shown as 🔒 locked in wallet; new limit placed each AI cycle on top of existing unfilled ones.
+
+**Root cause (two compounding bugs):**
+1. `place_crypto_sell()` defaulted to **LIMIT** order at `current_price * 1.0015` despite the master doc claiming all sell paths use MARKET. Resting limits above market sit unfilled forever (or until a wick).
+2. The AI sell-decisions path and rotation pre-sell path did **not cancel existing open orders** before placing a new sell. The `_execute_exit` path did cancel first, but it only runs for bot-tracked `self.positions` — wallet holdings like ETH (not tracked by the bot) never got their stale orders cleared. Result: every AI cycle that voted to sell ETH re-placed another unfilled limit, and the locked balance from the prior order blocked the new one from using the full free qty.
+
+**Fix:**
+1. `place_crypto_sell(symbol, qty, limit_price=None, force_limit=False)` — now defaults to MARKET. Keeps the live-balance check and `ZERO_BALANCE` / `QTY_ROUNDED_TO_ZERO` safety returns. LIMIT path only fires when caller explicitly passes `force_limit=True`.
+2. AI sell-decisions block (~line 2785): before selling, call `get_open_crypto_orders(sym)`, cancel each via `cancel_crypto_order`, sleep 500ms, re-read `get_full_wallet()` so freed balance is picked up. Then just call `place_crypto_sell(sym, qty)` with no price.
+3. Rotation pre-sell block (~line 2990): same cancel-before-sell pattern.
+4. `_execute_exit()`: removed dead `sell_price` computation and fee-aware floor logic (MARKET orders ignore any price passed). Replaced with an informational log warning when exiting below `entry + fees + 0.5%`, so loss exits are still visible but the code doesn't pretend to control the fill.
+
+**Files:** `binance_crypto.py` (3 edits in one file)
+**Manual step before deploy:** cancel the stuck SELL ETHUSDT 0.0061 @ $2333.02 order on Binance.US to release locked balance.
+**Status:** ✅ Syntax-validated, ready to push
+
+---
+
+### Bug Fix — 2026-04-22
+**Error:** NameError — `get_crypto_24h_stats` function signature incomplete (truncated at parameter list)
+**Root Cause:** File was truncated mid-function definition at line containing `def get_crypto_24h_stats(symbol: st` — parameter type hint and entire function body missing
+**Fix:** Completed the function signature `def get_crypto_24h_stats(symbol: str) -> dict:` and added full function body to return 24h stats dictionary from Binance API
+**File:** binance_crypto.py
+**Status:** ✅ PR opened
+
+
+### 🌍 Discovery Mode Enabled — 2026-04-22 12:57 UTC — FULL MARKET ACCESS
+**Type:** Configuration + prompt change
+**File changed:** `binance_crypto.py`
+**Rationale:** Previously bot scanned top 10 gainers across full Binance.US market but could only BUY coins from the restricted tier list (8 coins at Tier 1). Now Discovery Mode is enabled — AI can buy ANY coin from the market scan if confidence ≥ 70%.
+
+**What changed:**
+
+1. **Tier coin restrictions REMOVED** — all tiers now have `"coins": None`
+   - Tier 1-4 all allow full market access
+   - AI picks winners from the top 10 scan regardless of equity tier
+
+2. **Strategy prompt aligned with aggressive scalping**
+   - Old: "30-80% profit target" (conflicted with 8% TP)
+   - New: "8% take-profit, bank wins fast, redeploy capital"
+
+3. **TASK section updated**
+   - Added: "DISCOVERY: ★ NEW coins trending in market scan with strong setup? → BUY"
+   - Changed "hold to 50-80% target" → "hold 3%+ with momentum, trail protects"
+   - Changed "down 15%+" → "down 5%+" (matches new tighter stop)
+
+**Safety remains:**
+- Max 3 positions at Tier 1 (limits exposure)
+- 30% risk per trade max (damage cap)
+- Still needs volume > $500K (avoids illiquid rug pulls)
+- Still needs confidence ≥ 60% baseline (70% for discoveries)
+- Global 40% drawdown pause unchanged
+
+**Expected behavior:**
+- Bot scans all USDT pairs on Binance.US every 5 min
+- AI sees top 10 movers with ★ NEW tags on non-universe coins
+- If PEPE is +25% with volume spike → AI can recommend buy
+- Bot executes without tier restriction blocking it
+
+---
+
+
+
+### 🪙 Crypto Tier Expansion — 2026-04-22 12:35 UTC — MATCH STOCK AGGRESSIVE PROFILE
+**Type:** Configuration change
+**File changed:** `binance_crypto.py`
+**Rationale:** Crypto tiers were too restrictive at small equity (BTC/SOL only, 1 position). Bot had 3 crypto holdings already but could only open new positions in 2 coins. This blocked the aggressive scanning strategy. Expanded to match stock tier philosophy — more scanning opportunities, controlled position sizing.
+
+**Crypto tier changes:**
+
+| Tier | Equity | Before (coins) | After (coins) | Max positions | Risk |
+|------|--------|----------------|---------------|---------------|------|
+| 1 | $0-$150 | BTC, SOL (2) | BTC, ETH, SOL, AVAX, LINK, DOGE, XRP, ADA (8) | 1 → 3 | 45% → 30% |
+| 2 | $150-$300 | BTC, ETH, SOL (3) | + DOT, MATIC, NEAR, FET (12) | 2 → 3 | 35% → 25% |
+| 3 | $300-$600 | + AVAX, ADA (5) | + LTC, ATOM, ALGO, UNI, SHIB (17) | 2 → 4 | 25% → 20% |
+| 4 | $600+ | Full universe | Full universe (23 coins) | 3 → 5 | 18% → 15% |
+
+**Risk per trade scaled down** since scanning more coins:
+- More opportunities means bot picks better setups
+- Smaller per-position risk keeps losses manageable
+- R/R still favorable: 8% TP vs -8% stop = 1:1 at matched win rate
+
+**Why this matters:**
+- Previous: 3 existing crypto holdings managed but only BTC/SOL scanned for new buys
+- Now: 8 coins actively scanned for new entries at Tier 1
+- Bot can rotate between diverse setups instead of forcing BTC/SOL buys
+- More data points for pattern learning
+
+---
+
+
+
+### 📈 Tier Expansion — 2026-04-21 17:48 UTC — BROADER STOCK SCANNING
+**Type:** Configuration change
+**File changed:** `portfolio_manager.py`
+**Rationale:** Expanded stock tiers to scan more opportunities while keeping position sizing controlled. Supports aggressive scalping strategy with more setups to choose from.
+
+**Tier changes:**
+
+| Tier | Equity | Before (focus) | After (focus) | Max positions |
+|------|--------|----------------|---------------|---------------|
+| 1 | $0-$150 | TSLA, NVDA (2) | TSLA, NVDA, AMD, META, PLTR, COIN, SOFI, RKLB (8) | 1 → 3 |
+| 2 | $150-$300 | TSLA, NVDA, AMD (3) | + MSTR, AMZN (10) | 2 → 3 |
+| 3 | $300-$600 | TSLA, NVDA, AMD, META, PLTR (5) | + COIN, SOFI, RKLB, MSTR, AMZN, GOOGL, AAPL, MSFT, NFLX (14) | 2 → 4 |
+| 4 | $600+ | Full universe | Full universe | 3 → 5 |
+
+**Risk adjustments (scaled down since scanning more):**
+- Tier 1: 35% → 30% risk per position
+- Tier 2: 30% → 25% risk per position
+- Tier 3: 25% → 20% risk per position
+- Tier 4: 20% → 15% risk per position
+
+**Volatile stock list expanded:**
+Added PLTR, NFLX to volatile list (get 4% trail instead of 2% trail)
+
+**Expected impact:**
+- 4x more stocks scanned each cycle at current equity
+- 3x more simultaneous positions possible
+- Better diversification of trade setups while keeping concentrated sizing
+- More data points for bot learning and self-repair stress testing
+
+---
+
+
+
+### 🎯 Strategy Shift — 2026-04-21 17:37 UTC — AGGRESSIVE SCALPING PROFILE
+**Type:** Configuration change (not a bug fix)
+**Files changed:** `binance_crypto.py`, `portfolio_manager.py`
+**Rationale:** Moved from swing trading (big wins, long holds) to aggressive scalping (many small wins, fast turnover). Stress-tests auto-repair system with higher trade volume.
+
+**Crypto changes (binance_crypto.py):**
+| Parameter | Before | After | Effect |
+|-----------|--------|-------|--------|
+| stop_loss_pct | -20% | -8% | Smaller losses |
+| take_profit_pct | +50% | +8% | Bank wins 6x faster |
+| trail_activate_pct | +30% | +3% | Trailing kicks in 10x sooner |
+| trail_pct | 40% | 2.5% | Lock 97.5% of gain (was 60%) |
+| max_hold_hours | 72h | 24h | Exit stale trades 3x faster |
+| min_confidence | 65 | 60 | More entries |
+| max_positions | 2 | 3 | More simultaneous trades |
+
+**Stock changes (portfolio_manager.py):**
+| Parameter | Before | After | Effect |
+|-----------|--------|-------|--------|
+| exit_A_take_profit | +20% | +8% | 2.5x faster profit-taking |
+| exit_A_stop_loss | -10% | -5% | Tighter risk control |
+| exit_B_trail_default | 8% | 2.5% | Tighter trail |
+| exit_B_trail_activates | +10% | +4% | Trailing activates 2.5x sooner |
+| exit_B_time_stop_days | 5 | 3 | Free capital faster |
+| min_confidence | 75 | 70 | More entries |
+| max_positions | 2 | 3 | More simultaneous trades |
+
+**R/R math:**
+- Stocks: 8% TP / 5% stop = **1.6:1 win/loss ratio** (wins bigger than losses)
+- Crypto: 8% TP / 8% stop = **1:1** (requires 55%+ win rate to profit)
+
+**Expected trade volume increase:**
+- Stocks: ~2x more entries (lower confidence + higher position count)
+- Crypto: ~3x more entries (lower confidence + higher positions + faster turnover)
+- Total: ~2.5x more trades = more stress on self-repair system
+
+**Monitoring:**
+- Win rate — critical, needs 55%+ on crypto, 45%+ on stocks
+- Fee drag — at 0.02% round-trip, 100 trades = 2% drag
+- Self-repair activation rate — expecting more edge-case bugs
+- Compound growth rate — compare vs. prior moderate profile
+
+---
+
+
+
+*Auto-updated by self_repair.py and claude_code_trigger.py after every repair.*  
+*Format: severity | file | result | duration | what was fixed*
+
+<!-- New entries added automatically above this line -->
+
+---
+
+## Claude Code Repair System
+
+NovaTrade uses a 3-layer autonomous repair system:
+
+**Layer 1 — self_repair.py** (in-process)
+- Scans every log line in real time
+- Classifies: WARN / ERROR / CRITICAL
+- Fixes known patterns via GitHub API (syntax patches, single-line fixes)
+- Escalates to Claude Code after 3 failures or immediately on CRITICAL
+
+**Layer 2 — claude_code_trigger.py** (escalation)
+- Wakes Claude Code SSH service via Railway API
+- Writes repair job to /data/repair_queue.json with full context
+- Logs all repair activity to /data/repair_log.json permanently
+- Updates this master doc after every completed repair
+
+**Layer 3 — Claude Code SSH** (Railway service)
+- Runs repair_agent.sh on boot
+- Reads all 18 files for full codebase context
+- Writes fix → tests syntax → pushes to GitHub
+- Verifies fix via /health polling for 120 seconds
+- Reverts immediately if fix causes new crash (max 3 attempts)
+- Suspends itself when done to save Railway credits
+
+**Sunday 3am ET** — scheduled weekly maintenance:
+- Full audit of all 18 files
+- Missing shared_state keys, datetime guards, circular imports
+- Silent exception handlers, hardcoded values
+- Results logged here automatically
+
+**Volume files:**
+- `/data/repair_log.json` — full repair history
+- `/data/repair_queue.json` — current/pending repair job
+- `/data/repair_state.json` — idle / active / maintenance
