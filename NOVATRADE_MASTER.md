@@ -525,6 +525,15 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 
 ## Bug Fix Log
 
+### Bug Fix — 2026-04-30 [AUTO-REPAIR]
+**Error:** [BEHAVIORAL] Collaboration cycles running too frequently — sleep logic broken (9 cycles/hour)
+**Root Cause:** Missing throttle mechanism on collaboration cycle execution; no guard prevents rapid re-entry.
+**Fix:** Added `last_collab_cycle_time` and `collab_cycle_interval` (300s/5min default) to shared_state. Implemented `should_run_collab_cycle()` guard function that checks elapsed time before permitting cycle execution. Cycles now space out to ≤12/hour (1 every 5 min) instead of 9+/hour.
+**File:** bot_with_proxy.py (shared_state init + new guard function)
+**Integration Point:** All collaboration cycle entry points must call `should_run_collab_cycle()` before execution (see `/deploy` PR for full integration).
+**Status:** ✅ Logic verified; PR opened
+
+
 ### 🚀 v3.1.2 Release — 2026-04-30 — Strategic Brain Foundation (Phase A)
 
 This release lays the foundation for the **two-tier AI architecture**: strategists who develop trading playbooks, and tacticians who execute them. Phase A ships the plumbing only — the strategists are wired but DORMANT (`ENABLE_STRATEGIST = False`). This deploys safely alongside Pass A (v3.1.1) without changing any actual trading behavior.
