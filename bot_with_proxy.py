@@ -243,6 +243,28 @@ except ImportError:
     exchange_rules = None
     HAVE_EXCHANGE_RULES = False
 
+# ── Coin Performance (per-coin P&L tracking, AVOID/CAUTION flagging) ──
+# Reads from binance_trade_history.json, computes FIFO P&L, flags losing
+# coins so AIs see "⛔ KAVA -$9.19 (0/12)" in their prompts. Persistent
+# at /data/coin_performance.json. Regenerated after every Binance sync.
+try:
+    import coin_performance
+    HAVE_COIN_PERFORMANCE = True
+except ImportError:
+    coin_performance = None
+    HAVE_COIN_PERFORMANCE = False
+
+# ── Risk Gate (BTC macro filter + circuit breaker + cooldown + weekends) ──
+# Single decision point for "can the bot open new positions right now?"
+# Borrowed from a strategy doc. Combines four rules into one gate that
+# only blocks NEW BUYS — exits/stops/TPs always execute.
+try:
+    import risk_gate
+    HAVE_RISK_GATE = True
+except ImportError:
+    risk_gate = None
+    HAVE_RISK_GATE = False
+
 crypto_trader = CryptoTrader()     # 24/7 crypto — runs parallel to stocks
 
 # ── v3.0 AI-Led Architecture ──────────────────────────────────────
@@ -1076,6 +1098,70 @@ def exchange_rules_endpoint():
         if not HAVE_EXCHANGE_RULES or not exchange_rules:
             return jsonify({"enabled": False, "reason": "module not loaded"})
         return jsonify(exchange_rules.get_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/coin_performance")
+def coin_performance_endpoint():
+    """
+    Per-coin trading performance report (cached at /data/coin_performance.json).
+    Shows lifetime + 14-day rolling P&L, win rates, AVOID/CAUTION/PROVEN
+    classification, TP-hit rate analysis, manual overrides.
+
+    Query params:
+      ?refresh=1 — force regenerate from latest Binance history
+    """
+    try:
+        if not HAVE_COIN_PERFORMANCE or not coin_performance:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        if request.args.get("refresh") == "1":
+            return jsonify(coin_performance.regenerate())
+        return jsonify(coin_performance.get_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/coin_performance/override", methods=["POST"])
+def coin_performance_override_endpoint():
+    """
+    Set/clear a manual classification override for a coin.
+    Body: {"symbol": "DOGEUSDT", "status": "AVOID"}  — set
+          {"symbol": "DOGEUSDT", "status": null}     — clear
+    Status must be one of: AVOID, CAUTION, NEUTRAL, PROVEN, null.
+    """
+    try:
+        if not HAVE_COIN_PERFORMANCE or not coin_performance:
+            return jsonify({"enabled": False, "reason": "module not loaded"}), 400
+        data   = request.get_json(silent=True) or {}
+        symbol = (data.get("symbol") or "").upper().strip()
+        status = data.get("status")
+        if not symbol:
+            return jsonify({"error": "symbol required"}), 400
+        ok = coin_performance.set_manual_override(symbol, status)
+        if not ok:
+            return jsonify({"error": "invalid status"}), 400
+        # Re-classify with new override
+        coin_performance.regenerate()
+        return jsonify({"ok": True, "symbol": symbol, "status": status})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/risk_gate")
+def risk_gate_endpoint():
+    """
+    Risk gate status — shows whether new entries are currently allowed
+    and which rule (if any) is blocking them. Includes BTC macro state,
+    threshold values, and last block reason.
+
+    The four rules (in priority order):
+      1. macro_filter — BTC > 200 EMA on 4H
+      2. weekend_pause — Sat/Sun UTC (low liquidity)
+      3. circuit_breaker — -3% wallet loss in 24h
+      4. post_loss_cooldown — yesterday closed negative
+    """
+    try:
+        if not HAVE_RISK_GATE or not risk_gate:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(risk_gate.get_status())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2755,7 +2841,7 @@ except Exception:
 
 # Sync Binance trade history from exchange — fetch last 6 months on first boot
 # Runs in background thread so it doesn't delay startup. Triggers AI
-# memory backfill once the fresh history is on disk.
+# memory backfill AND coin_performance regen once the fresh history is on disk.
 def _boot_binance_sync():
     try:
         sync_binance_history()
@@ -2766,6 +2852,13 @@ def _boot_binance_sync():
             _replay_trade_history_into_memory()
         except Exception as re:
             log(f"⚠️ Post-sync replay failed: {re}")
+        # Now that history is fresh on disk, regenerate per-coin performance
+        # report so the AVOID/CAUTION flags are based on latest fills.
+        try:
+            if HAVE_COIN_PERFORMANCE and coin_performance:
+                coin_performance.regenerate()
+        except Exception as cpe:
+            log(f"⚠️ coin_performance post-sync regen failed: {cpe}")
     except Exception as e:
         log(f"⚠️ Binance history sync failed: {e}")
 threading.Thread(target=_boot_binance_sync, daemon=True).start()
@@ -2876,6 +2969,98 @@ if HAVE_EXCHANGE_RULES:
         threading.Thread(target=_boot_exchange_scan, daemon=True).start()
     except Exception as _ere:
         log(f"⚠️ Exchange Rules init failed: {_ere}")
+
+# ── Coin Performance context + initial regenerate ─────────────────────
+# Reads /data/binance_trade_history.json, runs FIFO matching, classifies
+# each coin as AVOID/CAUTION/NEUTRAL/PROVEN. Output gets injected into
+# every AI cycle prompt so they see "⛔ KAVA -$9 (0/12)" warnings.
+if HAVE_COIN_PERFORMANCE:
+    try:
+        coin_performance._set_context(
+            log_fn         = log,
+            history_loader = _load_binance_history,
+        )
+        # Initial regenerate happens after Binance history is synced.
+        # Run in background thread to not block boot.
+        def _boot_coin_performance():
+            try:
+                coin_performance.regenerate()
+            except Exception as e:
+                log(f"⚠️ coin_performance initial regen failed: {e}")
+        threading.Thread(target=_boot_coin_performance, daemon=True).start()
+    except Exception as _cpe:
+        log(f"⚠️ Coin Performance init failed: {_cpe}")
+
+# ── Risk Gate context init ────────────────────────────────────────────
+# Wires the four-rule entry gate (BTC macro / circuit breaker / cooldown
+# / weekend pause). The gate is consulted at the top of each crypto
+# cycle's "process proposals" step. Exits are NEVER gated.
+if HAVE_RISK_GATE:
+    try:
+        # BTC 4H bars fetcher — uses existing binance_crypto helper
+        def _risk_gate_btc_bars(limit: int = 250) -> list:
+            try:
+                # /api/v3/klines: BTCUSDT, 4h interval, last `limit` bars
+                # Returns: [[open_ts, o, h, l, c, v, close_ts, ...], ...]
+                raw = binance_crypto.binance_get("/api/v3/klines", {
+                    "symbol":   "BTCUSDT",
+                    "interval": "4h",
+                    "limit":    str(limit),
+                })
+                if not raw or not isinstance(raw, list):
+                    return []
+                bars = []
+                for b in raw:
+                    if not b or len(b) < 6:
+                        continue
+                    bars.append({
+                        "open_ts": int(b[0]),
+                        "o":       float(b[1]),
+                        "h":       float(b[2]),
+                        "l":       float(b[3]),
+                        "c":       float(b[4]),
+                        "v":       float(b[5]),
+                    })
+                return bars
+            except Exception:
+                return []
+
+        # Trade history loader — reuses bot's existing function
+        def _risk_gate_trade_history() -> list:
+            try:
+                # Local trade_history.json (bot's own ledger of decisions
+                # AND realized P&L on each close)
+                if not os.path.exists(TRADE_HISTORY_FILE):
+                    return []
+                with open(TRADE_HISTORY_FILE) as f:
+                    return json.load(f) or []
+            except Exception:
+                return []
+
+        # Wallet getter — lazy lookup so we can reference _strategist_wallet
+        # even though it's defined later in this file
+        def _risk_gate_wallet() -> float:
+            try:
+                # Try strategist's wallet getter first (defined later)
+                fn = globals().get("_strategist_wallet")
+                if fn:
+                    return float(fn() or 0.0)
+                # Fallback: use Alpaca equity directly
+                acct = alpaca("GET", "/v2/account") or {}
+                return float(acct.get("equity", 0) or 0)
+            except Exception:
+                return 0.0
+
+        risk_gate._set_context(
+            log_fn          = log,
+            btc_bars_fn     = _risk_gate_btc_bars,
+            trade_history_fn= _risk_gate_trade_history,
+            wallet_fn       = _risk_gate_wallet,
+        )
+        log(f"🛡️ Risk Gate active: BTC 200-EMA macro / -3% circuit breaker / "
+            f"24h post-loss cooldown / weekend pause")
+    except Exception as _rge:
+        log(f"⚠️ Risk Gate init failed: {_rge}")
 
 # ── Strategic Brain context wiring (Phase A: plumbing only) ──────────
 # The strategic brain receives the same dependencies needed to do its job

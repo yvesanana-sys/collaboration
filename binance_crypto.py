@@ -2767,6 +2767,31 @@ class CryptoTrader:
         except Exception:
             pass
 
+        # ── Coin Performance Memory ────────────────────────────
+        # Inject AVOID/CAUTION flags + TP hit-rate analysis. AIs see
+        # which coins have been losing them money so they stop proposing
+        # the same losing setups.
+        coin_perf_text = ""
+        try:
+            import coin_performance as _cp
+            block = _cp.format_for_ai_prompt(max_per_bucket=4)
+            if block:
+                coin_perf_text = "\n" + block
+        except Exception:
+            pass
+
+        # ── Risk Gate Context ──────────────────────────────────
+        # Tell AIs when macro conditions or recent losses have paused
+        # new entries. They should stop proposing buys when this fires.
+        risk_gate_text = ""
+        try:
+            import risk_gate as _rg
+            block = _rg.format_for_ai_prompt()
+            if block:
+                risk_gate_text = "\n" + block
+        except Exception:
+            pass
+
         # ── Bot-tracked positions with P&L ───────────────────
         positions_text = ""
         if self.positions:
@@ -3008,7 +3033,7 @@ Available USDT: ${crypto_pool:.2f} | Wallet: ${crypto_equity:.2f} | Trade budget
 Crypto P&L: ${self.total_pnl:+.2f} | Win rate: {int(win_rate)}% ({self.wins}W/{self.losses}L)
 {positions_text}
 {holdings_text}
-{staking_text}
+{staking_text}{coin_perf_text}{risk_gate_text}
 🚧 BINANCE.US TRADING RULES (orders rejected if violated):
 - MIN ORDER: bot uses $5 floor; exchange may require $10+ on specific coins
   (bot auto-checks each coin's actual rule from cache — see /exchange_rules).
@@ -3592,6 +3617,29 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                 else:
                     seen[sym] = p
             final_proposals = sorted(seen.values(), key=lambda x: -x["conf"])
+
+        # ── Risk Gate: filter BUY proposals only ─────────────────
+        # Macro filter (BTC > 200 EMA), circuit breaker (-3% in 24h),
+        # post-loss cooldown (yesterday closed negative), and weekend
+        # pause. Only blocks NEW entries — existing positions still
+        # managed normally above (stop-losses, take-profits, trail).
+        # Sells (incl. rotation sells) always execute.
+        try:
+            import risk_gate
+            allowed, reason = risk_gate.can_open_new_positions(silent=False)
+            if not allowed:
+                # Filter to sells/exits only — buys are blocked
+                pre_count = len(final_proposals)
+                final_proposals = [p for p in final_proposals
+                                   if p.get("action", "buy").lower() in ("sell", "stop", "exit")]
+                blocked = pre_count - len(final_proposals)
+                if blocked > 0:
+                    self._log(f"   🛑 Risk gate blocked {blocked} buy proposal(s) "
+                              f"(sells still allowed): {reason[:80]}")
+        except ImportError:
+            pass    # Module not deployed yet — fail-open
+        except Exception as _rg_err:
+            self._log(f"   ⚠️ Risk gate check failed: {_rg_err} — fail-open")
 
         # ── Execute: sell weak coins first if needed, then buy ──
         # If USDT is low but AI wants to buy, auto-sell the weakest
