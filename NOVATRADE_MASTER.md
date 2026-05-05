@@ -1,5 +1,5 @@
 # NovaTrade — Master Reference Document
-*Last updated: April 30, 2026*
+*Last updated: May 5, 2026*
 
 ---
 
@@ -41,7 +41,7 @@ An AI-powered algorithmic trading bot that trades stocks via **Alpaca** and cryp
 | `wallet_intelligence.py` | v3.0 — Cross-portfolio scanner, opportunity ranker, rotation finder |
 | `core_reserve.py` | **[v3.1]** Long-term wealth compounder — BTC/SPY/Cash, walled off from tactical AIs, rule-based watcher with 4 contingencies |
 | `ai_evolution.py` | **[v3.1.1]** Tier system for AI self-evolution — equal capability baseline, earns prompt customization through proven P&L |
-| `strategic_brain.py` | **[v3.1.2]** Strategist layer — research desk that develops trading playbooks. Phase A: foundation only (dormant). Phase B: scheduled tactical reviews (Sonnet 4.6 → Opus 4.7 at $5K wallet). Phase C: collaborative Core Reserve management. |
+| `strategic_brain.py` | **[v3.1.3 — Phase B ACTIVE]** Strategist layer with **Living Playbook** system — strategists write comprehensive standing orders that the bot + tacticians follow autonomously between scheduled activations. Conditional rule executor (zero AI cost). Stop-loss gate. Sentiment-aware. Self-defined wake conditions. Hard system limits enforce R/R ≥ 1:1. |
 | `github_deploy.py` | Push files to GitHub from `/deploy` endpoint |
 | `dashboard.html` | Live web dashboard — battle card, brain panel, core reserve, performance, history |
 
@@ -131,24 +131,63 @@ Both AIs unlock the ability to modify their own prompts by accumulating closed-t
 - Auto-revert mechanism
 - Dashboard tier panel with proposal history
 
-### Strategic Brain — Two-Tier AI Architecture (v3.1.2 — Phase A foundation)
+### Strategic Brain — Living Playbook Architecture (v3.1.3 — Phase B ACTIVE)
 
-Splits each AI into TWO roles with different cognitive jobs and different model tiers:
+**Phase B is live as of v3.1.3.** The architecture has evolved from "occasional strategy review" to a **living playbook** system: strategists write comprehensive standing orders covering every situation the bot may encounter, then go offline. The bot and tacticians follow the playbook autonomously between activations.
 
 **Strategists** (Claude + Grok strategists) — *don't trade*. They:
-- Activate twice daily on schedule (pre-market + post-close) plus on-demand
-- Read full trade history, news context, current positions
-- Develop their own unique trading playbook (per-camp)
-- Learn from past attempts (each AI's strategy history is persistent)
-- Collaborate (Claude + Grok) on Core Reserve decisions — both must agree to act
+- Activate **3× daily on schedule** (pre-market 9am ET, post-close 4:30pm ET, crypto-close 9pm ET) plus on-demand wake triggers
+- Read full trade history + **live sentiment + news + market regime context**
+- Write a comprehensive **playbook** with conditional responses for every situation
+- Define their own **wake conditions** — when to be recalled vs handled autonomously
+- Write **tactician training notes** injected into every tactician prompt
 - Use **smarter, more expensive models** because the work is high-leverage
+- Collaborate (Claude + Grok) on Core Reserve decisions — both must agree to act
 
 **Tacticians** (Claude + Grok tacticians) — *execute trades*. They:
-- Read the current strategy from their strategist
-- Follow it when conditions match the strategist's predictions
-- Deviate when situation requires (and log why)
-- **Wake their strategist** mid-day if something extraordinary happens
+- See the current playbook in **every prompt** (injected via `get_playbook_summary()`)
+- Follow strategist's standing orders — entry/exit rules, conditional responses
+- Can wake their strategist mid-day if a playbook condition fires
 - Use **fast, cheap models** because the work is pattern matching
+
+**Bot (executor)** — runs the playbook autonomously. Every cycle:
+- Calls `execute_playbook()` — checks all conditional rules with **zero AI cost**
+- Applies directives: block entries, halt altcoins, reduce position size, widen stops, etc.
+- Wakes strategist only when playbook says to (not on every dip or single stop)
+
+#### The Living Playbook — Conditional Standing Orders
+
+Each playbook contains both normal parameters AND conditional responses the bot executes autonomously:
+
+**Normal parameters** — entry logic, exit logic, stop_loss_pct, take_profit_pct, max_hold_hours, preferred indicators/symbols, max position size, max concurrent positions, min confidence, trail settings.
+
+**Conditional responses** (bot executes without AI call):
+- `on_stop_loss` — pause new entries for X minutes, log reason
+- `on_two_stops_same_session` — go defensive, reduce position size, longer pause
+- `on_three_consecutive_losses` — halt new entries, **wake strategist**
+- `on_winning_streak_3` — hold size discipline (don't oversize on a streak)
+- `on_btc_drops_3pct_1h` — halt altcoin entries, hold existing
+- `on_btc_drops_5pct_1h` — close weakest position, **wake strategist**
+- `on_spy_drops_2pct` — halt new stock entries
+- `on_sentiment_extreme_fear` — widen stops 25% to avoid noise stops
+- `on_sentiment_extreme_greed` — tighten TP 25% to take profits faster
+
+**Self-defined wake conditions** — the playbook itself specifies when to recall the strategist:
+- `consecutive_losses` (default 3)
+- `session_drawdown_pct` (default 15%)
+- `days_without_trade` (default 2)
+- `btc_regime_flip` / `spy_regime_flip` (true/false)
+- `win_rate_below_pct` (default 35% — needs 10+ trades)
+- `predicted_vs_actual_gap` (default 25 percentage points)
+
+**Hard system limits** — the bot enforces these regardless of what the playbook says:
+- `consecutive_loss_gate`: 5 (forces wake, blocks entries)
+- `drawdown_halt_pct`: 20% (forces wake, blocks entries)
+- `stop_loss_pct`: 3–15% (validator rejects out-of-range)
+- `take_profit_pct` ≥ `stop_loss_pct` (R/R ≥ 1:1 enforced)
+- `max_position_pct_of_pool`: ≤ 50%
+- `min_confidence`: ≥ 50%
+- `max_hold_hours`: ≤ 168 (1 week)
 
 #### Wallet-tiered model registry
 
@@ -161,30 +200,29 @@ The `MODEL_REGISTRY` in `strategic_brain.py` is the single source of truth for A
 | Tactician | Claude | Haiku 4.5 ($1/$5) | (no upgrade — speed matters more) |
 | Tactician | Grok | Grok 4.1 Fast Reasoning ($0.20/$0.50) | (no upgrade — same as default) |
 
-When new models release, update `model_id` in the registry and everything else adapts. To swap before the wallet threshold, just change the `default` tier's `model_id`.
+#### Stop-Loss Gate — How Stops Are Handled
 
-#### Wake-trigger architecture
+When any stop fires, `handle_stop_loss_event()` runs **immediately** (no AI call):
+1. Increments `shared_state["consecutive_losses"]` and `shared_state["stops_fired_today"]`
+2. Reads the playbook's `on_stop_loss` rule — applies pause minutes, blocks entries
+3. If `consecutive_losses >= 3` → triggers strategist wake with sentiment context
+4. If `consecutive_losses >= 5` → HARD GATE (system override regardless of playbook)
 
-Mechanical conditions that allow the tactician to wake the strategist mid-cycle (no AI judgment, all rules):
+The strategist, when woken by a stop, gets the full sentiment + news + execution log of which conditional rules fired. It writes an updated playbook based on that — not just the stop in isolation.
 
-**Hard wake triggers (fires automatically):**
-1. Held position breaches stop-loss
-2. SPY or BTC moves -3% within 1 hour (regime change suspect)
-3. Held position gaps ±10% on news
-4. Tactician hits 3 consecutive losses on same strategy
-5. Confidence calibration miss: predicted ≥60% WR but actual <30% over 5+ trades
+#### Cooldown — Preventing Wake Loops
 
-**Cooldown:** 30 minutes between wakes to prevent ping-pong loops.
+`WAKE_COOLDOWN_MINUTES = 120` (system limit). Even if the playbook says wake, the strategist won't re-activate within 2 hours. This protects against ping-pong between strategist and tactician during fast markets, and gives the playbook time to actually run before being replaced.
 
-#### Three-phase rollout
+#### Three-phase rollout — current status
 
-- **Phase A (this release):** Foundation only. `strategic_brain.py` exists, plumbing wired, endpoints respond, dashboard panel shows DORMANT status. `ENABLE_STRATEGIST = False` keeps it from making any API calls. Lets us verify integration is clean.
-- **Phase B (next session):** Activation. Set `ENABLE_STRATEGIST = True`, scheduled reviews go live, tactician reads strategy file, wake triggers active. Reserve still on hard rules.
-- **Phase C (session after):** Strategists take over Core Reserve decisions (collaborative — both must agree). Hard-rule floors stay in place as catastrophic protection.
+- **Phase A (v3.1.2):** Foundation only. Plumbing wired, dormant. ✅ Complete.
+- **Phase B (v3.1.3 — current):** Living playbook ACTIVE. Strategists write standing orders, bot executes them autonomously, sentiment context wired, R/R enforced ≥ 1:1, dual-AI playbook gates new entries via risk_gate.
+- **Phase C (next):** Strategists take over Core Reserve decisions (collaborative — both must agree). Hard-rule floors stay in place as catastrophic protection.
 
 #### Persistence
 
-`/data/strategies_claude.json` and `/data/strategies_grok.json` — per-AI strategy state with current strategy, current performance vs prediction, full strategy history, audit log of every activation/wake/decision. Survives redeploys.
+`/data/strategy_claude.json` and `/data/strategy_grok.json` — per-AI strategy state including full playbook, current performance vs prediction, strategy history, **playbook execution log** (which conditional rules fired and when), audit log of every activation. Survives redeploys.
 
 ### Wallet-Scaling Reserve Rule (v3.1)
 Both stock and crypto sides honor a unified reserve that scales with combined wallet value:
@@ -460,8 +498,10 @@ Below the $1,000 Core Reserve activation threshold. Phase 1.5 module loaded but 
 
 ## Pending Manual Actions
 
-- [ ] **Deploy v3.1 patches to Railway** (8 files) — fixes the `ZoneInfo` cascade that's been keeping AIs forcibly asleep
-- [ ] **Verify Binance API key** has Spot Trading + history read permissions for the new `signed=True` `/api/v3/myTrades` calls
+- [ ] **Deploy v3.1.3 to Railway** (6 files: `strategic_brain.py`, `bot_with_proxy.py`, `binance_crypto.py`, `prompt_builder.py`, `sleep_manager.py`, `risk_gate.py`, `dashboard.html`)
+- [ ] **Monitor first strategist activation** in Railway logs — verify both Claude and Grok strategists respond cleanly at 9am ET pre-market call
+- [ ] **Verify `/coin_performance` endpoint** is being polled by new dashboard (Coin Health panel)
+- [ ] **Wire sentiment data into shared_state** — currently the strategist reads default values; full sentiment context activates once Grok intel populates `shared_state["market_sentiment"]`, `["latest_news_summary"]`, `["latest_social_summary"]`, `["latest_whale_summary"]`, `["btc_change_1h"]`, `["spy_change_1h"]`
 - [ ] Watch TSLA if it returns — bot cannot sell due to Alpaca 403, must close manually
 - [ ] Claim FET staking rewards on Binance.US (~small USDT amount)
 - [ ] Add funding to Binance.US to unlock Tier 2 when ready
@@ -483,22 +523,14 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 5. **v3.0** — AI-led architecture: thesis_manager.py + wallet_intelligence.py, AI approves all trades, sleep brief system, cross-portfolio opportunity scanner
 6. **v3.1** — Modularization complete. AI Competition mode (separate Claude/Grok pools + leaderboard). Wallet-scaling reserve rule unified across stocks + crypto. Persistent AI memory with Binance backfill. Core Reserve long-term compounder (BTC/SPY/Cash) with rule-based contingency watcher. Sleep manager + JSON parser bug fixes. Dust cleanup throughout. New `/leaderboard`, `/memory`, `/core_reserve` endpoints + dashboard panels.
 7. **v3.1.1** — Equal capability for both AIs (no more specialty roles). AI Evolution tier system (Pass A foundation): both AIs at Tier 0 with identical neutral prompts and rivalry context. Grok upgraded to reasoning variant at same price. SPY 404 spam fixed (Alpaca data domain). Grok JSON parse failures fixed via autowrap parser + neutral prompts. New `/evolution` endpoint + tier-aware dashboard labels.
-8. **v3.1.2** — *(current)* Strategic Brain foundation (Phase A). New `strategic_brain.py` module with wallet-tiered model registry (Sonnet 4.6 → Opus 4.7 at $5K wallet), twice-daily activation schedule, five hard wake triggers, three-phase rollout plan. Phase A ships plumbing only — strategists are wired but DORMANT. New `/strategy` and `/strategy/<ai>` endpoints. New "🧭 Strategic Brain" dashboard panel. Foundation for Phase B activation in next session.
+8. **v3.1.2** — Strategic Brain foundation (Phase A). New `strategic_brain.py` module with wallet-tiered model registry (Sonnet 4.6 → Opus 4.7 at $5K wallet), twice-daily activation schedule, five hard wake triggers, three-phase rollout plan. Phase A ships plumbing only — strategists are wired but DORMANT. New `/strategy` and `/strategy/<ai>` endpoints. New "🧭 Strategic Brain" dashboard panel. Foundation for Phase B activation in next session.
+9. **v3.1.3** — *(current)* **Strategic Brain Phase B ACTIVE — Living Playbook system.** Strategists now write comprehensive standing orders the bot follows autonomously. Conditional rules executor with zero AI cost. Stop-loss gate integrated with playbook on both crypto and stock paths. Sentiment-aware strategist prompts. Self-defined wake conditions (playbook decides when to recall the strategist). R/R ≥ 1:1 enforced at validator. `consecutive_losses`/`wins` tracking added to shared_state. 3× daily scheduled activations live (9am, 4:30pm, 9pm ET). Cooldown raised to 2 hours. Risk gate now blocks entries based on playbook directives.
 
 ---
 
 ## Roadmap (Upcoming)
 
-### Phase B — Strategic Brain Activation (next session, after Phase A bakes 1-2 days)
-- Set `ENABLE_STRATEGIST = True` in `strategic_brain.py`
-- First scheduled activation writes initial strategy for each AI
-- Tactician prompts modified to read strategy file
-- Wake triggers go live
-- Cost monitoring per strategist
-- Soft-launch period: first 5 trades after a new strategy are advisory-only
-- Auto-revert kicks in when strategy underperforms
-
-### Phase C — Core Reserve Handover (session after Phase B is stable)
+### Phase C — Core Reserve Handover (next priority)
 - Strategists take over Core Reserve allocation decisions (collaborative — both must agree)
 - Hard-rule floors STAY in place as catastrophic protection
 - Weekly scheduled reviews + reserve-specific wake triggers
@@ -509,6 +541,11 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 - Validation layer enforces tier token caps + banned phrases
 - Auto-revert on win-rate drop
 - Dashboard tier panel with proposal/revert audit trail
+
+### Sentiment Pipeline Enrichment
+- Wire Grok's news/social/whale fetch into `shared_state["market_sentiment"]`, `["latest_news_summary"]`, `["latest_social_summary"]`, `["latest_whale_summary"]` so the strategist receives real-time sentiment context (currently the keys exist as defaults but aren't populated by Grok intel cycle)
+- Add fear/greed index lookup (alternative.me or similar)
+- Wire BTC/SPY 1h change tracking into shared_state for `btc_change_1h` / `spy_change_1h`
 
 ### Phase 1.6 — Smaller wins
 - **Dust convert** — integrate Binance.US `/sapi/v1/asset/dust` to sweep <$10 holdings into USDT/BTC. Frees up otherwise stuck capital.
@@ -524,6 +561,48 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 ---
 
 ## Bug Fix Log
+
+### 🚀 v3.1.3 Release — 2026-05-05 — Strategic Brain Phase B (Living Playbook ACTIVE)
+
+**The strategist is now alive.** This release activates Phase B of the Strategic Brain with a fundamental design upgrade: instead of writing brief strategy summaries for occasional review, the strategist now writes **comprehensive living playbooks** — standing orders the bot and tacticians follow autonomously between activations. This trains the bot to handle situations without constant AI calls.
+
+**The core insight that drove this design:** A trader's emotional risk (moving stops, revenge trading after losses) doesn't apply to a bot — but the *intelligence* a human gains from pausing to analyze sentiment after a stop *does* apply. The living playbook captures that intelligence preemptively: the strategist anticipates situations, writes responses, and the bot executes those responses without needing to wake the strategist every time.
+
+**Files modified (6):**
+- `strategic_brain.py` — Full rewrite. Living playbook system with conditional rules executor, stop-loss gate, sentiment-aware prompts, self-defined wake conditions, R/R ≥ 1:1 enforcement.
+- `bot_with_proxy.py` — Added `consecutive_losses` and `consecutive_wins` to `shared_state`. New `_strategist_sentiment_context()` function feeding sentiment + news + BTC/SPY change to strategist. Scheduled activations wired at pre-market (9am ET), post-close (4:30pm ET), crypto-close (9pm ET). `execute_playbook()` runs every crypto cycle. Stop-loss gates wired on both stock exit paths (AI-awake and autonomous).
+- `binance_crypto.py` — Stop-loss gate calls `handle_stop_loss_event()` immediately when crypto stops fire. Wins reset `consecutive_losses` and increment `consecutive_wins`. `record_trade_result()` updates strategy performance counters every close.
+- `prompt_builder.py` — `build_r1()` and `build_crypto_context()` accept `ai_name` parameter and inject `get_playbook_summary()` at the top of every tactician prompt. Tacticians now always see their strategist's standing orders.
+- `sleep_manager.py` — Resets `consecutive_losses` and `consecutive_wins` at both sleep reset points so each session starts clean.
+- `risk_gate.py` — `can_open_new_positions()` now checks both AIs' playbooks first via `execute_playbook()`. If either playbook says `block_new_entries`, the gate blocks before any other rule runs.
+
+**The Living Playbook schema** — every strategy now contains:
+- Normal trading parameters (entry/exit logic, SL/TP, trail, hold time, position size, indicators)
+- **Conditional responses** — `on_stop_loss`, `on_two_stops_same_session`, `on_three_consecutive_losses`, `on_winning_streak_3`, `on_btc_drops_3pct_1h`, `on_btc_drops_5pct_1h`, `on_spy_drops_2pct`, `on_sentiment_extreme_fear`, `on_sentiment_extreme_greed` — each with action, parameters, log_reason, optional `wake_strategist` flag
+- **Self-defined wake conditions** — the playbook specifies when to recall the strategist (consecutive losses, drawdown threshold, regime flips, win rate floor, prediction gap)
+- **Tactician training notes** — plain-language coaching injected into every tactician prompt
+
+**Hard system limits added** (cannot be overridden by playbook):
+- `consecutive_loss_gate`: 5 (forces wake + block)
+- `drawdown_halt_pct`: 20% (forces wake + block)
+- R/R ratio enforced: `take_profit_pct >= stop_loss_pct` validator rejects 1:1 or worse
+- `min_confidence` floor: 50%
+
+**Strategist prompt enrichment** — the strategist now receives:
+- Full sentiment block (overall, fear/greed, BTC 1h/24h, news summary, social summary, whale activity)
+- Playbook execution log (which conditional rules fired since last activation)
+- Wake reason if triggered mid-cycle (vs scheduled)
+- Current playbook performance (predicted vs actual WR)
+
+**Cooldown** raised from 30 minutes to **120 minutes** (`WAKE_COOLDOWN_MINUTES`) — the strategist is meant to write durable playbooks, not be reactive. 2 hours between activations is enough for the bot to genuinely test the playbook before the next review.
+
+**Backward compatibility:** `load_strategy()` auto-migrates old strategy files by injecting any missing conditional rule keys from the default playbook. No manual data migration needed.
+
+**Status:** ✅ All 6 files compile, smoke-tested. `ENABLE_STRATEGIST = True` is now the default.
+
+**Next:** Bake for 1-2 days, monitor playbook execution log, then move to Phase C (Core Reserve handover).
+
+---
 
 ### 🚀 v3.1.2 Release — 2026-04-30 — Strategic Brain Foundation (Phase A)
 

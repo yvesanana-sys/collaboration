@@ -1209,15 +1209,15 @@ function renderStrategist(s){
   if(!s||s.error||s.enabled===undefined){if(pill){pill.textContent='unavailable';}return;}
   if(s.enabled){
     pill.style.cssText='background:rgba(29,184,122,0.12);color:var(--green);border-color:rgba(29,184,122,0.3)';
-    pill.textContent='● ACTIVE';
+    pill.textContent='● PHASE B — LIVING PLAYBOOK';
     document.getElementById('strategist-meta').textContent='active';
   } else {
     pill.style.cssText='background:rgba(240,165,0,0.12);color:var(--amber);border-color:rgba(240,165,0,0.3)';
-    pill.textContent='⏸ DORMANT — Phase A';
+    pill.textContent='⏸ DORMANT';
     document.getElementById('strategist-meta').textContent='dormant';
   }
   const phaseEl=document.getElementById('strategist-phase-info');
-  if(phaseEl) phaseEl.textContent=s.phase||(s.enabled?'active':'dormant — set ENABLE_STRATEGIST=True to activate');
+  if(phaseEl) phaseEl.textContent=s.phase||(s.enabled?'Phase B — strategists write living playbooks, bot executes autonomously':'dormant — set ENABLE_STRATEGIST=True to activate');
   const ais=s.ais||{},upgrade=s.upgrade_info||{};
   for(const ai of ['claude','grok']){
     const data=ais[ai]||{},u=upgrade[ai]||{};
@@ -1231,14 +1231,79 @@ function renderStrategist(s){
     const stratEl=document.getElementById(`${ai}-strategy`);
     if(!stratEl) continue;
     const cs=data.current_strategy||{};
+    const rules=cs.rules||{};
     if(s.enabled&&cs.name){
       const perf=data.current_performance||{};
       const tradesUnder=perf.trades_under_this_strategy||0;
-      const wr=perf.actual_wr;
-      const perfText=tradesUnder>0?`${tradesUnder} trades · ${wr!==undefined?wr+'% WR':'no closes'}`:'awaiting first trade';
-      stratEl.innerHTML=`<div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">Current strategy</div><div style="font-weight:700;color:#fff;font-size:11px;margin-bottom:5px">${cs.name}</div><div style="font-size:10px;color:var(--text);line-height:1.4">${cs.rationale||'No rationale yet'}</div><div style="margin-top:7px;font-size:9px;color:var(--muted2);border-top:1px solid var(--border);padding-top:5px">${perfText}</div>`;
+      const wr=perf.actual_win_rate;
+      const predWr=cs.predicted_win_rate;
+      const lastWake=data.last_wake_reason||'';
+      const lastAct=data.last_activation;
+      const execLog=data.playbook_execution_log||[];
+      const wakeCond=data.wake_conditions||{};
+      const notes=data.tactician_notes||rules.tactician_notes||'';
+
+      // Build conditional rules summary
+      const condRules=[];
+      const ruleKeys={
+        'on_stop_loss':'stop loss',
+        'on_two_stops_same_session':'2 stops',
+        'on_three_consecutive_losses':'3 losses',
+        'on_btc_drops_3pct_1h':'BTC -3%',
+        'on_btc_drops_5pct_1h':'BTC -5%',
+        'on_spy_drops_2pct':'SPY -2%',
+        'on_sentiment_extreme_fear':'fear',
+        'on_sentiment_extreme_greed':'greed',
+      };
+      for(const[k,label]of Object.entries(ruleKeys)){
+        const r=rules[k];
+        if(r&&r.action) condRules.push(`<span style="color:var(--teal)">${label}</span>→${r.action.replace(/_/g,' ')}`);
+      }
+
+      // Recent execution log
+      let execHtml='';
+      if(execLog.length){
+        const recent=execLog.slice(-3).reverse();
+        execHtml=`<div style="margin-top:8px;border-top:1px solid var(--border);padding-top:6px;font-size:8px;color:var(--muted);">📋 Recent rules fired:</div>`;
+        for(const e of recent){
+          const fired=(e.rules_fired||[]).join(', ');
+          const wake=e.wake?` <span style="color:var(--amber)">→WAKE</span>`:'';
+          const ts=(e.ts||'').slice(11,16);
+          execHtml+=`<div style="font-size:8px;color:var(--muted2);padding:2px 0;">${ts} ${fired}${wake}</div>`;
+        }
+      }
+
+      // Wake conditions display
+      let wakeHtml='';
+      if(Object.keys(wakeCond).length){
+        const parts=[];
+        if(wakeCond.consecutive_losses) parts.push(`${wakeCond.consecutive_losses} losses`);
+        if(wakeCond.session_drawdown_pct) parts.push(`${wakeCond.session_drawdown_pct}% drawdown`);
+        if(wakeCond.win_rate_below_pct) parts.push(`WR<${wakeCond.win_rate_below_pct}%`);
+        if(parts.length) wakeHtml=`<div style="font-size:8px;color:var(--muted);margin-top:5px">⏰ Wake if: ${parts.join(' · ')}</div>`;
+      }
+
+      const sl=rules.stop_loss_pct||'?';
+      const tp=rules.take_profit_pct||'?';
+      const rr=(sl&&tp&&sl>0)?(tp/sl).toFixed(1):'?';
+      const perfText=tradesUnder>0?`${tradesUnder} trades · WR ${wr!==undefined?wr+'%':'—'}${predWr?` (predicted ${predWr}%)`:''}`:'awaiting first trade under this playbook';
+      const lastActTime=lastAct?ago(lastAct):'never';
+
+      stratEl.innerHTML=`
+        <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px">📖 Current Playbook v${cs.version||0}</div>
+        <div style="font-weight:700;color:#fff;font-size:11px;margin-bottom:5px">${cs.name}</div>
+        <div style="font-size:9px;color:var(--text);background:var(--bg4);padding:5px 7px;border-radius:4px;margin-bottom:6px;">
+          SL ${sl}% · TP ${tp}% · R/R 1:${rr} · Hold ${rules.max_hold_hours||'?'}h · Conf ≥${rules.min_confidence||'?'}%
+        </div>
+        ${condRules.length?`<div style="font-size:8px;color:var(--muted2);margin-bottom:4px;line-height:1.6">⚡ ${condRules.slice(0,4).join(' · ')}</div>`:''}
+        ${notes?`<div style="font-size:9px;color:var(--text);font-style:italic;background:rgba(25,196,176,0.04);border-left:2px solid var(--teal);padding:5px 7px;margin-bottom:5px;line-height:1.4">💡 ${notes.slice(0,180)}${notes.length>180?'…':''}</div>`:''}
+        <div style="font-size:9px;color:var(--muted2);border-top:1px solid var(--border);padding-top:5px;margin-top:5px;">${perfText}</div>
+        <div style="font-size:8px;color:var(--muted);margin-top:2px">Last activation: ${lastActTime}${lastWake?` · ${lastWake.slice(0,40)}`:''}</div>
+        ${wakeHtml}
+        ${execHtml}
+      `;
     } else {
-      stratEl.innerHTML=`<div style="font-size:9px;color:var(--muted);font-style:italic;line-height:1.4">Phase A — wired but dormant. Phase B activation will enable scheduled strategy reviews pre-market, post-close, and on-demand wake triggers.</div>`;
+      stratEl.innerHTML=`<div style="font-size:9px;color:var(--muted);font-style:italic;line-height:1.4">Strategist DORMANT. Set <code style="color:var(--teal)">ENABLE_STRATEGIST=True</code> in <code>strategic_brain.py</code> to activate the living playbook system.</div>`;
     }
   }
 }

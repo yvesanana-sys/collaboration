@@ -74,6 +74,8 @@ shared_state: dict = {
     "intraday_buys":       {},
     "pdt_last_reset_date": "",
     "stops_fired_today":   0,
+    "consecutive_losses":  0,   # Reset on any win; drives playbook gate logic
+    "consecutive_wins":    0,   # Reset on any loss; drives winning streak logic
     "restricted_positions": set(),
     "failed_sells":        {},
     # Projections cache
@@ -1728,6 +1730,26 @@ def check_exit_conditions(positions):
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                 shared_state["position_exits"].pop(symbol, None)
+                # ── Playbook gate ──────────────────────────────
+                shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
+                shared_state["consecutive_wins"]   = 0
+                shared_state["stops_fired_today"]  = shared_state.get("stops_fired_today", 0) + 1
+                if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                    try:
+                        gate = strategic_brain.handle_stop_loss_event(
+                            owner.lower(), symbol, pnl_pct * 100,
+                            shared_state["stops_fired_today"],
+                            shared_state["consecutive_losses"],
+                        )
+                        if gate.get("wake_strategist"):
+                            log(f"🧭 Playbook gate waking strategist [{owner}]: {gate['wake_reason']}")
+                            strategic_brain.activate_strategist(
+                                owner.lower(),
+                                purpose="stop_loss_gate",
+                                wake_reason=gate["wake_reason"],
+                            )
+                    except Exception as _pge:
+                        log(f"⚠️ Playbook gate error: {_pge}")
             continue
 
         # ── STRATEGY A: Dynamic projection take-profit (proj_get_exit_guidance) ─
@@ -2014,6 +2036,7 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
                 crypto_holdings = crypto_wallet.get("holdings_text", ""),
                 crypto_stats    = crypto_stats,
                 stock_cross_ref = crypto_cross,
+                ai_name         = "claude",   # playbook injection per AI
             )
             if crypto_context_str:
                 log("🪙 Crypto context added to R1 prompt — unified call")
@@ -2044,6 +2067,7 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
         features        = features,
         projections     = shared_state.get("last_projections", {}),
         crypto_context  = crypto_context_str,
+        ai_name         = "claude",   # injects playbook into shared R1 prompt
     )
     log(f"🧠 Prompt mode: {situation_mode.upper().replace('_',' ')}")
 
@@ -3183,12 +3207,35 @@ if HAVE_STRATEGIC_BRAIN:
                     raise Exception(f"{res.status_code}: {res.text}")
                 return res.json()["choices"][0]["message"]["content"]
 
+        def _strategist_sentiment_context() -> dict:
+            """Sentiment + news snapshot for strategist — sourced from Grok intel."""
+            ctx = {}
+            try:
+                # BTC price changes from binance
+                btc_now = binance_crypto.binance_get("/api/v3/ticker/24hr", {"symbol": "BTCUSDT"}) or {}
+                ctx["btc_change_24h"]    = round(float(btc_now.get("priceChangePercent", 0)), 2)
+                ctx["btc_change_1h"]     = shared_state.get("btc_change_1h", 0)
+                # SPY trend from shared state
+                ctx["spy_trend"]         = shared_state.get("spy_trend", "neutral")
+                ctx["spy_change_1h"]     = shared_state.get("spy_change_1h", 0)
+                # Fear/greed from shared state (populated by Grok intel cycle)
+                ctx["overall"]           = shared_state.get("market_sentiment", "neutral")
+                ctx["fear_greed_label"]  = shared_state.get("fear_greed_label", "unknown")
+                ctx["fear_greed_score"]  = shared_state.get("fear_greed_score", 50)
+                ctx["news_summary"]      = shared_state.get("latest_news_summary", "none")
+                ctx["social_summary"]    = shared_state.get("latest_social_summary", "none")
+                ctx["whale_summary"]     = shared_state.get("latest_whale_summary", "none")
+            except Exception as e:
+                log(f"⚠️ _strategist_sentiment_context: {e}")
+            return ctx
+
         strategic_brain._set_context(
             log_fn                    = log,
             ask_claude_strategist_fn  = _ask_claude_strategist,
             ask_grok_strategist_fn    = _ask_grok_strategist,
             get_trade_history_fn      = _strategist_trade_history,
             get_market_context_fn     = _strategist_market_context,
+            get_sentiment_context_fn  = _strategist_sentiment_context,
             record_trade_fn           = record_trade,
             get_wallet_fn             = _strategist_wallet,
         )
@@ -4216,6 +4263,22 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
                 shared_state["stops_fired_today"] += 1
                 stops_fired += 1
                 sold = True
+                # ── Playbook gate (autonomous path) ───────────
+                shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
+                shared_state["consecutive_wins"]   = 0
+                if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                    try:
+                        gate = strategic_brain.handle_stop_loss_event(
+                            owner, symbol, pnl_pct * 100,
+                            shared_state["stops_fired_today"],
+                            shared_state["consecutive_losses"],
+                        )
+                        if gate.get("wake_strategist"):
+                            strategic_brain.activate_strategist(
+                                owner, purpose="autonomous_stop_gate",
+                                wake_reason=gate["wake_reason"])
+                    except Exception:
+                        pass
 
         # ── STRATEGY A: Fixed take-profit ─────────────────────
         elif strategy == "A" and not sold:
@@ -4448,6 +4511,14 @@ def trading_loop():
                         if cash_check < thresh_check["active"]:
                             ai_sleep("premarket research done — both AIs sleeping, bot takes over")
                     except Exception: pass
+                    # ── Strategist pre-market activation ──────
+                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                        try:
+                            for _ai in ("claude", "grok"):
+                                strategic_brain.activate_strategist(
+                                    _ai, purpose=strategic_brain.SCHEDULE["pre_market"]["purpose"])
+                        except Exception as _se:
+                            log(f"⚠️ Strategist pre-market activation error: {_se}")
 
             elif mode in ("opening", "prime", "power_hour"):
                 labels = {"opening":"🔔 OPENING","prime":"🚀 PRIME","power_hour":"⚡ POWER HOUR"}
@@ -4508,6 +4579,14 @@ def trading_loop():
                         elif not pos_ah and cash_ah < thresh_ah["active"]:
                             ai_sleep("afterhours done — no positions, both AIs sleeping")
                     except Exception: pass
+                    # ── Strategist post-close activation ──────
+                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                        try:
+                            for _ai in ("claude", "grok"):
+                                strategic_brain.activate_strategist(
+                                    _ai, purpose=strategic_brain.SCHEDULE["post_close"]["purpose"])
+                        except Exception as _se:
+                            log(f"⚠️ Strategist post-close activation error: {_se}")
 
         except Exception as e:
             log(f"❌ Loop error: {e}")
@@ -4539,6 +4618,41 @@ def trading_loop():
                         log("🪙 Crypto: AIs sleeping — running standalone cycle")
                     else:
                         log("🪙 Crypto: running hourly cycle")
+                    # ── Strategist crypto_close (9pm ET) ──────
+                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                        try:
+                            now_et_hr = datetime.now(ZoneInfo("America/New_York")).hour
+                            if now_et_hr == strategic_brain.SCHEDULE["crypto_close"]["hour"]:
+                                for _ai in ("claude", "grok"):
+                                    strategic_brain.activate_strategist(
+                                        _ai, purpose=strategic_brain.SCHEDULE["crypto_close"]["purpose"])
+                        except Exception as _se:
+                            log(f"⚠️ Strategist crypto_close error: {_se}")
+                    # ── Playbook cycle_context for execute_playbook ─
+                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                        try:
+                            _pb_ctx = {
+                                "stops_fired_session":  shared_state.get("stops_fired_today", 0),
+                                "consecutive_losses":   shared_state.get("consecutive_losses", 0),
+                                "consecutive_wins":     shared_state.get("consecutive_wins", 0),
+                                "btc_change_1h":        shared_state.get("btc_change_1h", 0.0),
+                                "spy_change_1h":        shared_state.get("spy_change_1h", 0.0),
+                                "sentiment":            shared_state.get("market_sentiment", "neutral"),
+                                "session_drawdown_pct": shared_state.get("session_drawdown_pct", 0.0),
+                                "minutes_since_stop":   shared_state.get("minutes_since_last_stop"),
+                                "session_win_rate_pct": shared_state.get("session_win_rate_pct", 100),
+                                "session_trade_count":  shared_state.get("session_trade_count", 0),
+                            }
+                            for _ai in ("claude", "grok"):
+                                _pb_result = strategic_brain.execute_playbook(_ai, _pb_ctx)
+                                if _pb_result.get("wake_strategist") and not _pb_result.get("block_new_entries"):
+                                    strategic_brain.activate_strategist(
+                                        _ai, purpose="mid_cycle_wake",
+                                        wake_reason=_pb_result.get("wake_reason", "playbook condition"))
+                                if _pb_result.get("active_rules"):
+                                    log(f"🧭 Playbook [{_ai}]: {', '.join(_pb_result['active_rules'])}")
+                        except Exception as _pbe:
+                            log(f"⚠️ Playbook execute error: {_pbe}")
                     crypto_trader.run_crypto_cycle(
                         total_equity      = 0,
                         ask_claude_fn     = ask_claude,

@@ -44,6 +44,8 @@ def ai_sleep(reason="trades executed — waiting for cash threshold"):
     shared_state["last_sleep_time"] = datetime.now().isoformat()
     shared_state["wake_reason"]     = None
     shared_state["stops_fired_today"] = 0
+    shared_state["consecutive_losses"] = 0   # Reset on sleep — fresh session
+    shared_state["consecutive_wins"]   = 0
     try:
         if save_state_fn: save_state_fn()
     except Exception: pass
@@ -56,8 +58,8 @@ def ai_sleep(reason="trades executed — waiting for cash threshold"):
     shared_state["trend_alerts"]       = []
     shared_state["deposit_detected"]   = False
     shared_state["stops_fired_today"]  = 0
-
-    log(f"😴 AIs going to SLEEP — {reason}")
+    shared_state["consecutive_losses"] = 0
+    shared_state["consecutive_wins"]   = 0
     log(f"   Bot running autonomously with stored strategies")
     log(f"   Positions covered: {list(shared_state['sleeping_strategies'].keys()) or 'none'}")
     instrs = shared_state.get("ai_wake_instructions", [])

@@ -699,13 +699,23 @@ class PromptBuilder:
                  hot_ipos, triple_syms, top_collab, inv_text,
                  short_note, spy_trend, features,
                  projections=None,
-                 crypto_context: str = ""):   # ← NEW: unified crypto section
+                 crypto_context: str = "",
+                 ai_name: str = ""):   # ai_name enables playbook injection
         """
         Build the Round 1 collaborative session prompt.
         Situation-aware, projection-informed, memory-injected.
         Now includes optional crypto section — one big call instead of two.
         """
         self._cycle_count += 1
+
+        # ── Inject strategist playbook if active ─────────────
+        playbook_block = ""
+        try:
+            import strategic_brain as _sb
+            if _sb.ENABLE_STRATEGIST and ai_name:
+                playbook_block = _sb.get_playbook_summary(ai_name) + "\n"
+        except Exception:
+            pass
 
         # 1. Assess situation
         # Use today's start equity for accurate daily P&L
@@ -784,7 +794,7 @@ Monthly target: +${monthly_target:.2f} (+40%)
 Strategy: Use ATR-based stops + targets. Let winners run. Cut losers fast.
   → Entry near proj_low | TP1 at +2×ATR | TP2 at +3.5×ATR | Stop at -1.5×ATR"""
 
-        prompt = f"""{situation_header}
+        prompt = f"""{playbook_block}{situation_header}
 
 === PORTFOLIO STATE ===
 Equity: ${equity:.2f} | Cash: ${cash:.2f} | P&L: ${equity-55:+.2f}
@@ -984,7 +994,8 @@ Plain text 180 words."""
                               crypto_proj_text: str = "",
                               crypto_holdings: str = "",
                               crypto_stats: str = "",
-                              stock_cross_ref: str = "") -> str:
+                              stock_cross_ref: str = "",
+                              ai_name: str = "") -> str:
         """
         Build the crypto section appended to build_r1().
         Keeps crypto decisions in the SAME AI call as stocks —
@@ -995,6 +1006,17 @@ Plain text 180 words."""
             return ""
 
         parts = []
+
+        # ── Inject strategist playbook standing orders ────────
+        try:
+            import strategic_brain as _sb
+            if _sb.ENABLE_STRATEGIST and ai_name:
+                pb_summary = _sb.get_playbook_summary(ai_name)
+                if pb_summary:
+                    parts.append(f"\n{pb_summary}\n")
+        except Exception:
+            pass
+
         if wallet_summary:
             parts.append(wallet_summary)
         if crypto_pool > 0:

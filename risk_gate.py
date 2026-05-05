@@ -328,6 +328,43 @@ def can_open_new_positions(silent: bool = False) -> tuple:
     state = _load_state()
     state["last_check_ts"] = datetime.now(timezone.utc).isoformat()
 
+    # ── Playbook gate (strategic_brain living playbook) ───────
+    # Checked first — overrides all other rules if block_new_entries=True.
+    # This is how the strategist's standing orders gate entries between
+    # scheduled activations (e.g. after a stop fires, cooldown period).
+    try:
+        import strategic_brain as _sb
+        if _sb.ENABLE_STRATEGIST:
+            # Build minimal cycle context from shared state
+            try:
+                from bot_with_proxy import shared_state as _ss
+                ctx = {
+                    "stops_fired_session":  _ss.get("stops_fired_today", 0),
+                    "consecutive_losses":   _ss.get("consecutive_losses", 0),
+                    "consecutive_wins":     _ss.get("consecutive_wins", 0),
+                    "btc_change_1h":        _ss.get("btc_change_1h", 0.0),
+                    "spy_change_1h":        _ss.get("spy_change_1h", 0.0),
+                    "sentiment":            _ss.get("market_sentiment", "neutral"),
+                    "session_drawdown_pct": _ss.get("session_drawdown_pct", 0.0),
+                    "minutes_since_stop":   _ss.get("minutes_since_last_stop"),
+                    "session_win_rate_pct": _ss.get("session_win_rate_pct", 100),
+                    "session_trade_count":  _ss.get("session_trade_count", 0),
+                }
+                # Check both AIs' playbooks — blocked if either says block
+                for ai in ("claude", "grok"):
+                    pb = _sb.execute_playbook(ai, ctx)
+                    if pb.get("block_new_entries"):
+                        reason = f"Playbook gate [{ai}]: {', '.join(pb.get('active_rules', ['blocked']))}"
+                        state["last_block_reason"] = reason
+                        _save_state(state)
+                        if not silent:
+                            log(f"   🛑 PLAYBOOK GATE BLOCKED: {reason}")
+                        return False, reason
+            except ImportError:
+                pass  # shared_state not available — skip playbook check
+    except Exception as _pge:
+        log(f"   ⚠️ risk_gate playbook check error: {_pge}")
+
     # Check rules in priority order. First failure wins.
     for check_name, check_fn in [
         ("macro",           lambda: _btc_macro_check(state)),

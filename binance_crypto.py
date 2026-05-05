@@ -2328,6 +2328,45 @@ class CryptoTrader:
             pnl_usd = round((current_price - pos.entry_price) * pos.qty, 2)
             pnl_pct = pos.pnl_pct(current_price)
 
+            # ── Playbook gate + consecutive tracking ─────────
+            is_stop = "stop_loss" in reason
+            is_win  = pnl_usd > 0
+            try:
+                import strategic_brain as _sb
+                if _sb.ENABLE_STRATEGIST and pos.owner:
+                    _sb.record_trade_result(pos.owner, is_win, pnl_pct)
+                    if is_stop:
+                        # Get shared state stop count if available
+                        stops_today = 1
+                        consec      = 1
+                        try:
+                            from bot_with_proxy import shared_state as _ss
+                            _ss["stops_fired_today"]  = _ss.get("stops_fired_today", 0) + 1
+                            _ss["consecutive_losses"] = _ss.get("consecutive_losses", 0) + 1
+                            _ss["consecutive_wins"]   = 0
+                            stops_today = _ss["stops_fired_today"]
+                            consec      = _ss["consecutive_losses"]
+                        except Exception:
+                            pass
+                        gate = _sb.handle_stop_loss_event(
+                            pos.owner, pos.symbol, pnl_pct,
+                            stops_today, consec,
+                        )
+                        if gate.get("wake_strategist"):
+                            self._log(f"🧭 Crypto playbook gate waking strategist: {gate['wake_reason']}")
+                            _sb.activate_strategist(
+                                pos.owner, purpose="crypto_stop_gate",
+                                wake_reason=gate["wake_reason"])
+                    elif is_win:
+                        try:
+                            from bot_with_proxy import shared_state as _ss
+                            _ss["consecutive_losses"] = 0
+                            _ss["consecutive_wins"]   = _ss.get("consecutive_wins", 0) + 1
+                        except Exception:
+                            pass
+            except Exception as _pge:
+                self._log(f"   ⚠️ Playbook gate error: {_pge}")
+
             # ── Feed main trade history ───────────────────────
             if record_trade_fn:
                 try:
