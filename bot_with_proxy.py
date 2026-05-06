@@ -1212,6 +1212,146 @@ def projection_endpoint():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/bars")
+def bars_endpoint():
+    """
+    OHLC bars for chart rendering. Auto-detects stock vs crypto.
+
+    Query params:
+      ?symbol=BTCUSDT or AAPL    — required
+      ?interval=5m|15m|1h|1d     — default: 5m for crypto, 1d for stocks
+      ?limit=100                 — default 100, max 500
+
+    Returns JSON: {symbol, interval, asset_class, bars: [{t, o, h, l, c, v}], trades: [...]}
+    where trades are this symbol's bot history for plotting markers.
+    """
+    try:
+        symbol   = (request.args.get("symbol") or "").upper().strip()
+        interval = request.args.get("interval", "").lower().strip()
+        limit    = max(1, min(int(request.args.get("limit", 100)), 500))
+        if not symbol:
+            return jsonify({"error": "symbol required"}), 400
+
+        # Auto-detect asset class
+        is_crypto = symbol.endswith("USDT") or symbol.endswith("USDC") or symbol.endswith("USD") and len(symbol) <= 6
+        # Override: if symbol contains slash or is 3 chars+USDT, it's crypto
+        if "USDT" in symbol or "USDC" in symbol:
+            is_crypto = True
+        elif len(symbol) <= 5 and symbol.isalpha():
+            is_crypto = False
+
+        bars_out = []
+
+        if is_crypto:
+            # ── Binance klines ─────────────────────────────────
+            # Map interval: 5m, 15m, 30m, 1h, 4h, 1d
+            interval = interval or "5m"
+            valid_intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+            if interval not in valid_intervals:
+                interval = "5m"
+            try:
+                kl = binance_crypto.binance_get("/api/v3/klines", {
+                    "symbol": symbol, "interval": interval, "limit": limit,
+                }) or []
+                # Each row: [openTime, open, high, low, close, volume, closeTime, ...]
+                for k in kl:
+                    bars_out.append({
+                        "t": int(k[0]),               # ms timestamp
+                        "o": float(k[1]),
+                        "h": float(k[2]),
+                        "l": float(k[3]),
+                        "c": float(k[4]),
+                        "v": float(k[5]),
+                    })
+            except Exception as e:
+                return jsonify({"error": f"binance fetch failed: {e}"}), 502
+
+        else:
+            # ── Alpaca bars ────────────────────────────────────
+            interval = interval or "1d"
+            # market_data.get_bars returns daily; for intraday use get_intraday_bars
+            try:
+                if interval in ("1m", "5m", "15m", "30m", "1h", "4h"):
+                    raw = get_intraday_bars(symbol, timeframe=interval, limit=limit)
+                else:
+                    raw = get_bars(symbol, days=min(limit, 365))
+                # Normalize to our schema
+                for b in (raw or [])[-limit:]:
+                    bars_out.append({
+                        "t": b.get("t") or b.get("timestamp") or 0,
+                        "o": float(b.get("o") or b.get("open") or 0),
+                        "h": float(b.get("h") or b.get("high") or 0),
+                        "l": float(b.get("l") or b.get("low") or 0),
+                        "c": float(b.get("c") or b.get("close") or 0),
+                        "v": float(b.get("v") or b.get("volume") or 0),
+                    })
+            except Exception as e:
+                return jsonify({"error": f"alpaca fetch failed: {e}"}), 502
+
+        # ── Bot trades for this symbol (for chart markers) ────
+        try:
+            all_trades = trade_history if isinstance(trade_history, list) else []
+            symbol_trades = []
+            for t in all_trades:
+                if (t.get("symbol", "") or "").upper() == symbol:
+                    symbol_trades.append({
+                        "t":         t.get("ts_ms") or t.get("ts") or 0,
+                        "time_str":  t.get("time_et") or t.get("time") or "",
+                        "action":    t.get("action") or "?",
+                        "price":     float(t.get("price") or 0),
+                        "qty":       float(t.get("qty") or 0),
+                        "owner":     t.get("owner") or "",
+                        "pnl_usd":   t.get("pnl_usd"),
+                        "pnl_pct":   t.get("pnl_pct"),
+                        "reason":    t.get("reason") or t.get("exit_reason") or "",
+                        "strategy":  t.get("strategy") or t.get("strat") or "",
+                    })
+            # Last ~30 trades for this symbol
+            symbol_trades = symbol_trades[-30:]
+        except Exception:
+            symbol_trades = []
+
+        # ── Open position info (current SL/TP for horizontal lines) ──
+        open_position = None
+        if is_crypto:
+            try:
+                for p in (crypto_trader.list_open_positions() if crypto_trader else []):
+                    if p.get("symbol", "").upper() == symbol:
+                        open_position = {
+                            "entry_price": p.get("entry_price"),
+                            "stop_price":  p.get("stop_price"),
+                            "tp_price":    p.get("tp_price"),
+                            "owner":       p.get("owner"),
+                            "qty":         p.get("qty"),
+                        }
+                        break
+            except Exception:
+                pass
+        else:
+            for p in shared_state.get("positions", []):
+                if (p.get("symbol", "") or "").upper() == symbol:
+                    entry = float(p.get("entry_price") or p.get("avg_entry_price") or 0)
+                    open_position = {
+                        "entry_price": entry,
+                        "stop_price":  round(entry * 0.95, 4) if entry else None,  # 5% SL
+                        "tp_price":    round(entry * 1.08, 4) if entry else None,  # 8% TP
+                        "owner":       p.get("owner"),
+                        "qty":         p.get("qty"),
+                    }
+                    break
+
+        return jsonify({
+            "symbol":         symbol,
+            "interval":       interval,
+            "asset_class":    "crypto" if is_crypto else "stock",
+            "bars":           bars_out,
+            "trades":         symbol_trades,
+            "open_position":  open_position,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/prompt_memory")
 def prompt_memory_endpoint():
     """
@@ -1811,6 +1951,14 @@ def check_exit_conditions(positions):
                     shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
+                    # ── Playbook win tracking ─────────────────
+                    shared_state["consecutive_losses"] = 0
+                    shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
+                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                        try:
+                            strategic_brain.record_trade_result(owner.lower(), won=True, pnl_pct=pnl_pct * 100)
+                        except Exception:
+                            pass
             else:
                 log(f"   [A] {symbol}: {pnl_pct*100:+.2f}% → target {RULES['exit_A_take_profit']*100:.0f}% | holding")
 
@@ -1848,6 +1996,18 @@ def check_exit_conditions(positions):
                     shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
+                    # ── Playbook tracking — trail exits are usually wins ─
+                    if pnl_usd > 0:
+                        shared_state["consecutive_losses"] = 0
+                        shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
+                    else:
+                        shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
+                        shared_state["consecutive_wins"]   = 0
+                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                        try:
+                            strategic_brain.record_trade_result(owner.lower(), won=(pnl_usd > 0), pnl_pct=pnl_pct * 100)
+                        except Exception:
+                            pass
 
             # Time stop — sell if stuck after N days
             elif RULES["exit_B_time_stop_days"]:
@@ -4294,6 +4454,14 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
                     shared_state["sleeping_strategies"].pop(symbol, None)
+                    # ── Playbook win tracking ─────────────────
+                    shared_state["consecutive_losses"] = 0
+                    shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
+                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                        try:
+                            strategic_brain.record_trade_result(owner, won=True, pnl_pct=pnl_pct * 100)
+                        except Exception:
+                            pass
                     sold = True
 
         # ── STRATEGY B: Trailing stop ─────────────────────────
@@ -4635,6 +4803,7 @@ def trading_loop():
                                 "stops_fired_session":  shared_state.get("stops_fired_today", 0),
                                 "consecutive_losses":   shared_state.get("consecutive_losses", 0),
                                 "consecutive_wins":     shared_state.get("consecutive_wins", 0),
+                                "winning_streak":       shared_state.get("consecutive_wins", 0),
                                 "btc_change_1h":        shared_state.get("btc_change_1h", 0.0),
                                 "spy_change_1h":        shared_state.get("spy_change_1h", 0.0),
                                 "sentiment":            shared_state.get("market_sentiment", "neutral"),

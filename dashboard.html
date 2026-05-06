@@ -78,7 +78,10 @@ header{height:36px;background:rgba(10,13,18,0.95);border-bottom:1px solid var(--
 .tbl td{padding:5px 4px;border-bottom:1px solid var(--border);}
 .tbl tr:last-child td{border-bottom:none;}
 .tbl tr:hover{background:rgba(255,255,255,0.02);}
-.sym{font-weight:700;color:#fff;}
+.sym{font-weight:700;color:#fff;cursor:pointer;transition:color 0.1s;}
+.sym:hover{color:var(--teal);text-decoration:underline;text-decoration-style:dotted;}
+.coin-name{font-weight:700;color:#fff;font-size:10px;cursor:pointer;transition:color 0.1s;}
+.coin-name:hover{color:var(--teal);}
 .owner-c{font-size:7px;color:var(--blue);background:var(--blue-bg);padding:1px 3px;border-radius:2px;margin-left:2px;}
 .owner-g{font-size:7px;color:var(--purple);background:var(--purple-bg);padding:1px 3px;border-radius:2px;margin-left:2px;}
 .bar{height:3px;background:var(--bg4);border-radius:2px;overflow:hidden;}
@@ -108,7 +111,6 @@ header{height:36px;background:rgba(10,13,18,0.95);border-bottom:1px solid var(--
 .battle-trade-row{display:grid;grid-template-columns:8px 1fr auto;gap:4px;align-items:center;padding:2px 0;font-size:9px;}
 .coin-row{display:grid;grid-template-columns:55px 60px 50px 35px 60px;gap:4px;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);font-size:9px;}
 .coin-row:hover{background:rgba(255,255,255,0.02);}
-.coin-name{font-weight:700;color:#fff;font-size:10px;}
 .coin-stat{display:flex;flex-direction:column;}
 .coin-wr-bar{height:2px;background:var(--bg4);border-radius:1px;margin-top:1px;}
 .coin-impl{font-size:8px;color:var(--muted2);background:var(--bg4);padding:4px 6px;border-radius:2px;border-left:2px solid var(--amber);margin-top:5px;}
@@ -176,6 +178,7 @@ header{height:36px;background:rgba(10,13,18,0.95);border-bottom:1px solid var(--
   <button class="pt active" data-q="q-strategist">Strategist</button>
   <button class="pt active" data-q="q-history">Activity</button>
   <button class="pt active" data-q="q-brain">Memory/Reserve</button>
+  <span style="font-size:8px;color:var(--teal);margin-left:10px;">💡 Click any symbol for chart</span>
   <span style="margin-left:auto;" id="ai-banner-strip"></span>
 </div>
 <div class="terminal" id="terminal">
@@ -781,6 +784,401 @@ async function fetchAll(){
 })();
 fetchAll();
 setInterval(fetchAll,30000);
+</script>
+<!-- ═══ CHART MODAL ═══ -->
+<div id="chart-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.88);z-index:300;align-items:center;justify-content:center;backdrop-filter:blur(8px);">
+  <div style="background:var(--bg2);border:1px solid var(--border3);border-radius:6px;width:92%;max-width:1100px;height:80vh;display:flex;flex-direction:column;">
+    <!-- Modal header -->
+    <div style="padding:10px 14px;border-bottom:1px solid var(--border2);display:flex;justify-content:space-between;align-items:center;background:var(--bg3);">
+      <div style="display:flex;align-items:center;gap:14px;">
+        <div style="font-size:16px;font-weight:700;color:#fff;" id="chart-symbol">—</div>
+        <div style="font-size:10px;color:var(--muted);" id="chart-asset-class">—</div>
+        <div style="font-size:13px;font-weight:700;color:var(--teal);" id="chart-current-price">—</div>
+        <div style="font-size:11px;" id="chart-current-pnl"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:5px;">
+        <div class="tile-tabs" id="chart-interval-tabs">
+          <button class="tile-tab active" data-iv="5m" onclick="setChartInterval('5m',this)">5m</button>
+          <button class="tile-tab" data-iv="15m" onclick="setChartInterval('15m',this)">15m</button>
+          <button class="tile-tab" data-iv="1h" onclick="setChartInterval('1h',this)">1h</button>
+          <button class="tile-tab" data-iv="4h" onclick="setChartInterval('4h',this)">4h</button>
+          <button class="tile-tab" data-iv="1d" onclick="setChartInterval('1d',this)">1d</button>
+        </div>
+        <button class="btn btn-mini" onclick="closeChart()" style="margin-left:10px;">✕</button>
+      </div>
+    </div>
+
+    <!-- Chart canvas area -->
+    <div style="flex:1;display:flex;flex-direction:column;padding:10px;min-height:0;">
+      <div style="flex:1;position:relative;min-height:0;">
+        <canvas id="price-chart"></canvas>
+      </div>
+      <!-- Legend / position info -->
+      <div id="chart-position-info" style="margin-top:8px;padding:8px 10px;background:var(--bg3);border-radius:3px;font-size:9px;color:var(--muted2);display:none;"></div>
+      <div id="chart-trades-summary" style="margin-top:5px;font-size:8px;color:var(--muted);"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+// ── CHART MODULE ──────────────────────────────────────────
+let _chart = null;
+let _chartSymbol = "";
+let _chartInterval = "5m";
+
+function openChart(symbol){
+  if(!symbol) return;
+  _chartSymbol = symbol.toUpperCase();
+  document.getElementById('chart-symbol').textContent = _chartSymbol.replace('USDT','');
+  document.getElementById('chart-modal').style.display = 'flex';
+  // Default interval based on asset class
+  if(/USDT|USDC/.test(_chartSymbol)){
+    _chartInterval = '5m';
+  } else {
+    _chartInterval = '1d';
+  }
+  // Update active tab
+  document.querySelectorAll('#chart-interval-tabs .tile-tab').forEach(b=>{
+    b.classList.toggle('active', b.dataset.iv === _chartInterval);
+  });
+  loadChart();
+}
+
+function closeChart(){
+  document.getElementById('chart-modal').style.display = 'none';
+  if(_chart){ _chart.destroy(); _chart = null; }
+  _chartSymbol = "";
+}
+
+function setChartInterval(iv, btn){
+  _chartInterval = iv;
+  document.querySelectorAll('#chart-interval-tabs .tile-tab').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  loadChart();
+}
+
+async function loadChart(){
+  if(!_chartSymbol) return;
+  try {
+    const data = await apiFetch(`/bars?symbol=${_chartSymbol}&interval=${_chartInterval}&limit=120`);
+    if(!data || data.error){
+      document.getElementById('chart-trades-summary').textContent = 'Failed to load: ' + (data?.error || 'unknown');
+      return;
+    }
+    renderPriceChart(data);
+  } catch(e) {
+    document.getElementById('chart-trades-summary').textContent = 'Error: ' + e.message;
+  }
+}
+
+function renderPriceChart(data){
+  const canvas = document.getElementById('price-chart');
+  if(!canvas || !window.Chart) return;
+  if(_chart){ _chart.destroy(); _chart = null; }
+
+  const bars = data.bars || [];
+  const trades = data.trades || [];
+  const op = data.open_position;
+
+  if(!bars.length){
+    document.getElementById('chart-trades-summary').textContent = 'No bar data available for this symbol.';
+    return;
+  }
+
+  // Build datasets
+  const labels = bars.map(b => new Date(b.t));
+  const prices = bars.map(b => b.c);
+  const highs  = bars.map(b => b.h);
+  const lows   = bars.map(b => b.l);
+  const lastBar = bars[bars.length - 1];
+
+  // Update header
+  const isCrypto = data.asset_class === 'crypto';
+  document.getElementById('chart-asset-class').textContent = (isCrypto?'🪙 Crypto':'📈 Stock') + ' · ' + data.interval;
+  const priceFmt = isCrypto && lastBar.c < 1 ? lastBar.c.toFixed(6) : lastBar.c.toFixed(2);
+  document.getElementById('chart-current-price').textContent = '$' + priceFmt;
+
+  // P&L vs entry if open position
+  const pnlEl = document.getElementById('chart-current-pnl');
+  if(op && op.entry_price){
+    const pp = (lastBar.c - op.entry_price) / op.entry_price * 100;
+    pnlEl.textContent = (pp>=0?'+':'') + pp.toFixed(2) + '%';
+    pnlEl.style.color = pp>=0 ? 'var(--green)' : 'var(--red)';
+  } else {
+    pnlEl.textContent = '';
+  }
+
+  // Position info bar
+  const posEl = document.getElementById('chart-position-info');
+  if(op && op.entry_price){
+    posEl.style.display = '';
+    posEl.innerHTML = `
+      <span style="color:var(--muted2)">Open position:</span>
+      <strong style="color:${op.owner==='claude'?'var(--blue)':'var(--purple)'}">${(op.owner||'').toUpperCase()}</strong>
+      · entry <strong style="color:#fff">$${parseFloat(op.entry_price).toFixed(isCrypto?6:2)}</strong>
+      · qty <strong style="color:#fff">${op.qty}</strong>
+      ${op.stop_price?` · SL <strong style="color:var(--red)">$${parseFloat(op.stop_price).toFixed(isCrypto?6:2)}</strong>`:''}
+      ${op.tp_price?` · TP <strong style="color:var(--green)">$${parseFloat(op.tp_price).toFixed(isCrypto?6:2)}</strong>`:''}
+    `;
+  } else {
+    posEl.style.display = 'none';
+  }
+
+  // Build trade markers
+  // Each marker: {t, price, action, owner, pnl_pct}
+  const buyMarkers = trades.filter(t => t.action === 'buy').map(t => ({
+    x: new Date(t.t || Date.now()),
+    y: t.price,
+    owner: t.owner,
+    action: t.action,
+    pnl: t.pnl_pct,
+    reason: t.reason,
+  }));
+  const sellMarkers = trades.filter(t => t.action !== 'buy').map(t => ({
+    x: new Date(t.t || Date.now()),
+    y: t.price,
+    owner: t.owner,
+    action: t.action,
+    pnl: t.pnl_pct,
+    reason: t.reason,
+  }));
+
+  // Open position lines (annotations as dataset hacks since we may not have annotation plugin)
+  const datasets = [
+    {
+      label: 'Price',
+      data: prices.map((p,i) => ({x: labels[i], y: p})),
+      borderColor: '#19c4b0',
+      backgroundColor: 'rgba(25,196,176,0.06)',
+      borderWidth: 1.5,
+      pointRadius: 0,
+      tension: 0.05,
+      fill: true,
+    },
+    {
+      label: 'High',
+      data: highs.map((p,i) => ({x: labels[i], y: p})),
+      borderColor: 'rgba(29,184,122,0.25)',
+      borderWidth: 0.5,
+      pointRadius: 0,
+      fill: false,
+      borderDash: [2,2],
+    },
+    {
+      label: 'Low',
+      data: lows.map((p,i) => ({x: labels[i], y: p})),
+      borderColor: 'rgba(232,69,69,0.25)',
+      borderWidth: 0.5,
+      pointRadius: 0,
+      fill: false,
+      borderDash: [2,2],
+    },
+  ];
+
+  // Buy markers — color by owner
+  if(buyMarkers.length){
+    const claudeBuys = buyMarkers.filter(m => m.owner === 'claude');
+    const grokBuys = buyMarkers.filter(m => m.owner === 'grok');
+    if(claudeBuys.length) datasets.push({
+      label: 'Claude Buy',
+      data: claudeBuys,
+      pointBackgroundColor: '#3d8ef0',
+      pointBorderColor: '#fff',
+      pointBorderWidth: 1,
+      pointRadius: 6,
+      pointHoverRadius: 8,
+      pointStyle: 'triangle',
+      showLine: false,
+    });
+    if(grokBuys.length) datasets.push({
+      label: 'Grok Buy',
+      data: grokBuys,
+      pointBackgroundColor: '#9b77f5',
+      pointBorderColor: '#fff',
+      pointBorderWidth: 1,
+      pointRadius: 6,
+      pointHoverRadius: 8,
+      pointStyle: 'triangle',
+      showLine: false,
+    });
+  }
+
+  // Sell markers — color by outcome (TP=green, stop=red, other=amber)
+  if(sellMarkers.length){
+    const tpSells = sellMarkers.filter(m => (m.action||'').includes('take_profit') || (m.pnl||0) > 0);
+    const stopSells = sellMarkers.filter(m => (m.action||'').includes('stop') || (m.pnl||0) < 0);
+    const otherSells = sellMarkers.filter(m => !tpSells.includes(m) && !stopSells.includes(m));
+    if(tpSells.length) datasets.push({
+      label: 'Take Profit / Win',
+      data: tpSells,
+      pointBackgroundColor: '#1db87a',
+      pointBorderColor: '#fff',
+      pointBorderWidth: 1,
+      pointRadius: 6,
+      pointHoverRadius: 8,
+      pointStyle: 'rectRot',
+      showLine: false,
+    });
+    if(stopSells.length) datasets.push({
+      label: 'Stop / Loss',
+      data: stopSells,
+      pointBackgroundColor: '#e84545',
+      pointBorderColor: '#fff',
+      pointBorderWidth: 1,
+      pointRadius: 6,
+      pointHoverRadius: 8,
+      pointStyle: 'rectRot',
+      showLine: false,
+    });
+    if(otherSells.length) datasets.push({
+      label: 'Sell',
+      data: otherSells,
+      pointBackgroundColor: '#f0a500',
+      pointBorderColor: '#fff',
+      pointBorderWidth: 1,
+      pointRadius: 5,
+      pointHoverRadius: 8,
+      pointStyle: 'rectRot',
+      showLine: false,
+    });
+  }
+
+  // SL/TP horizontal reference lines if open position
+  if(op && op.entry_price){
+    const xRange = [labels[0], labels[labels.length-1]];
+    datasets.push({
+      label: 'Entry',
+      data: xRange.map(x => ({x, y: op.entry_price})),
+      borderColor: 'rgba(255,255,255,0.6)',
+      borderWidth: 1,
+      borderDash: [4,3],
+      pointRadius: 0,
+      fill: false,
+    });
+    if(op.stop_price) datasets.push({
+      label: 'Stop Loss',
+      data: xRange.map(x => ({x, y: op.stop_price})),
+      borderColor: 'rgba(232,69,69,0.6)',
+      borderWidth: 1,
+      borderDash: [4,3],
+      pointRadius: 0,
+      fill: false,
+    });
+    if(op.tp_price) datasets.push({
+      label: 'Take Profit',
+      data: xRange.map(x => ({x, y: op.tp_price})),
+      borderColor: 'rgba(29,184,122,0.6)',
+      borderWidth: 1,
+      borderDash: [4,3],
+      pointRadius: 0,
+      fill: false,
+    });
+  }
+
+  // Render the chart
+  _chart = new Chart(canvas, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'nearest', intersect: false, axis: 'x' },
+      scales: {
+        x: {
+          type: 'time',
+          time: {
+            unit: _chartInterval === '1d' ? 'day' : _chartInterval === '4h' ? 'day' : _chartInterval === '1h' ? 'hour' : 'minute',
+            displayFormats: { minute: 'HH:mm', hour: 'MMM d HH:mm', day: 'MMM d' },
+          },
+          grid: { color: 'rgba(255,255,255,0.04)', drawBorder: false },
+          ticks: { color: '#566071', font: { size: 9 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
+        },
+        y: {
+          position: 'right',
+          grid: { color: 'rgba(255,255,255,0.04)', drawBorder: false },
+          ticks: {
+            color: '#566071',
+            font: { size: 9 },
+            callback: function(v){ return isCrypto && v < 1 ? v.toFixed(6) : '$' + v.toFixed(2); },
+          },
+        },
+      },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top',
+          align: 'end',
+          labels: {
+            color: '#7d8696',
+            font: { size: 9, family: "'SF Mono', monospace" },
+            padding: 8,
+            usePointStyle: true,
+            filter: (item) => !['High','Low'].includes(item.text), // hide H/L from legend
+          },
+        },
+        tooltip: {
+          backgroundColor: 'rgba(10,13,18,0.95)',
+          borderColor: 'rgba(255,255,255,0.14)',
+          borderWidth: 1,
+          titleColor: '#fff',
+          bodyColor: '#dde1ea',
+          titleFont: { size: 10, family: "'SF Mono', monospace" },
+          bodyFont: { size: 10, family: "'SF Mono', monospace" },
+          padding: 8,
+          callbacks: {
+            label: function(ctx){
+              const ds = ctx.dataset.label;
+              const y = ctx.parsed.y;
+              const v = isCrypto && y < 1 ? y.toFixed(6) : y.toFixed(2);
+              if(ctx.raw && ctx.raw.owner){
+                const r = ctx.raw;
+                return [
+                  `${ds}: $${v}`,
+                  `Owner: ${r.owner}`,
+                  r.pnl != null ? `P&L: ${(r.pnl >= 0 ? '+' : '')}${r.pnl.toFixed(1)}%` : null,
+                  r.reason ? `Reason: ${r.reason.slice(0, 40)}` : null,
+                ].filter(Boolean);
+              }
+              return `${ds}: $${v}`;
+            },
+          },
+        },
+      },
+    },
+  });
+
+  // Trades summary footer
+  const buyCount = trades.filter(t => t.action === 'buy').length;
+  const sellCount = trades.length - buyCount;
+  document.getElementById('chart-trades-summary').textContent =
+    `${trades.length} trades shown — ${buyCount} buys, ${sellCount} sells. Click outside or press ESC to close.`;
+}
+
+// ── CLICK DELEGATION: any .sym or .coin-name opens chart ──
+document.addEventListener('click', (e)=>{
+  const t = e.target.closest('.sym, .coin-name');
+  if(!t) return;
+  // Get the symbol text — strip badges/icons, normalize
+  let sym = (t.textContent || '').trim().split(/[\s·]/)[0].replace('●','').trim();
+  if(!sym || sym === '—' || sym === '?') return;
+  // For crypto coin-names that were stripped of USDT, add it back
+  if(t.classList.contains('coin-name') && !sym.includes('USDT') && !sym.includes('USDC')){
+    sym = sym + 'USDT';
+  }
+  openChart(sym);
+});
+
+// Click outside modal to close
+document.getElementById('chart-modal').addEventListener('click', (e)=>{
+  if(e.target.id === 'chart-modal') closeChart();
+});
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'Escape' && document.getElementById('chart-modal').style.display === 'flex'){
+    closeChart();
+  }
+});
 </script>
 </body>
 </html>
