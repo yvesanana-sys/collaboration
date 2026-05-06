@@ -847,7 +847,17 @@ function openChart(symbol){
 
 function closeChart(){
   document.getElementById('chart-modal').style.display = 'none';
-  if(_chart){ _chart.destroy(); _chart = null; }
+  const canvas = document.getElementById('price-chart');
+  if(_chart){
+    try { _chart.destroy(); } catch(e) {}
+    _chart = null;
+  }
+  try {
+    if(canvas){
+      const existing = Chart.getChart(canvas);
+      if(existing) existing.destroy();
+    }
+  } catch(e) {}
   _chartSymbol = "";
 }
 
@@ -875,7 +885,17 @@ async function loadChart(){
 function renderPriceChart(data){
   const canvas = document.getElementById('price-chart');
   if(!canvas || !window.Chart) return;
-  if(_chart){ _chart.destroy(); _chart = null; }
+
+  // Bulletproof cleanup: destroy our reference AND any orphaned Chart on this canvas
+  if(_chart){
+    try { _chart.destroy(); } catch(e) {}
+    _chart = null;
+  }
+  // Chart.js tracks instances by canvas — clear any stale binding
+  try {
+    const existing = Chart.getChart(canvas);
+    if(existing) existing.destroy();
+  } catch(e) {}
 
   const bars = data.bars || [];
   const trades = data.trades || [];
