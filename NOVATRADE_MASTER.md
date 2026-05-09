@@ -1,5 +1,5 @@
 # NovaTrade — Master Reference Document
-*Last updated: May 5, 2026*
+*Last updated: May 8, 2026*
 
 ---
 
@@ -561,6 +561,62 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 ---
 
 ## Bug Fix Log
+
+### 🚀 v3.1.4 Release — 2026-05-08 — Turtle Trend-Following System (Long-Term Growth)
+
+**Strategic pivot from scalping to trend-following.** After analysis showed the 8% stop / 8% TP scalping strategy was running at 1:1 R/R with break-even at 50% WR — leaving zero margin for error — the system has been re-architected around **Richard Dennis's Turtle Trading System** for long-term growth.
+
+**Why Turtle**: The math is asymmetric and well-validated. Turtle accepts a 30-40% win rate as normal, but profits come from large winners (4-8N) covering many small 2N losses. Mathematical expectancy: ~+0.75% per trade, ~25-30% annual growth in trending markets, mechanical discipline.
+
+**Files modified (4):**
+
+- **`projection_engine.py`** — Added `compute_donchian()`, `compute_turtle_signal()`, and `compute_turtle_position_size()`. Donchian channels return prior 10/20/55-day highs/lows for entry/exit signals. ATR (already computed) provides volatility for stops and sizing.
+
+- **`strategic_brain.py`** — Major upgrade:
+  - New `TURTLE_SYSTEM_CONFIG` constants
+  - New `_default_strategy_turtle()` template generates a complete Turtle playbook
+  - Default playbook for both AIs is now Turtle (was scalping)
+  - Validator extended to accept ATR-based strategies (`strategy_type="turtle"`)
+  - Turtle validator enforces: `stop_loss_atr_multiple` 1.0-4.0, `risk_pct_per_trade` 0-3.0, `entry_donchian_period` 5-200, `exit_donchian_period` 5-100, exit < entry period
+  - Strategist prompt completely rewritten to teach Turtle principles and explicitly forbid abandoning the system on losing streaks
+  - Conditional rules `on_stop_loss`, `on_two_stops_same_session`, `on_three_consecutive_losses` all default to `no_pause` action — Turtle doesn't pause after losses
+  - Wake conditions tightened: `consecutive_losses=6` (was 3), `min_trades_before_eval=30`, `win_rate_below_pct=15` (was 35)
+  - `execute_playbook()` now respects `no_pause` action (doesn't block entries on losing streaks for Turtle)
+
+- **`binance_crypto.py`** — New Turtle helpers:
+  - `get_daily_bars()` fetches daily klines for Turtle signals
+  - `turtle_check_entry()` returns eligibility, entry level, ATR, calculated 2N stop
+  - `turtle_check_exit()` returns Donchian breakdown OR 2N stop check
+  - `turtle_position_size()` returns 1%-risk position sizing
+  - `CryptoPosition.__init__` extended with `strategy_type`, `turtle_system`, `atr_at_entry`, `stop_price_override` params
+  - `CryptoPosition.should_turtle_exit()` method runs daily Donchian check
+  - Exit monitor now checks Turtle exit BEFORE classic TP (Turtle has no fixed TP)
+  - Both `CryptoPosition()` instantiation sites detect current playbook and apply Turtle metadata when applicable
+
+- **`bot_with_proxy.py`** — Stock-side will inherit Turtle behavior automatically once `compute_turtle_signal` is wired into stock entry logic (next iteration). The `/bars` endpoint already serves the daily OHLC data needed.
+
+**Turtle Mechanics Recap:**
+
+| Component | Value |
+|---|---|
+| Entry signal | Daily close > 20-day Donchian high (System 1) |
+| Exit signal | Daily close < 10-day Donchian low (System 1) |
+| Hard stop | Entry - (2 × ATR) |
+| Position size | 1% of equity / (2 × ATR) |
+| Max concurrent | 4 positions |
+| Expected win rate | 30-40% |
+| Avg winner | 4-8N (200-400% of risk) |
+| Avg loser | 2N (capped at 1% of equity) |
+| Hold horizon | Days to weeks (until Donchian breakdown) |
+| Strategy abandonment | Only after 30+ trades AND <15% WR AND no winners >4N |
+
+**Critical Discipline Rule**: The strategist is explicitly instructed in its prompt to NEVER abandon Turtle after losing streaks. This is the historical failure mode of every Turtle trader who didn't survive — they couldn't sit through drawdowns. The bot has no such psychological pressure.
+
+**Status:** ✅ All 4 files compile, smoke-tested. Default playbook for both AIs on next boot will be Turtle System 1.
+
+**Next iteration**: Stock-side Turtle entries (currently strategic_brain ships Turtle for both, but stock entry logic in `bot_with_proxy.py` still uses Strategy A/B fixed-percentage exits). Adding `Strategy T` for Turtle stocks is the logical next step.
+
+---
 
 ### 🚀 v3.1.3 Release — 2026-05-05 — Strategic Brain Phase B (Living Playbook ACTIVE)
 

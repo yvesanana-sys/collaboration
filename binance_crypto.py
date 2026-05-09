@@ -390,6 +390,156 @@ def get_all_crypto_stats() -> list:
     return sorted(stats, key=lambda x: abs(x["change_pct"]), reverse=True)
 
 
+# ══════════════════════════════════════════════════════════════
+# TURTLE TRADING HELPERS
+# Daily-bar Donchian breakout entries, ATR-based stops/sizing.
+# Used when current playbook has strategy_type="turtle".
+# ══════════════════════════════════════════════════════════════
+
+def get_daily_bars(symbol: str, days: int = 60):
+    """Fetch daily kline bars for Turtle Donchian/ATR computation."""
+    try:
+        kl = binance_get("/api/v3/klines", {
+            "symbol":   symbol,
+            "interval": "1d",
+            "limit":    min(days + 5, 500),
+        }) or []
+        bars = []
+        for k in kl:
+            bars.append({
+                "t": int(k[0]),
+                "o": float(k[1]),
+                "h": float(k[2]),
+                "l": float(k[3]),
+                "c": float(k[4]),
+                "v": float(k[5]),
+            })
+        return bars
+    except Exception as e:
+        return []
+
+
+def turtle_check_entry(symbol: str, system: int = 1) -> dict:
+    """
+    Check if symbol meets Turtle entry criteria right now.
+    Returns:
+      {
+        'eligible':     bool,
+        'system':       1 or 2,
+        'entry_price':  float (current close),
+        'donchian_high': float (level that was broken),
+        'atr':          float (N value),
+        'stop_price':   float (entry - 2N),
+        'reason':       str,
+      }
+    """
+    try:
+        from projection_engine import compute_turtle_signal
+    except ImportError:
+        return {"eligible": False, "reason": "projection_engine unavailable"}
+
+    bars = get_daily_bars(symbol, days=60 if system == 1 else 120)
+    if not bars or len(bars) < (25 if system == 1 else 60):
+        return {"eligible": False, "reason": f"insufficient daily bars ({len(bars)})"}
+
+    sig = compute_turtle_signal(bars, system=system)
+    if not sig:
+        return {"eligible": False, "reason": "signal computation failed"}
+
+    return {
+        "eligible":     sig["entry_signal"],
+        "system":       system,
+        "entry_price":  bars[-1]["c"],
+        "donchian_high": sig["entry_level"],
+        "atr":          sig["atr"],
+        "stop_price":   sig["stop_price"],
+        "reason":       sig["reason"],
+    }
+
+
+def turtle_check_exit(symbol: str, entry_price: float,
+                      stop_price: float, system: int = 1) -> dict:
+    """
+    Check if open Turtle position should exit right now.
+    Two exit triggers (whichever fires first):
+      1. Daily close < N-day Donchian low (System 1: 10-day, System 2: 20-day)
+      2. Current price <= entry - (2 × ATR)  ← hard stop
+
+    Returns:
+      {
+        'should_exit':  bool,
+        'exit_type':    'donchian'|'stop'|'none',
+        'current_price': float,
+        'donchian_low': float,
+        'reason':       str,
+      }
+    """
+    try:
+        from projection_engine import compute_donchian
+    except ImportError:
+        return {"should_exit": False, "reason": "projection_engine unavailable"}
+
+    bars = get_daily_bars(symbol, days=30)
+    if not bars:
+        return {"should_exit": False, "reason": "no bars"}
+
+    current_price = bars[-1]["c"]
+    exit_period   = 10 if system == 1 else 20
+    donch = compute_donchian(bars, periods=(exit_period,))
+    donchian_low = (donch or {}).get(f"low_{exit_period}")
+
+    # Hard stop check first (faster fail)
+    if current_price <= stop_price:
+        return {
+            "should_exit":   True,
+            "exit_type":     "stop",
+            "current_price": current_price,
+            "donchian_low":  donchian_low,
+            "reason":        f"Stop hit: ${current_price:.4f} <= 2N stop ${stop_price:.4f}",
+        }
+
+    # Donchian breakdown
+    if donchian_low and current_price < donchian_low:
+        return {
+            "should_exit":   True,
+            "exit_type":     "donchian",
+            "current_price": current_price,
+            "donchian_low":  donchian_low,
+            "reason":        f"Donchian breakdown: ${current_price:.4f} < {exit_period}d low ${donchian_low:.4f}",
+        }
+
+    return {
+        "should_exit":   False,
+        "exit_type":     "none",
+        "current_price": current_price,
+        "donchian_low":  donchian_low,
+        "reason":        f"holding — close ${current_price:.4f} above {exit_period}d low ${donchian_low:.4f}",
+    }
+
+
+def turtle_position_size(account_equity_usd: float, atr: float, current_price: float,
+                          risk_pct: float = 1.0) -> dict:
+    """
+    Turtle sizing: 1% risk / (2 × ATR per unit).
+    Returns {'units', 'notional_usd', 'risk_usd'}.
+    """
+    try:
+        from projection_engine import compute_turtle_position_size
+        result = compute_turtle_position_size(account_equity_usd, atr, current_price, dollar_per_point=1.0)
+        if not result:
+            return None
+        # Apply risk_pct override (default is 1%)
+        if risk_pct != 1.0:
+            scale = risk_pct / 1.0
+            result["units"]        = round(result["units"] * scale, 6)
+            result["notional_usd"] = round(result["notional_usd"] * scale, 2)
+            result["risk_usd"]     = round(result["risk_usd"] * scale, 2)
+            result["risk_pct"]     = round(result["risk_pct"] * scale, 2)
+        return result
+    except Exception:
+        return None
+
+
 def scan_binance_market(min_volume_usdt: float = 500_000,
                         top_n: int = 10) -> list:
     """
@@ -1841,26 +1991,51 @@ class CryptoPosition:
     """Tracks a single open crypto position with exit strategy."""
 
     def __init__(self, symbol, qty, entry_price, entry_time,
-                 stop_pct=None, tp_price=None, owner="shared"):
+                 stop_pct=None, tp_price=None, owner="shared",
+                 strategy_type="classic", turtle_system=1, atr_at_entry=None,
+                 stop_price_override=None):
+        """
+        Args:
+            strategy_type: "classic" (pct-based) or "turtle" (ATR/Donchian)
+            turtle_system: 1 (20/10) or 2 (55/20) — only relevant if turtle
+            atr_at_entry: ATR value at entry time (for stop calc & sizing audit)
+            stop_price_override: explicit stop price (e.g. for Turtle 2N stops)
+        """
         self.symbol       = symbol
         self.qty          = qty
         self.entry_price  = entry_price
         self.entry_time   = entry_time
-        self.stop_pct     = stop_pct or CRYPTO_RULES["stop_loss_pct"]
-        self.stop_price   = round(entry_price * (1 - self.stop_pct), 4)
-        # ── Fee-aware default TP (NET semantics) ─────────────
-        # take_profit_pct is the NET target — what you actually pocket.
-        # Gross TP price = entry × (1 + net_target + round_trip_fee)
-        # so when TP fires, post-fee P&L = net_target.
-        if tp_price:
-            self.tp_price = tp_price
-        else:
-            net_target  = CRYPTO_RULES["take_profit_pct"]
-            fee_overhead = CRYPTO_RULES.get("round_trip_fee", 0.008)
-            self.tp_price = round(entry_price * (1 + net_target + fee_overhead), 4)
         self.owner        = owner
         self.peak_price   = entry_price
         self.exit_order_id = None
+        # ── Turtle metadata ──────────────────────────────────
+        self.strategy_type = strategy_type
+        self.turtle_system = turtle_system
+        self.atr_at_entry  = atr_at_entry
+
+        if strategy_type == "turtle":
+            # Turtle: stop is fixed dollar amount = entry - (2 × ATR)
+            if stop_price_override is not None:
+                self.stop_price = round(stop_price_override, 6)
+            elif atr_at_entry:
+                self.stop_price = round(entry_price - (2 * atr_at_entry), 6)
+            else:
+                # Fallback if ATR missing (shouldn't happen)
+                self.stop_price = round(entry_price * 0.92, 6)
+            # Turtle uses Donchian for exits, not fixed TP
+            # Set tp_price extremely high so should_take_profit() never fires
+            self.tp_price  = round(entry_price * 100, 6)   # effectively unreachable
+            self.stop_pct  = (entry_price - self.stop_price) / entry_price
+        else:
+            # Classic: percentage-based stop and TP
+            self.stop_pct     = stop_pct or CRYPTO_RULES["stop_loss_pct"]
+            self.stop_price   = round(entry_price * (1 - self.stop_pct), 4)
+            if tp_price:
+                self.tp_price = tp_price
+            else:
+                net_target  = CRYPTO_RULES["take_profit_pct"]
+                fee_overhead = CRYPTO_RULES.get("round_trip_fee", 0.008)
+                self.tp_price = round(entry_price * (1 + net_target + fee_overhead), 4)
 
     def update(self, current_price: float):
         """Update peak price for trailing logic."""
@@ -1883,6 +2058,25 @@ class CryptoPosition:
 
     def should_time_exit(self) -> bool:
         return self.hours_held() >= CRYPTO_RULES["max_hold_hours"]
+
+    def should_turtle_exit(self) -> tuple:
+        """
+        Check Turtle Donchian breakdown exit.
+        Returns (should_exit: bool, reason: str).
+        Only runs if position metadata says strategy_type='turtle'.
+        """
+        if getattr(self, "strategy_type", "classic") != "turtle":
+            return (False, "not turtle")
+        try:
+            system = getattr(self, "turtle_system", 1)
+            result = turtle_check_exit(
+                self.symbol, self.entry_price, self.stop_price, system=system
+            )
+            if result.get("should_exit"):
+                return (True, result.get("reason", "turtle exit"))
+            return (False, "")
+        except Exception as e:
+            return (False, f"turtle check error: {e}")
 
     def to_dict(self) -> dict:
         return {
@@ -2241,36 +2435,45 @@ class CryptoTrader:
                                   f"P&L={pnl:+.1f}%")
 
                 exit_reason = None
+                # Run Turtle exit check first if applicable (runs BEFORE classic TP/time)
+                _turtle_exit_fired = False
                 if pos.should_stop(current):
                     exit_reason = f"stop_loss ({pnl:.2f}%)"
-                elif pos.should_take_profit(current):
-                    exit_reason = f"take_profit ({pnl:.2f}%)"
-                elif pos.should_time_exit():
-                    # ── Fee-floor guard ─────────────────────────────
-                    # Don't dump on time_exit if we're underwater AND below
-                    # fee floor — extend the hold instead. Past the hard cap,
-                    # we exit anyway to avoid being stuck in a dead position.
-                    fee_floor = pos.entry_price * (1 + CRYPTO_RULES["round_trip_fee"] + 0.005)
-                    underwater = current < fee_floor
-                    hours_held = pos.hours_held()
-                    hard_cap   = CRYPTO_RULES.get("hard_max_hold_hours",
-                                                   CRYPTO_RULES["max_hold_hours"] * 3)
+                else:
+                    _t_exit, _t_reason = pos.should_turtle_exit()
+                    if _t_exit:
+                        exit_reason = f"turtle_exit ({pnl:+.2f}%) — {_t_reason}"
+                        _turtle_exit_fired = True
 
-                    if underwater and hours_held < hard_cap:
-                        # Skip this exit — log once per hour to avoid spam
-                        last_skip = getattr(pos, "_last_extend_log", 0)
-                        if hours_held - last_skip >= 1.0:
-                            self._log(f"   ⏳ {symbol}: time_exit skipped — "
-                                      f"underwater ${current:.6f} < fee floor "
-                                      f"${fee_floor:.6f} (P&L {pnl:+.2f}%) — "
-                                      f"extending hold ({hours_held:.1f}h / {hard_cap}h cap)")
-                            pos._last_extend_log = hours_held
-                    else:
-                        # Either above fee floor (exit OK to book breakeven+)
-                        # or hard cap reached (force exit regardless of P&L)
-                        cap_reason = " HARD CAP" if hours_held >= hard_cap else ""
-                        exit_reason = (f"time_exit ({hours_held:.1f}h > "
-                                       f"{CRYPTO_RULES['max_hold_hours']}h{cap_reason})")
+                if exit_reason is None and not _turtle_exit_fired:
+                    if pos.should_take_profit(current):
+                        exit_reason = f"take_profit ({pnl:.2f}%)"
+                    elif pos.should_time_exit():
+                        # ── Fee-floor guard ─────────────────────────────
+                        # Don't dump on time_exit if we're underwater AND below
+                        # fee floor — extend the hold instead. Past the hard cap,
+                        # we exit anyway to avoid being stuck in a dead position.
+                        fee_floor = pos.entry_price * (1 + CRYPTO_RULES["round_trip_fee"] + 0.005)
+                        underwater = current < fee_floor
+                        hours_held = pos.hours_held()
+                        hard_cap   = CRYPTO_RULES.get("hard_max_hold_hours",
+                                                       CRYPTO_RULES["max_hold_hours"] * 3)
+
+                        if underwater and hours_held < hard_cap:
+                            # Skip this exit — log once per hour to avoid spam
+                            last_skip = getattr(pos, "_last_extend_log", 0)
+                            if hours_held - last_skip >= 1.0:
+                                self._log(f"   ⏳ {symbol}: time_exit skipped — "
+                                          f"underwater ${current:.6f} < fee floor "
+                                          f"${fee_floor:.6f} (P&L {pnl:+.2f}%) — "
+                                          f"extending hold ({hours_held:.1f}h / {hard_cap}h cap)")
+                                pos._last_extend_log = hours_held
+                        else:
+                            # Either above fee floor (exit OK to book breakeven+)
+                            # or hard cap reached (force exit regardless of P&L)
+                            cap_reason = " HARD CAP" if hours_held >= hard_cap else ""
+                            exit_reason = (f"time_exit ({hours_held:.1f}h > "
+                                           f"{CRYPTO_RULES['max_hold_hours']}h{cap_reason})")
 
                 if exit_reason:
                     result = self._execute_exit(
@@ -3813,14 +4016,37 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
 
                 if result.get("orderId"):
                     qty = float(result.get("origQty", notional / max(entry, 0.000001)))
-                    pos = CryptoPosition(
-                        symbol      = sym,
-                        qty         = qty,
-                        entry_price = entry,
-                        entry_time  = datetime.now(timezone.utc),
-                        tp_price    = tp_price,
-                        owner       = owner,
-                    )
+
+                    # ── Detect if this is a Turtle position ──
+                    # Check the current playbook for this AI; if strategy_type is "turtle",
+                    # create the position with ATR-based stop and Donchian exits.
+                    pos_kwargs = {
+                        "symbol":      sym,
+                        "qty":         qty,
+                        "entry_price": entry,
+                        "entry_time":  datetime.now(timezone.utc),
+                        "tp_price":    tp_price,
+                        "owner":       owner,
+                    }
+                    try:
+                        import strategic_brain
+                        ai_for_strat = owner if owner in ("claude", "grok") else "claude"
+                        ps = strategic_brain.load_strategy(ai_for_strat)
+                        cs = ps.get("current_strategy", {})
+                        if cs.get("strategy_type") == "turtle":
+                            # Get ATR for stop calculation
+                            t_signal = turtle_check_entry(sym, system=cs.get("rules", {}).get("entry_donchian_period", 20) > 30 and 2 or 1)
+                            atr_val = t_signal.get("atr") if t_signal else None
+                            if atr_val and atr_val > 0:
+                                pos_kwargs["strategy_type"]       = "turtle"
+                                pos_kwargs["turtle_system"]       = 1 if cs.get("rules",{}).get("entry_donchian_period",20) <= 30 else 2
+                                pos_kwargs["atr_at_entry"]        = atr_val
+                                pos_kwargs["stop_price_override"] = round(entry - (2 * atr_val), 6)
+                                self._log(f"   🐢 TURTLE position: 2N stop=${pos_kwargs['stop_price_override']:.6f} (ATR=${atr_val:.4f})")
+                    except Exception as _te:
+                        self._log(f"   ⚠️ Turtle detect failed: {_te}")
+
+                    pos = CryptoPosition(**pos_kwargs)
                     self.positions[sym] = pos
                     crypto_pool -= notional
                     # In competition mode, also debit the owner's slice
@@ -4135,14 +4361,30 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                 result = place_crypto_buy(sym, prop["notional"], prop["entry"])
                 if result.get("orderId"):
                     qty = float(result.get("origQty", prop["notional"] / prop["entry"]))
-                    pos = CryptoPosition(
-                        symbol      = sym,
-                        qty         = qty,
-                        entry_price = prop["entry"],
-                        entry_time  = datetime.now(timezone.utc),
-                        tp_price    = prop["tp"],
-                        owner       = prop["owner"],
-                    )
+                    pos_kwargs2 = {
+                        "symbol":      sym,
+                        "qty":         qty,
+                        "entry_price": prop["entry"],
+                        "entry_time":  datetime.now(timezone.utc),
+                        "tp_price":    prop["tp"],
+                        "owner":       prop["owner"],
+                    }
+                    try:
+                        import strategic_brain
+                        ai_for_strat2 = prop["owner"] if prop["owner"] in ("claude", "grok") else "claude"
+                        ps2 = strategic_brain.load_strategy(ai_for_strat2)
+                        cs2 = ps2.get("current_strategy", {})
+                        if cs2.get("strategy_type") == "turtle":
+                            t_sig2 = turtle_check_entry(sym, system=1)
+                            atr2 = t_sig2.get("atr") if t_sig2 else None
+                            if atr2 and atr2 > 0:
+                                pos_kwargs2["strategy_type"]       = "turtle"
+                                pos_kwargs2["turtle_system"]       = 1
+                                pos_kwargs2["atr_at_entry"]        = atr2
+                                pos_kwargs2["stop_price_override"] = round(prop["entry"] - (2 * atr2), 6)
+                    except Exception:
+                        pass
+                    pos = CryptoPosition(**pos_kwargs2)
                     self.positions[sym] = pos
                     crypto_pool -= prop["notional"]
                     new_positions += 1

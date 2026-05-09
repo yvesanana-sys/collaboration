@@ -124,6 +124,170 @@ HARD_LIMITS = {
     "consecutive_loss_gate":     5,
 }
 
+# ══════════════════════════════════════════════════════════════
+# TURTLE TRADING SYSTEM CONFIGURATION
+# Richard Dennis's mechanical trend-following rules adapted for
+# crypto + stocks. Long-only (no shorts on Binance.US/Alpaca cash).
+# ══════════════════════════════════════════════════════════════
+TURTLE_SYSTEM_CONFIG = {
+    "enabled":                  True,    # Enable Turtle as a strategy option
+    "default_system":           1,       # 1=fast (20/10), 2=slow (55/20)
+    "risk_pct_per_trade":       1.0,     # Risk 1% of equity per trade
+    "stop_loss_atr_multiple":   2.0,     # Stop at entry - (2 × N)
+    "max_concurrent_positions": 4,       # Diversification limit (vs Turtle's 12)
+    "max_pyramid_units":        1,       # 1 = no pyramid (Phase 1). Increase to 4 in Phase 2.
+    "min_atr_multiple_target":  3.0,     # Don't bother with breakouts where 3N target < 2% gain
+    "anti_chop_filter":         True,    # Skip breakout if ATR has been falling for 5+ days (range-bound)
+    "btc_macro_filter":         True,    # Skip crypto entries if BTC -3% in 24h
+    "spy_macro_filter":         True,    # Skip stock entries if SPY -2% in last day
+    "min_trades_before_review": 30,      # Don't abandon Turtle until 30 trades evaluated
+    "min_winrate_to_continue":  0.20,    # Below 20% WR over 30+ trades = strategist may revise
+    "min_avg_win_atr_multiple": 4.0,     # Require avg winner ≥ 4N to confirm system working
+}
+
+
+def _default_strategy_turtle(ai_name, asset_class="crypto"):
+    """
+    Turtle Trend-Following playbook — Richard Dennis's mechanical system.
+    Long-term growth via catching trends, cutting losers fast, riding winners.
+
+    KEY DIFFERENCES FROM CLASSIC PLAYBOOK:
+    - Stop is ATR-based (2N below entry), not percentage-based
+    - Exit is Donchian breakdown (10-day low for System 1)
+    - Position sized for 1% risk, not pool percentage
+    - Tactician notes are STRICTLY mechanical — no prediction allowed
+
+    The strategist will NOT abandon this playbook on losing streaks.
+    Turtle is designed to lose 60-70% of trades; profitability comes
+    from large winners. Override only after 30+ trades AND sub-20% WR.
+    """
+    is_crypto = asset_class == "crypto"
+    return {
+        "id":           f"S-{ai_name}-turtle-{asset_class}",
+        "name":         f"Turtle Trend-Follow System 1 ({asset_class.title()})",
+        "version":      0,
+        "strategy_type": "turtle",   # ← marker so executor knows which exit logic to use
+        "active_since": datetime.now(timezone.utc).isoformat(),
+        "rules": {
+            # ── Entry ────────────────────────────────────────
+            "entry_logic": (
+                "MECHANICAL ONLY. Enter long when daily close > 20-day Donchian high "
+                "(System 1). Skip on strong macro down-days (BTC -3% / SPY -2%). "
+                "DO NOT predict — take EVERY breakout that meets criteria."
+            ),
+            "exit_logic": (
+                "Exit when daily close < 10-day Donchian low (System 1). "
+                "OR: hard stop at entry - (2 × ATR), whichever fires first. "
+                "DO NOT exit early on profit. Let winners run to the breakdown signal."
+            ),
+            "preferred_indicators":     ["donchian_20", "donchian_10", "atr_20"],
+            "preferred_symbols":        [],     # Trade any symbol meeting criteria
+            "min_confidence":           60,     # Lower than classic — system is mechanical
+            "max_position_pct_of_pool": 25,     # Backup cap; ATR sizing is primary
+            "max_concurrent_positions": 4,
+
+            # ── ATR-based stops/sizing (Turtle hallmark) ────
+            "stop_loss_pct":            null_marker(),  # see _validate_strategy
+            "take_profit_pct":          null_marker(),
+            "stop_loss_atr_multiple":   2.0,    # Stop at entry - (2 × N)
+            "exit_donchian_period":     10,     # System 1 exit
+            "entry_donchian_period":    20,     # System 1 entry
+            "risk_pct_per_trade":       1.0,    # Always 1% of equity
+
+            # ── Hold / time ──────────────────────────────────
+            "max_hold_hours":           168,    # 1 week per leg, then re-evaluate
+            "trail_activate_pct":       0,      # NOT USED — Turtle uses Donchian, not trail
+            "trail_pct":                0,
+
+            # ── Conditional responses ────────────────────────
+            "on_stop_loss": {
+                "action": "no_pause",   # ← KEY DIFFERENCE: Turtle doesn't pause after stops
+                "pause_minutes": 0,
+                "log_reason": "Turtle stop fired — IMMEDIATELY re-eligible. Losses are part of the system.",
+            },
+            "on_two_stops_same_session": {
+                "action": "no_pause",   # ← Same: don't pause
+                "reduce_size_pct": 0,   # No size reduction
+                "pause_minutes": 0,
+                "log_reason": "2 stops same session is NORMAL for Turtle. Continue mechanically.",
+            },
+            "on_three_consecutive_losses": {
+                "action": "no_pause",   # ← Critical: 3 losses is NORMAL
+                "log_reason": "3 consecutive losses is expected. The next big winner pays for them.",
+                "wake_strategist": False,
+            },
+            "on_six_consecutive_losses": {
+                "action": "wake_strategist_only",   # 6 in a row → review (still don't pause)
+                "log_reason": "6 losses in a row — strategist reviews if anti-chop filter needs adjusting.",
+                "wake_strategist": True,
+            },
+            "on_winning_streak_3": {
+                "action": "hold_current_size",
+                "log_reason": "Streak — maintain discipline, no oversize.",
+            },
+            "on_btc_drops_3pct_1h": {
+                "action": "halt_altcoin_entries" if is_crypto else "ignore",
+                "log_reason": "BTC -3% — pause new crypto entries. Existing positions held.",
+            },
+            "on_btc_drops_5pct_1h": {
+                "action": "halt_altcoin_entries",
+                "log_reason": "BTC -5% — halt entries. Existing stops will fire if breached.",
+                "wake_strategist": False,   # Turtle stops handle this
+            },
+            "on_spy_drops_2pct": {
+                "action": "halt_stock_entries",
+                "log_reason": "SPY -2% — pause new stock entries.",
+            },
+            "on_sentiment_extreme_fear": {
+                "action": "no_change",   # ← KEY: Turtle ignores sentiment, follows price
+                "stop_multiplier": 1.0,
+                "log_reason": "Sentiment ignored. Turtle follows price, not opinion.",
+            },
+            "on_sentiment_extreme_greed": {
+                "action": "no_change",
+                "tp_multiplier": 1.0,
+                "log_reason": "Sentiment ignored. Let winners run via Donchian exit.",
+            },
+
+            # ── Wake conditions (very conservative) ─────────
+            "wake_strategist_if": {
+                "consecutive_losses":       6,    # Up from 3 — Turtle expects losses
+                "session_drawdown_pct":    20,    # Up from 15
+                "days_without_trade":       7,    # No breakout for a week
+                "btc_regime_flip":       True,
+                "spy_regime_flip":       True,
+                "win_rate_below_pct":      15,    # Down from 35 — Turtle WR is 30-40%
+                "predicted_vs_actual_gap": 50,    # Up from 25 — Turtle has high variance
+                "min_trades_before_eval":  30,    # Don't review until 30 trades
+            },
+
+            # ── Tactician training notes — STRICT discipline ─
+            "tactician_notes": (
+                "TURTLE TREND-FOLLOWING SYSTEM. RULES OVER INSTINCT.\n"
+                "1. ENTER long when current price > 20-day Donchian high. NO EXCEPTIONS.\n"
+                "2. EXIT when current price < 10-day Donchian low OR stop hits at entry-2N.\n"
+                "3. NEVER take profit early. Winners must run to the Donchian exit.\n"
+                "4. NEVER skip a valid breakout because it 'feels too high'. The system catches "
+                "trends precisely by entering after the move started.\n"
+                "5. NEVER predict tops or bottoms. Wait for the signal.\n"
+                "6. EXPECT to lose on 60-70% of trades. The 30-40% winners pay for everything.\n"
+                "7. Risk EXACTLY 1% of equity per trade — no more, no less.\n"
+                "8. After a stop loss: IMMEDIATELY eligible for next breakout. Do not 'cool off'.\n"
+                "9. After a winner: IMMEDIATELY eligible. Don't 'wait for pullback'.\n"
+                "10. DISCIPLINE IS THE EDGE. The system works only if followed mechanically."
+            ),
+        },
+        "rationale":             "Turtle Trend-Follow System 1 — Richard Dennis methodology adapted for spot-only crypto/stock.",
+        "predicted_win_rate":    35,     # Realistic Turtle expectation
+        "predicted_avg_pnl_pct": 4.0,    # Avg winner ~ 4N, avg loser ~ 2N
+        "predicted_until":       None,
+    }
+
+
+def null_marker():
+    """Marker value indicating ATR-based stop is in use (no fixed pct)."""
+    return None  # Validator handles this case specially
+
 AUTO_REVERT = {
     "min_trades_under_strategy": 5,
     "win_rate_threshold":        0.40,
@@ -221,10 +385,11 @@ def _default_strategy(ai_name):
 
 
 def _default_strategy_state(ai_name):
+    # Default to TURTLE strategy — long-term trend-following, mechanical discipline
     return {
         "ai_name":               ai_name,
         "model_id":              STRATEGIST_MODELS[ai_name]["model_id"],
-        "current_strategy":      _default_strategy(ai_name),
+        "current_strategy":      _default_strategy_turtle(ai_name, asset_class="crypto"),
         "current_performance":   {
             "trades_under_this_strategy": 0, "wins": 0, "losses": 0,
             "actual_win_rate": 0, "actual_avg_pnl_pct": 0,
@@ -432,7 +597,10 @@ def execute_playbook(ai_name, cycle_context):
     wake_at_consec = int(wc.get("consecutive_losses", 3))
     if consec >= wake_at_consec:
         r = rules.get("on_three_consecutive_losses", {})
-        result["block_new_entries"] = True
+        action = r.get("action", "halt_new_entries")
+        # Turtle uses "no_pause" — don't block entries on losing streaks
+        if action != "no_pause":
+            result["block_new_entries"] = True
         if r.get("wake_strategist", True) and not result["wake_strategist"]:
             result["wake_strategist"] = True
             result["wake_reason"]     = f"playbook: {consec} consecutive losses"
@@ -677,11 +845,33 @@ You do NOT trade. You write STANDING ORDERS — a comprehensive playbook that th
 and bot follow autonomously until you are recalled. Train the bot to handle situations
 without needing you constantly. Your playbook must cover every scenario.{wake_block}
 
+═══ THE BOT IS RUNNING THE TURTLE TRADING SYSTEM ═══
+This is RICHARD DENNIS'S TURTLE TREND-FOLLOWING SYSTEM, adapted for spot-only crypto and stocks.
+The system is designed for LONG-TERM GROWTH via catching big trends and cutting losers fast.
+
+CORE PRINCIPLES (DO NOT VIOLATE):
+1. Mechanical entries on Donchian breakouts (System 1: 20-day high; System 2: 55-day high)
+2. Mechanical exits on Donchian breakdowns (System 1: 10-day low; System 2: 20-day low)
+3. Hard stops at entry - (2 × ATR), no exceptions
+4. Risk EXACTLY 1% of equity per trade
+5. EXPECT 60-70% loss rate. Profitability comes from large winners, not high win rate.
+6. NEVER abandon the system after losing streaks — that's how Turtle traders fail
+7. Discipline > prediction. The system catches trends BECAUSE it's mechanical.
+
+WHEN TO ACTUALLY REVISE THE TURTLE PLAYBOOK:
+✓ AFTER 30+ trades, if win rate < 20% AND no winners > 4N achieved → adjust filters
+✓ If anti-chop filter is missing too many true breakouts → loosen it
+✓ If macro filter (BTC -3% / SPY -2%) is too restrictive → adjust thresholds
+✗ DO NOT revise after 3, 6, or even 10 losses — that's NORMAL for Turtle
+✗ DO NOT switch to scalping/mean-reversion because Turtle is "in drawdown"
+✗ DO NOT add fixed take-profits — the whole point is letting winners run
+
 ACTIVATION: {purpose}  |  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
 
 === CURRENT PLAYBOOK ===
-ID: {current.get('id')} | Version {current.get('version',0)} | Since {current.get('active_since','')[:16]}
+ID: {current.get('id')} | Version {current.get('version',0)} | Type: {current.get('strategy_type', 'classic')}
 Name: {current.get('name')}
+Since: {current.get('active_since','')[:16]}
 Rules:
 {json.dumps(current.get('rules',{}), indent=2)}
 
@@ -689,6 +879,7 @@ Rules:
 Trades: {perf.get('trades_under_this_strategy',0)} | Wins: {perf.get('wins',0)} | Losses: {perf.get('losses',0)}
 Win Rate: {perf.get('actual_win_rate',0):.0f}% (predicted: {current.get('predicted_win_rate','?')}%)
 Avg P&L: {perf.get('actual_avg_pnl_pct',0):+.2f}%
+Note: For Turtle, 30-40% WR is EXPECTED. Below 20% over 30+ trades is concerning.
 
 === PLAYBOOK EXECUTION LOG (what conditional rules fired) ===
 {exec_block}
@@ -699,7 +890,7 @@ Avg P&L: {perf.get('actual_avg_pnl_pct',0):+.2f}%
 === MARKET CONTEXT ===
 {mc_block}
 
-=== SENTIMENT AND NEWS ===
+=== SENTIMENT AND NEWS (Turtle ignores sentiment but useful for risk awareness) ===
 {sent_block}
 
 === PRIOR PLAYBOOKS ===
@@ -707,67 +898,75 @@ Avg P&L: {perf.get('actual_avg_pnl_pct',0):+.2f}%
 
 === COMPETITIVE CONTEXT ===
 You compete against {rival_name}-Strategist. Realized P&L on closed trades is the score.
+Both AIs are running Turtle. Discipline differentials matter more than entry tweaks.
 
 === YOUR TASK ===
-Write a LIVING PLAYBOOK — comprehensive standing orders covering every situation.
+Write a LIVING TURTLE PLAYBOOK — comprehensive standing orders for trend-following.
 The bot follows this autonomously. You are NOT called for every stop or dip.
-Define PRECISELY when to recall you. Be specific. Vague conditions = noise wakes.
+Define PRECISELY when to recall you (hint: not often — 30+ trades evaluation window).
 
 HARD LIMITS (validator will reject violations):
-  stop_loss_pct: {HARD_LIMITS['stop_loss_pct_min']}-{HARD_LIMITS['stop_loss_pct_max']}%
+  stop_loss_atr_multiple: 1.0 - 4.0 (Turtle uses 2.0)
+  risk_pct_per_trade: 0 - 3.0 (Turtle uses 1.0)
+  entry_donchian_period: 5 - 200 (System 1: 20, System 2: 55)
+  exit_donchian_period: 5 - 100 (System 1: 10, System 2: 20)
+  exit_donchian_period MUST be < entry_donchian_period
   max_position_pct_of_pool: <= {HARD_LIMITS['max_position_pct_of_pool']}%
   max_hold_hours: <= {HARD_LIMITS['max_hold_hours']}
-  take_profit_pct: {HARD_LIMITS['take_profit_pct_min']}-{HARD_LIMITS['take_profit_pct_max']}%
-  take_profit must be >= stop_loss (min 1:1 R/R enforced)
   min_confidence: >= {HARD_LIMITS['min_confidence']}
 
 Reply ONLY with valid JSON:
 {{
   "decision": "keep|modify|replace",
-  "rationale": "Evidence-based. Cite specific trades.",
+  "rationale": "Evidence-based. Cite specific trades. Defend continuing Turtle.",
   "new_strategy": {{
-    "name": "Short name",
+    "name": "Turtle [variant name]",
+    "strategy_type": "turtle",
     "rules": {{
-      "entry_logic": "Precise criteria",
-      "exit_logic": "Precise exit criteria",
-      "preferred_indicators": ["RSI","MACD","volume_ratio"],
-      "preferred_symbols": ["ALGOUSDT"],
-      "min_confidence": 65,
+      "entry_logic": "MECHANICAL: enter on Donchian breakout. NO prediction.",
+      "exit_logic": "MECHANICAL: exit on Donchian breakdown OR 2N stop.",
+      "preferred_indicators": ["donchian_20","donchian_10","atr_20"],
+      "preferred_symbols": [],
+      "min_confidence": 60,
       "max_position_pct_of_pool": 25,
-      "max_concurrent_positions": 2,
-      "stop_loss_pct": 6,
-      "take_profit_pct": 15,
-      "max_hold_hours": 24,
-      "trail_activate_pct": 3,
-      "trail_pct": 2.5,
-      "on_stop_loss": {{"action":"pause_entries","pause_minutes":60,"log_reason":"why"}},
-      "on_two_stops_same_session": {{"action":"go_defensive","reduce_size_pct":50,"pause_minutes":120,"log_reason":"why"}},
-      "on_three_consecutive_losses": {{"action":"halt_new_entries","log_reason":"why","wake_strategist":true}},
-      "on_winning_streak_3": {{"action":"hold_current_size","log_reason":"why"}},
-      "on_btc_drops_3pct_1h": {{"action":"halt_altcoin_entries","log_reason":"why"}},
-      "on_btc_drops_5pct_1h": {{"action":"close_weakest_position","log_reason":"why","wake_strategist":true}},
-      "on_spy_drops_2pct": {{"action":"halt_stock_entries","log_reason":"why"}},
-      "on_sentiment_extreme_fear": {{"action":"widen_stop","stop_multiplier":1.25,"log_reason":"why"}},
-      "on_sentiment_extreme_greed": {{"action":"tighten_tp","tp_multiplier":0.75,"log_reason":"why"}},
+      "max_concurrent_positions": 4,
+      "stop_loss_pct": null,
+      "take_profit_pct": null,
+      "stop_loss_atr_multiple": 2.0,
+      "exit_donchian_period": 10,
+      "entry_donchian_period": 20,
+      "risk_pct_per_trade": 1.0,
+      "max_hold_hours": 168,
+      "trail_activate_pct": 0,
+      "trail_pct": 0,
+      "on_stop_loss": {{"action":"no_pause","pause_minutes":0,"log_reason":"Turtle: losses are NORMAL"}},
+      "on_two_stops_same_session": {{"action":"no_pause","reduce_size_pct":0,"pause_minutes":0,"log_reason":"NORMAL"}},
+      "on_three_consecutive_losses": {{"action":"no_pause","log_reason":"3 losses NORMAL for Turtle","wake_strategist":false}},
+      "on_six_consecutive_losses": {{"action":"wake_strategist_only","log_reason":"review filters","wake_strategist":true}},
+      "on_winning_streak_3": {{"action":"hold_current_size","log_reason":"discipline"}},
+      "on_btc_drops_3pct_1h": {{"action":"halt_altcoin_entries","log_reason":"BTC weakness"}},
+      "on_btc_drops_5pct_1h": {{"action":"halt_altcoin_entries","log_reason":"BTC severe","wake_strategist":false}},
+      "on_spy_drops_2pct": {{"action":"halt_stock_entries","log_reason":"SPY weakness"}},
+      "on_sentiment_extreme_fear": {{"action":"no_change","stop_multiplier":1.0,"log_reason":"Turtle ignores sentiment"}},
+      "on_sentiment_extreme_greed": {{"action":"no_change","tp_multiplier":1.0,"log_reason":"Let winners run"}},
       "wake_strategist_if": {{
-        "consecutive_losses": 3,
-        "session_drawdown_pct": 15,
-        "days_without_trade": 2,
+        "consecutive_losses": 6,
+        "session_drawdown_pct": 20,
+        "days_without_trade": 7,
         "btc_regime_flip": true,
         "spy_regime_flip": true,
-        "win_rate_below_pct": 35,
-        "predicted_vs_actual_gap": 25
+        "win_rate_below_pct": 15,
+        "predicted_vs_actual_gap": 50,
+        "min_trades_before_eval": 30
       }},
-      "tactician_notes": "Plain language coaching — what to look for, what to skip."
+      "tactician_notes": "[STRICT mechanical Turtle discipline rules — see template]"
     }},
-    "predicted_win_rate": 60,
+    "predicted_win_rate": 35,
     "predicted_avg_pnl_pct": 4.0
   }}
 }}
 
-For keep: new_strategy = null.
-For modify: provide FULL updated spec.
-Predicted WR gap > 25pp triggers your next review automatically.
+For "keep": new_strategy = null.
 """
 
 
@@ -782,6 +981,10 @@ def validate_strategy(proposed):
         return False, "missing rules field"
     rules = proposed["rules"]
 
+    # ── Turtle (ATR-based) strategies use different validation ─
+    strategy_type = proposed.get("strategy_type", "classic")
+    is_turtle = strategy_type == "turtle"
+
     def _float(key, default=0):
         try:
             return float(rules.get(key, default))
@@ -792,15 +995,37 @@ def validate_strategy(proposed):
     if max_pos is None or max_pos <= 0 or max_pos > HARD_LIMITS["max_position_pct_of_pool"]:
         return False, f"max_position_pct_of_pool out of range [0,{HARD_LIMITS['max_position_pct_of_pool']}]"
 
-    sl = _float("stop_loss_pct")
-    if sl is None or sl < HARD_LIMITS["stop_loss_pct_min"] or sl > HARD_LIMITS["stop_loss_pct_max"]:
-        return False, f"stop_loss_pct out of range [{HARD_LIMITS['stop_loss_pct_min']},{HARD_LIMITS['stop_loss_pct_max']}]"
+    if is_turtle:
+        # ── Turtle validation: ATR-based stops/exits ─────────
+        atr_mult = _float("stop_loss_atr_multiple")
+        if atr_mult is None or atr_mult < 1.0 or atr_mult > 4.0:
+            return False, f"stop_loss_atr_multiple ({atr_mult}) outside [1.0, 4.0]"
 
-    tp = _float("take_profit_pct")
-    if tp is None or tp < HARD_LIMITS["take_profit_pct_min"] or tp > HARD_LIMITS["take_profit_pct_max"]:
-        return False, f"take_profit_pct out of range [{HARD_LIMITS['take_profit_pct_min']},{HARD_LIMITS['take_profit_pct_max']}]"
-    if tp < sl:
-        return False, f"take_profit_pct ({tp}) < stop_loss_pct ({sl}) — R/R < 1:1 rejected"
+        risk_pct = _float("risk_pct_per_trade")
+        if risk_pct is None or risk_pct <= 0 or risk_pct > 3.0:
+            return False, f"risk_pct_per_trade ({risk_pct}) outside (0, 3.0]"
+
+        entry_period = _float("entry_donchian_period")
+        if entry_period is None or entry_period < 5 or entry_period > 200:
+            return False, f"entry_donchian_period ({entry_period}) outside [5, 200]"
+
+        exit_period = _float("exit_donchian_period")
+        if exit_period is None or exit_period < 5 or exit_period > 100:
+            return False, f"exit_donchian_period ({exit_period}) outside [5, 100]"
+
+        if exit_period >= entry_period:
+            return False, f"exit_donchian_period ({exit_period}) must be < entry_donchian_period ({entry_period})"
+    else:
+        # ── Classic playbook validation ───────────────────────
+        sl = _float("stop_loss_pct")
+        if sl is None or sl < HARD_LIMITS["stop_loss_pct_min"] or sl > HARD_LIMITS["stop_loss_pct_max"]:
+            return False, f"stop_loss_pct out of range [{HARD_LIMITS['stop_loss_pct_min']},{HARD_LIMITS['stop_loss_pct_max']}]"
+
+        tp = _float("take_profit_pct")
+        if tp is None or tp < HARD_LIMITS["take_profit_pct_min"] or tp > HARD_LIMITS["take_profit_pct_max"]:
+            return False, f"take_profit_pct out of range [{HARD_LIMITS['take_profit_pct_min']},{HARD_LIMITS['take_profit_pct_max']}]"
+        if tp < sl:
+            return False, f"take_profit_pct ({tp}) < stop_loss_pct ({sl}) — R/R < 1:1 rejected"
 
     mh = _float("max_hold_hours")
     if mh is None or mh <= 0 or mh > HARD_LIMITS["max_hold_hours"]:

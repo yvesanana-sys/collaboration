@@ -51,6 +51,152 @@ def compute_atr(bars, period=14):
     return round(sum(true_ranges[-period:]) / period, 4)
 
 
+def compute_donchian(bars, periods=(10, 20, 55)):
+    """
+    Compute Donchian channels — the breakout signal for Turtle Trading.
+
+    Returns dict with high/low for each period. The 'N-day high' is the
+    highest high of the last N completed bars (NOT including current bar).
+    The 'N-day low' is the lowest low of the last N completed bars.
+
+    Args:
+        bars: list of OHLC bar dicts with 'h' and 'l' keys
+        periods: tuple of period lengths to compute (default: 10, 20, 55)
+
+    Returns:
+        {
+            'high_10': float,  'low_10': float,
+            'high_20': float,  'low_20': float,
+            'high_55': float,  'low_55': float,
+            'current_close': float,
+            'breakout_up_20': bool,    # current close > prior 20-day high
+            'breakout_up_55': bool,    # current close > prior 55-day high
+            'breakdown_10':  bool,     # current close < prior 10-day low (System 1 exit)
+            'breakdown_20':  bool,     # current close < prior 20-day low (System 2 exit)
+        }
+    """
+    if not bars or len(bars) < max(periods) + 1:
+        return None
+
+    out = {}
+    current_close = bars[-1]["c"]
+    out["current_close"] = round(current_close, 6)
+
+    # For each period, compute high/low of PRIOR N bars (excluding current)
+    for n in periods:
+        if len(bars) < n + 1:
+            continue
+        prior = bars[-(n + 1):-1]  # exclude current bar from the window
+        out[f"high_{n}"] = round(max(b["h"] for b in prior), 6)
+        out[f"low_{n}"]  = round(min(b["l"] for b in prior), 6)
+
+    # Breakout / breakdown signals (current close vs prior N high/low)
+    if "high_20" in out:
+        out["breakout_up_20"] = current_close > out["high_20"]
+    if "high_55" in out:
+        out["breakout_up_55"] = current_close > out["high_55"]
+    if "low_10" in out:
+        out["breakdown_10"] = current_close < out["low_10"]
+    if "low_20" in out:
+        out["breakdown_20"] = current_close < out["low_20"]
+
+    return out
+
+
+def compute_turtle_signal(bars, system=1):
+    """
+    Compute Turtle System 1 (faster, 20/10) or System 2 (slower, 55/20) signal.
+
+    Returns:
+        {
+            'system':        1 or 2,
+            'entry_signal':  bool,    # True if breakout to enter long
+            'exit_signal':   bool,    # True if breakdown to exit long
+            'entry_level':   float,   # Donchian high to break for entry
+            'exit_level':    float,   # Donchian low for exit
+            'atr':           float,   # N value for stop sizing
+            'stop_price':    float,   # entry - 2N (if currently entering)
+            'reason':        str,     # human-readable signal description
+        }
+    """
+    if system == 1:
+        entry_period, exit_period = 20, 10
+    elif system == 2:
+        entry_period, exit_period = 55, 20
+    else:
+        return None
+
+    donch = compute_donchian(bars, periods=(exit_period, entry_period))
+    if not donch:
+        return None
+    atr = compute_atr(bars, period=20)   # Turtle used 20-period ATR
+    if atr is None:
+        return None
+
+    current_close = donch["current_close"]
+    entry_high    = donch.get(f"high_{entry_period}")
+    exit_low      = donch.get(f"low_{exit_period}")
+    entry_signal  = current_close > entry_high if entry_high else False
+    exit_signal   = current_close < exit_low if exit_low else False
+
+    return {
+        "system":        system,
+        "entry_signal":  bool(entry_signal),
+        "exit_signal":   bool(exit_signal),
+        "entry_level":   entry_high,
+        "exit_level":    exit_low,
+        "atr":           atr,
+        "stop_price":    round(current_close - (2 * atr), 6) if entry_signal else None,
+        "reason": (
+            f"System {system} BREAKOUT — close ${current_close} > {entry_period}d high ${entry_high}"
+            if entry_signal else
+            f"System {system} BREAKDOWN — close ${current_close} < {exit_period}d low ${exit_low}"
+            if exit_signal else
+            f"System {system} no signal — close ${current_close}, "
+            f"{entry_period}d high ${entry_high}, {exit_period}d low ${exit_low}"
+        ),
+    }
+
+
+def compute_turtle_position_size(account_equity, atr, current_price, dollar_per_point=1.0):
+    """
+    Turtle position sizing: risk 1% of equity per trade.
+
+    Unit size = (1% × equity) / (2 × N × dollar_per_point)
+
+    For stocks/crypto, dollar_per_point = 1 (each $1 of price = $1 of P&L per share/coin).
+    For futures, dollar_per_point varies by contract.
+
+    Args:
+        account_equity: total wallet/account value in USD
+        atr: ATR/N value (volatility per bar in $)
+        current_price: entry price
+        dollar_per_point: P&L per $1 price move per unit (default 1.0 for spot)
+
+    Returns:
+        {
+            'units': float (number of shares/coins to buy),
+            'notional_usd': float (total dollar exposure),
+            'risk_usd': float (max loss if stop hits),
+            'risk_pct': float (% of equity at risk = always ~1%),
+        }
+    """
+    if account_equity <= 0 or atr <= 0 or current_price <= 0:
+        return None
+    risk_per_trade = account_equity * 0.01            # 1% of equity
+    risk_per_unit  = 2 * atr * dollar_per_point       # $ at risk per unit
+    if risk_per_unit <= 0:
+        return None
+    units = risk_per_trade / risk_per_unit
+    notional = units * current_price
+    return {
+        "units":        round(units, 6),
+        "notional_usd": round(notional, 2),
+        "risk_usd":     round(units * 2 * atr, 2),
+        "risk_pct":     round((units * 2 * atr) / account_equity * 100, 2),
+    }
+
+
 def compute_pivot_levels(prev_high, prev_low, prev_close):
     """
     Classic floor-trader pivot points.
