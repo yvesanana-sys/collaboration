@@ -738,6 +738,128 @@ def compute_crypto_indicators(bars: list) -> dict:
     }
 
 
+def enrich_with_turtle_context(symbol: str, ind: dict) -> dict:
+    """
+    Add Turtle Trading context to an indicators dict.
+
+    Computes daily-bar Donchian channels (20-day high, 10-day low, 55-day high, 20-day low)
+    and ATR for the symbol, then injects them into the indicator dict so the AI tactician
+    sees Turtle context alongside RSI/MACD/etc.
+
+    The AI's role in Turtle mode is QUALITY FILTERING, not exit timing:
+    - Score Turtle breakouts for "is this a clean trend or a choppy fakeout?"
+    - Hold mechanically — DO NOT vote on exits (Donchian/2N handles that)
+    - Annotate sentiment for the strategist's next review
+
+    Args:
+        symbol:  e.g. "BTCUSDT"
+        ind:     existing indicator dict (modified in place + returned)
+
+    Returns:
+        ind with new keys:
+            turtle_atr_daily        — ATR on daily bars (the canonical "N")
+            donchian_20d_high       — prior 20-day high (System 1 entry level)
+            donchian_55d_high       — prior 55-day high (System 2 entry level)
+            donchian_10d_low        — prior 10-day low (System 1 exit level)
+            donchian_20d_low        — prior 20-day low (System 2 exit level)
+            turtle_breakout_s1      — bool: close > 20-day high (System 1 entry)
+            turtle_breakout_s2      — bool: close > 55-day high (System 2 entry)
+            turtle_breakdown_s1     — bool: close < 10-day low (System 1 exit)
+            distance_to_breakout    — % distance from 20-day high (negative if below)
+            distance_to_breakdown   — % distance from 10-day low (positive if above)
+            turtle_setup_quality    — 0-100 score: "is this a clean trend?"
+            chop_warning            — bool: ATR contracting + price near range mid = avoid
+    """
+    if not ind:
+        return ind
+
+    try:
+        from projection_engine import compute_donchian, compute_atr
+        bars = get_daily_bars(symbol, days=80)
+        if not bars or len(bars) < 60:
+            ind["turtle_data_available"] = False
+            return ind
+
+        donch = compute_donchian(bars, periods=(10, 20, 55))
+        atr_daily = compute_atr(bars, period=20)
+        if not donch or atr_daily is None:
+            ind["turtle_data_available"] = False
+            return ind
+
+        close = donch["current_close"]
+        high_20 = donch.get("high_20")
+        high_55 = donch.get("high_55")
+        low_10  = donch.get("low_10")
+        low_20  = donch.get("low_20")
+
+        ind["turtle_data_available"] = True
+        ind["turtle_atr_daily"]      = atr_daily
+        ind["donchian_20d_high"]     = high_20
+        ind["donchian_55d_high"]     = high_55
+        ind["donchian_10d_low"]      = low_10
+        ind["donchian_20d_low"]      = low_20
+        ind["turtle_breakout_s1"]    = bool(donch.get("breakout_up_20"))
+        ind["turtle_breakout_s2"]    = bool(donch.get("breakout_up_55"))
+        ind["turtle_breakdown_s1"]   = bool(donch.get("breakdown_10"))
+        ind["turtle_breakdown_s2"]   = bool(donch.get("breakdown_20"))
+
+        # Distance metrics (for the AI's quality scoring)
+        if high_20 and high_20 > 0:
+            ind["distance_to_breakout_pct"] = round((close - high_20) / high_20 * 100, 2)
+        if low_10 and low_10 > 0:
+            ind["distance_to_breakdown_pct"] = round((close - low_10) / low_10 * 100, 2)
+
+        # ── Turtle Setup Quality Score (0-100) ──────────────
+        # Helps AI distinguish CLEAN breakouts from CHOPPY fakeouts.
+        # Higher = better Turtle entry. Lower = avoid (false breakout risk).
+        quality = 0
+        if ind["turtle_breakout_s1"]:
+            quality += 35   # Actual S1 breakout
+        elif ind["turtle_breakout_s2"]:
+            quality += 50   # S2 is rarer = stronger signal
+        # Volume confirmation (Turtle worked best with volume)
+        if ind.get("vol_ratio") and ind["vol_ratio"] >= 1.3:
+            quality += 25
+        # ATR expansion = trending market (vs contracting = chop)
+        # Compare current ATR to ATR 20 bars ago
+        if len(bars) >= 40:
+            old_atr = compute_atr(bars[-40:-20], period=20)
+            if old_atr and atr_daily > old_atr * 1.1:
+                quality += 20   # Volatility expanding = trend forming
+            elif old_atr and atr_daily < old_atr * 0.9:
+                quality -= 15   # Volatility contracting = range-bound, avoid
+        # MACD alignment with breakout direction
+        if ind.get("macd") and ind["macd"] > 0 and ind["turtle_breakout_s1"]:
+            quality += 10
+        # Price is well above 20-day MA (trend confirmation)
+        if ind.get("sma20") and close > ind["sma20"] * 1.05:
+            quality += 10
+
+        ind["turtle_setup_quality"] = max(0, min(100, quality))
+
+        # ── Chop Warning ────────────────────────────────────
+        # Range-bound markets generate fake breakouts that immediately reverse.
+        # Detect: ATR contracting + price hovering near mid of 20-day range.
+        if high_20 and low_20 and high_20 > low_20:
+            range_mid = (high_20 + low_20) / 2
+            range_size = high_20 - low_20
+            close_to_mid_pct = abs(close - range_mid) / range_size * 100
+            atr_contracting = False
+            if len(bars) >= 40:
+                old_atr = compute_atr(bars[-40:-20], period=20)
+                if old_atr:
+                    atr_contracting = atr_daily < old_atr * 0.9
+            ind["chop_warning"] = atr_contracting and close_to_mid_pct < 30
+        else:
+            ind["chop_warning"] = False
+
+    except Exception as e:
+        ind["turtle_data_available"] = False
+        ind["turtle_error"] = str(e)
+
+    return ind
+
+
 # ══════════════════════════════════════════════════════════════
 # CRYPTO PROJECTION ENGINE
 # Adapted from stock projection_engine.py for crypto volatility
@@ -863,6 +985,12 @@ def get_all_crypto_projections() -> dict:
         try:
             bars = get_crypto_bars(symbol, interval="1h", limit=168)
             ind  = compute_crypto_indicators(bars)
+            # Enrich with Turtle context (Donchian channels, daily ATR, setup quality)
+            # so the AI sees daily-bar breakout context alongside hourly indicators.
+            try:
+                ind = enrich_with_turtle_context(symbol, ind)
+            except Exception:
+                pass
             proj = get_crypto_projection(symbol, bars, ind)
             projections[symbol] = proj
         except Exception as e:

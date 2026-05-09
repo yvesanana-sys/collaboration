@@ -665,26 +665,78 @@ def execute_playbook(ai_name, cycle_context):
 
 
 def get_playbook_summary(ai_name):
-    """Compact plaintext playbook summary for tactician prompt injection."""
+    """Compact plaintext playbook summary for tactician prompt injection.
+    Turtle playbooks get expanded discipline instructions so the AI doesn't
+    override the mechanical system."""
     state = load_strategy(ai_name)
     strat = state.get("current_strategy", {})
     rules = strat.get("rules", {})
     ver   = strat.get("version", 0)
     name  = strat.get("name", "Default")
     since = (strat.get("active_since") or "")[:10]
+    strategy_type = strat.get("strategy_type", "classic")
+
     lines = [
-        f"STRATEGIST PLAYBOOK v{ver} — {name} (since {since})",
-        f"Entry: {rules.get('entry_logic', 'standard')}",
-        (f"Exit:  SL={rules.get('stop_loss_pct', 8)}% | "
-         f"TP={rules.get('take_profit_pct', 16)}% | "
-         f"Hold max {rules.get('max_hold_hours', 24)}h"),
-        (f"Size:  Max {rules.get('max_position_pct_of_pool', 25)}% pool | "
-         f"Max {rules.get('max_concurrent_positions', 2)} positions | "
-         f"Min conf {rules.get('min_confidence', 65)}%"),
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"PLAYBOOK v{ver} - {name}  ({strategy_type.upper()})",
+        f"   Active since: {since}",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
+
+    if strategy_type == "turtle":
+        lines.extend([
+            f"WARNING: TURTLE TREND-FOLLOWING ACTIVE. NOT SCALPING MODE.",
+            f"",
+            f"YOUR ROLE IN TURTLE MODE:",
+            f"  + SCORE entry quality on Donchian breakouts (clean trend vs choppy fakeout)",
+            f"  + ANNOTATE sentiment context for the strategist's next review",
+            f"  - DO NOT vote on exits - Donchian breakdown / 2N stop is automatic",
+            f"  - DO NOT take profit early - winners must run to the Donchian exit",
+            f"  - DO NOT skip valid breakouts because RSI is high - that's how Turtle catches trends",
+            f"  - DO NOT panic on intraday RSI/MACD reversal - daily Donchian is the only exit signal",
+            f"",
+            f"ENTRY RULES (mechanical):",
+            f"  - Daily close > 20-day Donchian high -> System 1 entry signal",
+            f"  - Daily close > 55-day Donchian high -> System 2 entry signal (rarer, stronger)",
+            f"  - Skip on macro down-days (BTC -3% / SPY -2%)",
+            f"  - Risk EXACTLY 1% of equity per trade",
+            f"",
+            f"EXIT RULES (mechanical, automatic):",
+            f"  - Daily close < 10-day Donchian low (System 1) -> exit",
+            f"  - Hard stop at entry - (2 x ATR) -> exit",
+            f"  - Whichever fires first. No discretion.",
+            f"",
+            f"WHEN ASSESSING A POSSIBLE ENTRY:",
+            f"  Look at turtle_setup_quality (0-100) and chop_warning flag.",
+            f"  HIGH QUALITY (>70) + breakout = take it.",
+            f"  CHOP WARNING = skip (likely fakeout in range-bound market).",
+            f"  distance_to_breakout_pct - small positive = fresh breakout, ideal.",
+            f"",
+            f"EXPECTED LOSS RATE: 60-70%. THIS IS NORMAL FOR TURTLE.",
+            f"Profitability comes from a few large winners (4-8N) covering many small losers (2N).",
+            f"DO NOT change the system after losing streaks. Mechanical discipline IS the edge.",
+        ])
+    else:
+        lines.extend([
+            f"Entry: {rules.get('entry_logic', 'standard')}",
+            (f"Exit:  SL={rules.get('stop_loss_pct', 8)}% | "
+             f"TP={rules.get('take_profit_pct', 16)}% | "
+             f"Hold max {rules.get('max_hold_hours', 24)}h"),
+            (f"Size:  Max {rules.get('max_position_pct_of_pool', 25)}% pool | "
+             f"Max {rules.get('max_concurrent_positions', 2)} positions | "
+             f"Min conf {rules.get('min_confidence', 65)}%"),
+        ])
+
     notes = rules.get("tactician_notes", "")
     if notes:
-        lines.append(f"Coach: {notes[:200]}")
+        lines.append(f"")
+        lines.append(f"STRATEGIST COACHING:")
+        if strategy_type == "turtle":
+            lines.append(notes)
+        else:
+            lines.append(notes[:250] + ("..." if len(notes) > 250 else ""))
+
+    lines.append(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 
 
