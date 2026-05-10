@@ -1701,14 +1701,16 @@ def get_trail_pct(symbol):
         return RULES["exit_B_trail_stable"]     # 3% for stable
     return RULES["exit_B_trail_default"]        # 5% default
 
-def assign_exit_strategy(symbol, strategy, entry_price, confidence=80, rationale=""):
+def assign_exit_strategy(symbol, strategy, entry_price, confidence=80, rationale="",
+                          atr_at_entry=None, donchian_high=None, system=1):
     """
     Assign exit strategy to a position when it's opened.
     Strategy A = fixed take-profit (fast trades, news-driven)
     Strategy B = trailing stop (momentum/trend plays, let winners run)
+    Strategy T = Turtle (ATR-based stop at entry-2N, exit on N-day Donchian breakdown)
     """
     trail_pct = get_trail_pct(symbol)
-    shared_state["position_exits"][symbol] = {
+    cfg = {
         "strategy":    strategy,
         "entry_price": entry_price,
         "peak_price":  entry_price,   # Tracks highest price seen
@@ -1717,10 +1719,165 @@ def assign_exit_strategy(symbol, strategy, entry_price, confidence=80, rationale
         "confidence":  confidence,
         "rationale":   rationale[:100],
     }
-    if strategy == "A":
+    if strategy == "T":
+        # Turtle: ATR-based stop, Donchian exit
+        cfg["atr_at_entry"]  = atr_at_entry
+        cfg["donchian_high"] = donchian_high
+        cfg["turtle_system"] = system
+        if atr_at_entry:
+            stop_price = round(entry_price - (2 * atr_at_entry), 4)
+            cfg["stop_price_abs"] = stop_price
+            stop_pct_implied = (entry_price - stop_price) / entry_price
+            cfg["stop_pct_implied"] = stop_pct_implied
+            log(f"🐢 {symbol} exit strategy: T (Turtle System {system}) — "
+                f"2N stop ${stop_price} ({stop_pct_implied*100:.1f}%), "
+                f"exit on {10 if system==1 else 20}-day low — {rationale[:50]}")
+        else:
+            log(f"🐢 {symbol} exit strategy: T (Turtle, ATR missing — falling back to 5% stop)")
+    elif strategy == "A":
         log(f"📋 {symbol} exit strategy: A (fixed {RULES['exit_A_take_profit']*100:.0f}% TP) — {rationale[:60]}")
     else:
         log(f"📋 {symbol} exit strategy: B (trailing {trail_pct*100:.0f}% stop, {RULES['exit_B_time_stop_days']}d time) — {rationale[:60]}")
+    shared_state["position_exits"][symbol] = cfg
+
+def stock_turtle_check_entry(symbol: str, system: int = 1) -> dict:
+    """
+    Check if a stock meets Turtle entry criteria right now.
+    Returns: {eligible, system, entry_price, donchian_high, atr, stop_price, reason}
+
+    Uses daily bars from Alpaca (60 days for System 1, 120 for System 2).
+    """
+    try:
+        from projection_engine import compute_turtle_signal
+    except ImportError:
+        return {"eligible": False, "reason": "projection_engine unavailable"}
+
+    days_needed = 60 if system == 1 else 120
+    try:
+        bars = get_bars(symbol, days=days_needed)
+    except Exception as e:
+        return {"eligible": False, "reason": f"alpaca bars error: {e}"}
+
+    if not bars or len(bars) < (25 if system == 1 else 60):
+        return {"eligible": False, "reason": f"insufficient daily bars ({len(bars or [])})"}
+
+    # Normalize to consistent schema
+    norm_bars = []
+    for b in bars:
+        norm_bars.append({
+            "t": b.get("t") or b.get("timestamp") or 0,
+            "o": float(b.get("o") or b.get("open") or 0),
+            "h": float(b.get("h") or b.get("high") or 0),
+            "l": float(b.get("l") or b.get("low") or 0),
+            "c": float(b.get("c") or b.get("close") or 0),
+            "v": float(b.get("v") or b.get("volume") or 0),
+        })
+
+    sig = compute_turtle_signal(norm_bars, system=system)
+    if not sig:
+        return {"eligible": False, "reason": "signal computation failed"}
+
+    return {
+        "eligible":      sig["entry_signal"],
+        "system":        system,
+        "entry_price":   norm_bars[-1]["c"],
+        "donchian_high": sig["entry_level"],
+        "atr":           sig["atr"],
+        "stop_price":    sig["stop_price"],
+        "reason":        sig["reason"],
+    }
+
+
+def stock_turtle_check_exit(symbol: str, system: int = 1) -> dict:
+    """
+    Check if open stock Turtle position should exit on Donchian breakdown.
+    Returns: {should_exit, exit_type, current_price, donchian_low, reason}
+    """
+    try:
+        from projection_engine import compute_donchian
+    except ImportError:
+        return {"should_exit": False, "reason": "projection_engine unavailable"}
+
+    try:
+        bars = get_bars(symbol, days=30)
+    except Exception:
+        return {"should_exit": False, "reason": "no bars"}
+
+    if not bars:
+        return {"should_exit": False, "reason": "no bars"}
+
+    norm_bars = []
+    for b in bars:
+        norm_bars.append({
+            "t": b.get("t") or b.get("timestamp") or 0,
+            "o": float(b.get("o") or b.get("open") or 0),
+            "h": float(b.get("h") or b.get("high") or 0),
+            "l": float(b.get("l") or b.get("low") or 0),
+            "c": float(b.get("c") or b.get("close") or 0),
+            "v": float(b.get("v") or b.get("volume") or 0),
+        })
+
+    current_price = norm_bars[-1]["c"]
+    exit_period   = 10 if system == 1 else 20
+    donch         = compute_donchian(norm_bars, periods=(exit_period,))
+    donchian_low  = (donch or {}).get(f"low_{exit_period}")
+
+    if donchian_low and current_price < donchian_low:
+        return {
+            "should_exit":   True,
+            "exit_type":     "donchian",
+            "current_price": current_price,
+            "donchian_low":  donchian_low,
+            "reason":        f"Stock Turtle exit: ${current_price:.2f} < {exit_period}-day low ${donchian_low:.2f}",
+        }
+    return {
+        "should_exit":   False,
+        "exit_type":     "none",
+        "current_price": current_price,
+        "donchian_low":  donchian_low,
+        "reason":        f"holding — close ${current_price:.2f} above {exit_period}-day low ${donchian_low or 0:.2f}",
+    }
+
+
+def stock_turtle_position_size(account_equity: float, atr: float, current_price: float,
+                                risk_pct: float = 1.0) -> dict:
+    """
+    Turtle stock sizing: 1% risk / (2 × ATR per share).
+    Returns: {shares, notional_usd, risk_usd, risk_pct}
+    """
+    try:
+        from projection_engine import compute_turtle_position_size
+        result = compute_turtle_position_size(account_equity, atr, current_price, dollar_per_point=1.0)
+        if not result:
+            return None
+        if risk_pct != 1.0:
+            scale = risk_pct / 1.0
+            result["units"]        = round(result["units"] * scale, 2)
+            result["notional_usd"] = round(result["notional_usd"] * scale, 2)
+            result["risk_usd"]     = round(result["risk_usd"] * scale, 2)
+            result["risk_pct"]     = round(result["risk_pct"] * scale, 2)
+        # Round shares to whole number for stocks
+        result["shares"] = max(1, int(result["units"]))
+        result["notional_usd"] = round(result["shares"] * current_price, 2)
+        result["risk_usd"]     = round(result["shares"] * 2 * atr, 2)
+        return result
+    except Exception:
+        return None
+
+
+def is_turtle_active_for_stocks() -> bool:
+    """Check if either AI's playbook is currently in Turtle mode."""
+    if not HAVE_STRATEGIC_BRAIN or not strategic_brain:
+        return False
+    try:
+        for ai in ("claude", "grok"):
+            state = strategic_brain.load_strategy(ai)
+            if state.get("current_strategy", {}).get("strategy_type") == "turtle":
+                return True
+    except Exception:
+        pass
+    return False
+
 
 def decide_exit_strategy_solo(symbol, trade_data, bars, ind):
     """
@@ -1937,7 +2094,71 @@ def check_exit_conditions(positions):
         entry_date  = exit_cfg.get("entry_date", today)
         trail_pct   = exit_cfg.get("trail_pct", RULES["exit_B_trail_default"])
 
-        # ── UNIVERSAL: Hard stop-loss (both strategies) ───────
+        # ── TURTLE Strategy T: ATR-based stop + Donchian exit ──
+        if strategy == "T":
+            stop_price_abs = exit_cfg.get("stop_price_abs")
+            t_system       = exit_cfg.get("turtle_system", 1)
+            stop_hit = stop_price_abs and current_price <= stop_price_abs
+            if stop_hit:
+                stop_pct_implied = exit_cfg.get("stop_pct_implied", 0)
+                log(f"🛑 [{owner}] TURTLE 2N STOP {symbol} (${current_price:.2f} <= ${stop_price_abs:.2f}, "
+                    f"{pnl_pct*100:.1f}%)")
+                if smart_sell(symbol, "turtle 2N stop", pos):
+                    record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                                 float(pos.get("market_value", 0)), owner.lower(),
+                                 reason="turtle 2N atr stop", pnl_usd=pnl_usd,
+                                 pnl_pct=pnl_pct, strategy="T",
+                                 entry_price=entry_price)
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+                    shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
+                    shared_state["consecutive_wins"]   = 0
+                    shared_state["stops_fired_today"]  = shared_state.get("stops_fired_today", 0) + 1
+                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                        try:
+                            strategic_brain.handle_stop_loss_event(
+                                owner.lower(), symbol, pnl_pct * 100,
+                                shared_state["stops_fired_today"],
+                                shared_state["consecutive_losses"],
+                            )
+                        except Exception:
+                            pass
+                continue
+            # Donchian breakdown exit (the actual Turtle "take profit")
+            try:
+                t_exit = stock_turtle_check_exit(symbol, system=t_system)
+                if t_exit.get("should_exit"):
+                    log(f"🐢 [{owner}] TURTLE DONCHIAN EXIT {symbol} ({pnl_pct*100:+.1f}%) — {t_exit['reason']}")
+                    if smart_sell(symbol, "turtle donchian breakdown", pos):
+                        action_type = "take_profit" if pnl_usd > 0 else "stop_loss"
+                        record_trade(action_type, symbol, pos.get("qty"), current_price,
+                                     float(pos.get("market_value", 0)), owner.lower(),
+                                     reason=t_exit["reason"], pnl_usd=pnl_usd,
+                                     pnl_pct=pnl_pct, strategy="T",
+                                     entry_price=entry_price)
+                        shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                        shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                        shared_state["position_exits"].pop(symbol, None)
+                        if pnl_usd > 0:
+                            shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
+                            shared_state["consecutive_losses"] = 0
+                        else:
+                            shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
+                            shared_state["consecutive_wins"]   = 0
+                        if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                            try:
+                                strategic_brain.record_trade_result(owner.lower(), won=(pnl_usd > 0), pnl_pct=pnl_pct * 100)
+                            except Exception:
+                                pass
+                    continue
+            except Exception as e:
+                log(f"   ⚠️ Turtle exit check error for {symbol}: {e}")
+            # Turtle: no fixed TP, no time stop. Continue holding.
+            log(f"   🐢 [T] {symbol}: holding — ${current_price:.2f} above {10 if t_system==1 else 20}d Donchian low")
+            continue
+
+        # ── UNIVERSAL: Hard stop-loss (Strategy A + B) ────────
         if pnl_pct <= -RULES["exit_A_stop_loss"]:
             log(f"🛑 [{owner}] STOP LOSS {symbol} ({pnl_pct*100:.1f}%) strategy={strategy}")
             if smart_sell(symbol, "stop loss", pos):
@@ -2659,8 +2880,32 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                         strat, rationale = decide_exit_strategy_solo(
                             symbol, trade, bars, ind
                         )
-                    assign_exit_strategy(symbol, strat, entry_px,
-                                        trade.get("confidence", 80), rationale)
+                    # ── Turtle override: if playbook is Turtle, only enter on Donchian breakout ──
+                    turtle_meta = None
+                    if is_turtle_active_for_stocks():
+                        try:
+                            t_check = stock_turtle_check_entry(symbol, system=1)
+                            if t_check.get("eligible"):
+                                strat = "T"
+                                rationale = f"Turtle System 1 breakout — {t_check.get('reason','')[:60]}"
+                                turtle_meta = t_check
+                                log(f"🐢 {symbol}: Turtle entry confirmed — ATR={t_check['atr']}, "
+                                    f"stop=${t_check['stop_price']:.2f}")
+                            else:
+                                # Turtle is active but this entry isn't a breakout — skip Turtle and fall through
+                                log(f"🐢 {symbol}: Turtle active but not at 20d breakout — using {strat} fallback")
+                        except Exception as te:
+                            log(f"   ⚠️ Turtle check error for {symbol}: {te}")
+
+                    if strat == "T" and turtle_meta:
+                        assign_exit_strategy(symbol, "T", entry_px,
+                                            trade.get("confidence", 80), rationale,
+                                            atr_at_entry=turtle_meta.get("atr"),
+                                            donchian_high=turtle_meta.get("donchian_high"),
+                                            system=1)
+                    else:
+                        assign_exit_strategy(symbol, strat, entry_px,
+                                            trade.get("confidence", 80), rationale)
                 except Exception as ex:
                     log(f"⚠️ Exit strategy assign failed: {ex} — defaulting to A")
                     assign_exit_strategy(symbol, "A", notional/10, 80, "default")
@@ -4486,7 +4731,60 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
 
         sold = False
 
-        # ── UNIVERSAL: Hard stop-loss ─────────────────────────
+        # ── TURTLE Strategy T: ATR-based stop + Donchian exit ──
+        if strategy == "T":
+            stop_price_abs = strategy_cfg.get("stop_price_abs")
+            t_system       = strategy_cfg.get("turtle_system", 1)
+            owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+            if stop_price_abs and current_price <= stop_price_abs:
+                log(f"🛑 AUTO TURTLE 2N STOP {symbol} (${current_price:.2f} <= ${stop_price_abs:.2f}) — bot executing")
+                if smart_sell(symbol, "autonomous turtle 2N stop", pos):
+                    record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                                 pos_value, owner, reason="autonomous turtle 2N stop",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="T",
+                                 entry_price=entry_price)
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+                    shared_state["sleeping_strategies"].pop(symbol, None)
+                    shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
+                    shared_state["consecutive_wins"]   = 0
+                    shared_state["stops_fired_today"]  = shared_state.get("stops_fired_today", 0) + 1
+                    sold = True
+            if not sold:
+                try:
+                    t_exit = stock_turtle_check_exit(symbol, system=t_system)
+                    if t_exit.get("should_exit"):
+                        log(f"🐢 AUTO TURTLE DONCHIAN EXIT {symbol} ({pnl_pct*100:+.1f}%) — {t_exit['reason']}")
+                        if smart_sell(symbol, "autonomous turtle donchian", pos):
+                            action_type = "take_profit" if pnl_usd > 0 else "stop_loss"
+                            record_trade(action_type, symbol, pos.get("qty"), current_price,
+                                         pos_value, owner, reason=t_exit["reason"],
+                                         pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="T",
+                                         entry_price=entry_price)
+                            shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                            shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                            shared_state["position_exits"].pop(symbol, None)
+                            shared_state["sleeping_strategies"].pop(symbol, None)
+                            if pnl_usd > 0:
+                                shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
+                                shared_state["consecutive_losses"] = 0
+                            else:
+                                shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
+                                shared_state["consecutive_wins"]   = 0
+                            if HAVE_STRATEGIC_BRAIN and strategic_brain:
+                                try:
+                                    strategic_brain.record_trade_result(owner, won=(pnl_usd > 0), pnl_pct=pnl_pct * 100)
+                                except Exception:
+                                    pass
+                            sold = True
+                except Exception as e:
+                    log(f"   ⚠️ Auto turtle exit error for {symbol}: {e}")
+            if not sold:
+                log(f"   🐢 AUTO [T] {symbol}: holding — Turtle Donchian still intact")
+            continue
+
+        # ── UNIVERSAL: Hard stop-loss (Strategy A + B) ────────
         if pnl_pct <= -RULES["exit_A_stop_loss"]:
             log(f"🛑 AUTO STOP-LOSS {symbol} {pnl_pct*100:.1f}% — bot executing (AIs sleeping)")
             if smart_sell(symbol, "autonomous stop-loss", pos):

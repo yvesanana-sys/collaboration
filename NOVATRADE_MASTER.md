@@ -614,7 +614,7 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 
 **Status:** ✅ All 4 files compile, smoke-tested. Default playbook for both AIs on next boot will be Turtle System 1.
 
-**Next iteration**: Stock-side Turtle entries (currently strategic_brain ships Turtle for both, but stock entry logic in `bot_with_proxy.py` still uses Strategy A/B fixed-percentage exits). Adding `Strategy T` for Turtle stocks is the logical next step.
+**Stock-side Turtle ADDED in v3.1.5 (2026-05-10):** `bot_with_proxy.py` now has `stock_turtle_check_entry()`, `stock_turtle_check_exit()`, `stock_turtle_position_size()`, `is_turtle_active_for_stocks()` helpers. New Strategy "T" supported alongside A and B in both AI-awake and autonomous exit monitors. When Turtle is active in the playbook, stock entries auto-detect 20-day Donchian breakouts and apply 2N ATR stops. Donchian breakdown (10-day low) triggers exit. No fixed TP, no time stop — pure trend-following.
 
 ---
 
