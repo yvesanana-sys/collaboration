@@ -809,13 +809,78 @@ setInterval(fetchAll,30000);
     </div>
 
     <!-- Chart canvas area -->
-    <div style="flex:1;display:flex;flex-direction:column;padding:10px;min-height:0;">
-      <div style="flex:1;position:relative;min-height:0;">
+    <div style="flex:1;display:flex;flex-direction:column;padding:10px;min-height:0;overflow-y:auto;">
+      <div style="flex:1;position:relative;min-height:280px;">
         <canvas id="price-chart"></canvas>
       </div>
       <!-- Legend / position info -->
       <div id="chart-position-info" style="margin-top:8px;padding:8px 10px;background:var(--bg3);border-radius:3px;font-size:9px;color:var(--muted2);display:none;"></div>
       <div id="chart-trades-summary" style="margin-top:5px;font-size:8px;color:var(--muted);"></div>
+
+      <!-- ═══ BAR STRUCTURE PANEL ═══ -->
+      <div id="bar-structure-panel" style="margin-top:10px;padding:10px;background:var(--bg3);border-radius:4px;border:1px solid var(--border2);display:none;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <div style="font-size:10px;font-weight:700;color:#fff;letter-spacing:0.07em;text-transform:uppercase;">📊 Bar Structure (Last 10 Daily Bars)</div>
+          <div id="bs-trend-label" style="font-size:9px;font-weight:700;color:var(--teal);">—</div>
+        </div>
+
+        <!-- Color legend -->
+        <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:7px;color:var(--muted2);margin-bottom:8px;">
+          <span><span style="display:inline-block;width:8px;height:8px;background:var(--green);border-radius:1px;margin-right:3px;vertical-align:middle"></span>Wide-Range Up</span>
+          <span><span style="display:inline-block;width:8px;height:8px;background:var(--red);border-radius:1px;margin-right:3px;vertical-align:middle"></span>Wide-Range Down</span>
+          <span><span style="display:inline-block;width:8px;height:8px;background:var(--muted);border-radius:1px;margin-right:3px;vertical-align:middle"></span>Narrow-Range</span>
+          <span><span style="display:inline-block;width:8px;height:8px;background:var(--blue);border-radius:1px;margin-right:3px;vertical-align:middle"></span>Inside Bar</span>
+          <span><span style="display:inline-block;width:8px;height:8px;background:var(--orange);border-radius:1px;margin-right:3px;vertical-align:middle"></span>Outside Bar</span>
+          <span><span style="display:inline-block;width:8px;height:8px;background:var(--purple);border-radius:1px;margin-right:3px;vertical-align:middle"></span>Gap</span>
+        </div>
+
+        <!-- Bar visualization row -->
+        <div id="bs-bars" style="display:flex;gap:4px;align-items:flex-end;height:80px;margin-bottom:8px;"></div>
+
+        <!-- Trend & metric strip -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px;font-size:8px;margin-bottom:6px;">
+          <div style="background:var(--bg2);padding:5px 7px;border-radius:3px;">
+            <div style="color:var(--muted);font-size:7px;text-transform:uppercase;">HH/HL</div>
+            <div id="bs-hh-hl" style="font-weight:700;color:#fff;font-size:11px;">—</div>
+          </div>
+          <div style="background:var(--bg2);padding:5px 7px;border-radius:3px;">
+            <div style="color:var(--muted);font-size:7px;text-transform:uppercase;">LH/LL</div>
+            <div id="bs-lh-ll" style="font-weight:700;color:#fff;font-size:11px;">—</div>
+          </div>
+          <div style="background:var(--bg2);padding:5px 7px;border-radius:3px;">
+            <div style="color:var(--muted);font-size:7px;text-transform:uppercase;">Compression</div>
+            <div id="bs-compression" style="font-weight:700;color:#fff;font-size:11px;">—</div>
+          </div>
+          <div style="background:var(--bg2);padding:5px 7px;border-radius:3px;">
+            <div style="color:var(--muted);font-size:7px;text-transform:uppercase;">Expansion</div>
+            <div id="bs-expansion" style="font-weight:700;color:#fff;font-size:11px;">—</div>
+          </div>
+        </div>
+
+        <!-- Donchian levels strip -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px;font-size:8px;">
+          <div style="background:var(--bg2);padding:5px 7px;border-radius:3px;">
+            <div style="color:var(--muted);font-size:7px;text-transform:uppercase;">20d High</div>
+            <div id="bs-d20h" style="font-weight:700;color:var(--green);font-size:10px;">—</div>
+          </div>
+          <div style="background:var(--bg2);padding:5px 7px;border-radius:3px;">
+            <div style="color:var(--muted);font-size:7px;text-transform:uppercase;">10d Low</div>
+            <div id="bs-d10l" style="font-weight:700;color:var(--red);font-size:10px;">—</div>
+          </div>
+          <div style="background:var(--bg2);padding:5px 7px;border-radius:3px;">
+            <div style="color:var(--muted);font-size:7px;text-transform:uppercase;">55d High</div>
+            <div id="bs-d55h" style="font-weight:700;color:var(--green);font-size:10px;">—</div>
+          </div>
+          <div style="background:var(--bg2);padding:5px 7px;border-radius:3px;">
+            <div style="color:var(--muted);font-size:7px;text-transform:uppercase;">ATR (N)</div>
+            <div id="bs-atr" style="font-weight:700;color:var(--teal);font-size:10px;">—</div>
+          </div>
+        </div>
+
+        <!-- Pattern summary footer -->
+        <div id="bs-summary" style="margin-top:6px;font-size:8px;color:var(--muted2);"></div>
+      </div>
+      <!-- ═══ END BAR STRUCTURE PANEL ═══ -->
     </div>
   </div>
 </div>
@@ -858,6 +923,9 @@ function closeChart(){
       if(existing) existing.destroy();
     }
   } catch(e) {}
+  // Hide bar structure panel so old data doesn't flash on next open
+  const bsPanel = document.getElementById('bar-structure-panel');
+  if(bsPanel) bsPanel.style.display = 'none';
   _chartSymbol = "";
 }
 
@@ -877,8 +945,124 @@ async function loadChart(){
       return;
     }
     renderPriceChart(data);
+    // Also load bar structure (separate fetch since it needs daily bars regardless of interval)
+    loadBarStructure(_chartSymbol);
   } catch(e) {
     document.getElementById('chart-trades-summary').textContent = 'Error: ' + e.message;
+  }
+}
+
+async function loadBarStructure(symbol){
+  const panel = document.getElementById('bar-structure-panel');
+  if(!panel) return;
+  try {
+    const data = await apiFetch(`/bar_structure?symbol=${symbol}&days=80`);
+    if(!data || data.error){
+      panel.style.display = 'none';
+      return;
+    }
+    renderBarStructure(data);
+    panel.style.display = '';
+  } catch(e) {
+    panel.style.display = 'none';
+  }
+}
+
+function renderBarStructure(data){
+  const isCrypto = data.asset_class === 'crypto';
+  const fmt = (n) => {
+    if(n == null) return '—';
+    return isCrypto && n < 1 ? n.toFixed(6) : '$' + Number(n).toFixed(2);
+  };
+
+  // Color map for bar types
+  const typeColors = {
+    'wide_range_up':       'var(--green)',
+    'wide_range_down':     'var(--red)',
+    'wide_range_indecisive': '#888',
+    'narrow_range':        'var(--muted)',
+    'inside_bar':          'var(--blue)',
+    'outside_bar':         'var(--orange)',
+    'gap_up':              'var(--purple)',
+    'gap_down':            'var(--purple)',
+    'doji':                '#aaa',
+    'normal':              '#555',
+  };
+
+  // Trend label
+  const trend = data.trend_structure || {};
+  const tlEl = document.getElementById('bs-trend-label');
+  if(tlEl){
+    const label = trend.label || '—';
+    tlEl.textContent = label.toUpperCase();
+    tlEl.style.color = label.includes('up') ? 'var(--green)' :
+                       label.includes('down') ? 'var(--red)' : 'var(--amber)';
+  }
+
+  // Trend metrics
+  const setT = (id, v, color) => {
+    const e = document.getElementById(id);
+    if(e){ e.textContent = v; if(color) e.style.color = color; }
+  };
+  setT('bs-hh-hl', `${trend.higher_highs||0}/${trend.higher_lows||0}`);
+  setT('bs-lh-ll', `${trend.lower_highs||0}/${trend.lower_lows||0}`);
+  setT('bs-compression',
+       data.compression ? '✓ YES' : '— No',
+       data.compression ? 'var(--amber)' : 'var(--muted)');
+  setT('bs-expansion',
+       data.expansion ? '✓ YES' : '— No',
+       data.expansion ? 'var(--green)' : 'var(--muted)');
+
+  // Donchian levels
+  const donch = data.donchian || {};
+  setT('bs-d20h', fmt(donch.high_20));
+  setT('bs-d10l', fmt(donch.low_10));
+  setT('bs-d55h', fmt(donch.high_55));
+  setT('bs-atr', fmt(data.atr));
+
+  // Bar visualization — colored boxes representing last 10 bars
+  const barsEl = document.getElementById('bs-bars');
+  if(barsEl){
+    const bars = data.recent_bars || [];
+    if(!bars.length){
+      barsEl.innerHTML = '<div style="color:var(--muted);font-size:9px">No bars classified</div>';
+    } else {
+      // Find max range_atr for proportional sizing
+      const maxRange = Math.max(...bars.map(b => b.range_atr || 0), 1);
+      let html = '';
+      for(const b of bars){
+        const color = typeColors[b.type] || '#666';
+        const heightPct = b.range_atr ? Math.min(100, (b.range_atr / maxRange) * 100) : 30;
+        const height = Math.max(15, heightPct * 0.7);  // Range -> height in px
+        const closePos = (b.close_position || 0.5) * 100;
+        const dirArrow = b.direction === 'up' ? '▲' : b.direction === 'down' ? '▼' : '·';
+        const tooltip = `${b.type}\nRange: ${b.range_atr || '?'}× ATR\nClose pos: ${(b.close_position || 0).toFixed(2)}\nDir: ${b.direction}`;
+        html += `
+          <div title="${tooltip}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:2px;cursor:help;">
+            <div style="font-size:8px;color:${color};line-height:1;">${dirArrow}</div>
+            <div style="width:100%;height:${height}px;background:${color};border-radius:2px;position:relative;opacity:0.85;">
+              <div style="position:absolute;left:0;right:0;top:${100-closePos}%;height:1px;background:rgba(255,255,255,0.7);"></div>
+            </div>
+            <div style="font-size:6px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;line-height:1;">${b.type.split('_')[0]}</div>
+          </div>
+        `;
+      }
+      barsEl.innerHTML = html;
+    }
+  }
+
+  // Pattern summary footer
+  const sumEl = document.getElementById('bs-summary');
+  if(sumEl){
+    const ps = data.pattern_summary || {};
+    const items = Object.entries(ps).map(([k,v]) => `${k.replace(/_/g,' ')}: ${v}`).join(' · ');
+    let interpretation = '';
+    if(data.compression){
+      interpretation = ' 🔵 COMPRESSION detected — breakout setup forming';
+    } else if(data.expansion){
+      interpretation = ' 🟢 EXPANSION — volatility surge in latest bar';
+    }
+    sumEl.innerHTML = `Last 10 bars: ${items}.${interpretation}`;
   }
 }
 

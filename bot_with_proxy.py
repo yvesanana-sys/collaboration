@@ -1352,6 +1352,85 @@ def bars_endpoint():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/bar_structure")
+def bar_structure_endpoint():
+    """
+    Bar structure classification for chart dashboard panel.
+    Returns last 10 daily bars classified into 6 structural types
+    plus trend label, compression/expansion flags.
+
+    Query params:
+      ?symbol=BTCUSDT or AAPL  — required
+      ?days=60                 — bars to fetch (default 60)
+
+    Used by the dashboard 'Bar Structure' panel for visual price action context.
+    """
+    try:
+        symbol = (request.args.get("symbol") or "").upper().strip()
+        days   = max(30, min(int(request.args.get("days", 60)), 200))
+        if not symbol:
+            return jsonify({"error": "symbol required"}), 400
+
+        # Auto-detect asset class
+        is_crypto = "USDT" in symbol or "USDC" in symbol
+
+        bars = []
+        if is_crypto:
+            try:
+                kl = binance_crypto.binance_get("/api/v3/klines", {
+                    "symbol": symbol, "interval": "1d", "limit": days,
+                }) or []
+                for k in kl:
+                    bars.append({"t": int(k[0]), "o": float(k[1]), "h": float(k[2]),
+                                 "l": float(k[3]), "c": float(k[4]), "v": float(k[5])})
+            except Exception as e:
+                return jsonify({"error": f"binance fetch failed: {e}"}), 502
+        else:
+            try:
+                raw = get_bars(symbol, days=days)
+                for b in (raw or []):
+                    bars.append({
+                        "t": b.get("t") or b.get("timestamp") or 0,
+                        "o": float(b.get("o") or b.get("open") or 0),
+                        "h": float(b.get("h") or b.get("high") or 0),
+                        "l": float(b.get("l") or b.get("low") or 0),
+                        "c": float(b.get("c") or b.get("close") or 0),
+                        "v": float(b.get("v") or b.get("volume") or 0),
+                    })
+            except Exception as e:
+                return jsonify({"error": f"alpaca fetch failed: {e}"}), 502
+
+        if not bars:
+            return jsonify({"error": "no bars available"}), 404
+
+        try:
+            from projection_engine import classify_bars, compute_donchian, compute_atr
+            classification = classify_bars(bars, atr_period=20)
+            if not classification:
+                return jsonify({"error": "insufficient bars for classification"}), 400
+
+            atr = compute_atr(bars, period=20)
+            donch = compute_donchian(bars, periods=(10, 20, 55))
+
+            return jsonify({
+                "symbol":       symbol,
+                "asset_class":  "crypto" if is_crypto else "stock",
+                "bars_count":   len(bars),
+                "atr":          atr,
+                "donchian":     donch,
+                "recent_bars":  classification["recent_bars"],
+                "last_bar":     classification["last_bar"],
+                "pattern_summary": classification["pattern_summary"],
+                "trend_structure": classification["trend_structure"],
+                "compression":  classification["compression"],
+                "expansion":    classification["expansion"],
+            })
+        except Exception as e:
+            return jsonify({"error": f"classification failed: {e}"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/prompt_memory")
 def prompt_memory_endpoint():
     """
