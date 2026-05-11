@@ -4039,6 +4039,45 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                     self._log(f"   🥊 {owner.title()} sizing {sym} to ${notional:.2f} "
                               f"(pool cap)")
 
+            # ── TURTLE ENTRY GATE (crypto) ──────────────────────
+            # If THIS AI's playbook is Turtle, the only valid entry is a
+            # daily Donchian breakout. Reject otherwise. This is the hard
+            # gate — runs BEFORE any sell-to-fund or order placement so we
+            # never liquidate a holding to fund a doomed trade.
+            turtle_pre_entry = None
+            _playbook_is_turtle = False
+            try:
+                import strategic_brain as _sb_gate
+                _ai_for_gate = owner if owner in ("claude", "grok") else "claude"
+                _ps_gate     = _sb_gate.load_strategy(_ai_for_gate)
+                _cs_gate     = _ps_gate.get("current_strategy", {}) or {}
+                _playbook_is_turtle = (_cs_gate.get("strategy_type") == "turtle")
+            except Exception as _pb_err:
+                # Can't even load the playbook — fail OPEN (don't block trading
+                # because state file is missing on first deploy).
+                self._log(f"   ⚠️ Turtle gate: couldn't load playbook for {sym}: {_pb_err} — fail-open")
+                _playbook_is_turtle = False
+
+            if _playbook_is_turtle:
+                try:
+                    _entry_period = (_cs_gate.get("rules", {}) or {}).get("entry_donchian_period", 20)
+                    _t_system     = 2 if _entry_period > 30 else 1
+                    turtle_pre_entry = turtle_check_entry(sym, system=_t_system)
+                    if not turtle_pre_entry.get("eligible"):
+                        self._log(f"   🐢 GATE REJECT {sym}: Turtle active ({_ai_for_gate}), "
+                                  f"no {_entry_period}d breakout — "
+                                  f"{turtle_pre_entry.get('reason','')[:90]}")
+                        continue
+                    self._log(f"   🐢 GATE PASS {sym}: Turtle System {_t_system} breakout — "
+                              f"ATR=${turtle_pre_entry.get('atr',0):.4f}, "
+                              f"2N stop=${turtle_pre_entry.get('stop_price',0):.4f}")
+                except Exception as _tge:
+                    # Playbook IS Turtle and the signal check errored — fail
+                    # CLOSED. Better to miss a trade than to silently buy a
+                    # non-breakout under a Turtle playbook.
+                    self._log(f"   🐢 GATE ERROR {sym}: {_tge} — skipping (fail-closed)")
+                    continue
+
             # If not enough USDT — try to sell a weak coin first
             if crypto_pool < notional:
                 needed    = notional - crypto_pool
@@ -4156,23 +4195,25 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                         "tp_price":    tp_price,
                         "owner":       owner,
                     }
-                    try:
-                        import strategic_brain
-                        ai_for_strat = owner if owner in ("claude", "grok") else "claude"
-                        ps = strategic_brain.load_strategy(ai_for_strat)
-                        cs = ps.get("current_strategy", {})
-                        if cs.get("strategy_type") == "turtle":
-                            # Get ATR for stop calculation
-                            t_signal = turtle_check_entry(sym, system=cs.get("rules", {}).get("entry_donchian_period", 20) > 30 and 2 or 1)
-                            atr_val = t_signal.get("atr") if t_signal else None
-                            if atr_val and atr_val > 0:
-                                pos_kwargs["strategy_type"]       = "turtle"
-                                pos_kwargs["turtle_system"]       = 1 if cs.get("rules",{}).get("entry_donchian_period",20) <= 30 else 2
-                                pos_kwargs["atr_at_entry"]        = atr_val
-                                pos_kwargs["stop_price_override"] = round(entry - (2 * atr_val), 6)
-                                self._log(f"   🐢 TURTLE position: 2N stop=${pos_kwargs['stop_price_override']:.6f} (ATR=${atr_val:.4f})")
-                    except Exception as _te:
-                        self._log(f"   ⚠️ Turtle detect failed: {_te}")
+                    # Reuse the Turtle gate result — already validated above.
+                    # No second API call, no recompute. If turtle_pre_entry is
+                    # set, the playbook was Turtle AND the breakout was real.
+                    if turtle_pre_entry and turtle_pre_entry.get("eligible"):
+                        atr_val = turtle_pre_entry.get("atr")
+                        if atr_val and atr_val > 0:
+                            # Re-derive system from playbook (cheap; no API call)
+                            try:
+                                import strategic_brain as _sb
+                                _ps = _sb.load_strategy(owner if owner in ("claude","grok") else "claude")
+                                _ep = (_ps.get("current_strategy",{}).get("rules",{}) or {}).get("entry_donchian_period", 20)
+                                t_system_val = 2 if _ep > 30 else 1
+                            except Exception:
+                                t_system_val = 1
+                            pos_kwargs["strategy_type"]       = "turtle"
+                            pos_kwargs["turtle_system"]       = t_system_val
+                            pos_kwargs["atr_at_entry"]        = atr_val
+                            pos_kwargs["stop_price_override"] = round(entry - (2 * atr_val), 6)
+                            self._log(f"   🐢 TURTLE position armed: 2N stop=${pos_kwargs['stop_price_override']:.6f} (ATR=${atr_val:.4f})")
 
                     pos = CryptoPosition(**pos_kwargs)
                     self.positions[sym] = pos
@@ -4481,6 +4522,39 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             if crypto_pool < prop["notional"]:
                 self._log(f"   🪙 Insufficient USDT for {prop['symbol']}")
                 continue
+
+            # ── TURTLE ENTRY GATE (crypto, projection-based path) ───
+            # Same hard-gate logic as the primary buy path above.
+            sym2_pre = prop["symbol"]
+            owner2   = prop["owner"]
+            turtle_pre_entry_2 = None
+            _playbook_is_turtle_2 = False
+            try:
+                import strategic_brain as _sb_gate2
+                _ai_for_gate2 = owner2 if owner2 in ("claude", "grok") else "claude"
+                _ps_gate2     = _sb_gate2.load_strategy(_ai_for_gate2)
+                _cs_gate2     = _ps_gate2.get("current_strategy", {}) or {}
+                _playbook_is_turtle_2 = (_cs_gate2.get("strategy_type") == "turtle")
+            except Exception as _pb2_err:
+                self._log(f"   ⚠️ Turtle gate (path 2): couldn't load playbook for {sym2_pre}: {_pb2_err} — fail-open")
+                _playbook_is_turtle_2 = False
+
+            if _playbook_is_turtle_2:
+                try:
+                    _ep2 = (_cs_gate2.get("rules", {}) or {}).get("entry_donchian_period", 20)
+                    _ts2 = 2 if _ep2 > 30 else 1
+                    turtle_pre_entry_2 = turtle_check_entry(sym2_pre, system=_ts2)
+                    if not turtle_pre_entry_2.get("eligible"):
+                        self._log(f"   🐢 GATE REJECT {sym2_pre}: Turtle active ({_ai_for_gate2}), "
+                                  f"no {_ep2}d breakout — "
+                                  f"{turtle_pre_entry_2.get('reason','')[:90]}")
+                        continue
+                    self._log(f"   🐢 GATE PASS {sym2_pre}: Turtle System {_ts2} breakout — "
+                              f"ATR=${turtle_pre_entry_2.get('atr',0):.4f}")
+                except Exception as _tge2:
+                    self._log(f"   🐢 GATE ERROR (path 2) {sym2_pre}: {_tge2} — skipping (fail-closed)")
+                    continue
+
             try:
                 sym = prop["symbol"]
                 self._log(f"   🪙 BUY {sym} | ${prop['notional']:.2f} USDT | "
@@ -4497,21 +4571,22 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                         "tp_price":    prop["tp"],
                         "owner":       prop["owner"],
                     }
-                    try:
-                        import strategic_brain
-                        ai_for_strat2 = prop["owner"] if prop["owner"] in ("claude", "grok") else "claude"
-                        ps2 = strategic_brain.load_strategy(ai_for_strat2)
-                        cs2 = ps2.get("current_strategy", {})
-                        if cs2.get("strategy_type") == "turtle":
-                            t_sig2 = turtle_check_entry(sym, system=1)
-                            atr2 = t_sig2.get("atr") if t_sig2 else None
-                            if atr2 and atr2 > 0:
-                                pos_kwargs2["strategy_type"]       = "turtle"
-                                pos_kwargs2["turtle_system"]       = 1
-                                pos_kwargs2["atr_at_entry"]        = atr2
-                                pos_kwargs2["stop_price_override"] = round(prop["entry"] - (2 * atr2), 6)
-                    except Exception:
-                        pass
+                    # Reuse gate result — already validated
+                    if turtle_pre_entry_2 and turtle_pre_entry_2.get("eligible"):
+                        atr2 = turtle_pre_entry_2.get("atr")
+                        if atr2 and atr2 > 0:
+                            try:
+                                import strategic_brain as _sb2
+                                _ps2b = _sb2.load_strategy(prop["owner"] if prop["owner"] in ("claude","grok") else "claude")
+                                _ep2b = (_ps2b.get("current_strategy",{}).get("rules",{}) or {}).get("entry_donchian_period", 20)
+                                ts2_val = 2 if _ep2b > 30 else 1
+                            except Exception:
+                                ts2_val = 1
+                            pos_kwargs2["strategy_type"]       = "turtle"
+                            pos_kwargs2["turtle_system"]       = ts2_val
+                            pos_kwargs2["atr_at_entry"]        = atr2
+                            pos_kwargs2["stop_price_override"] = round(prop["entry"] - (2 * atr2), 6)
+                            self._log(f"   🐢 TURTLE position armed (path 2): 2N stop=${pos_kwargs2['stop_price_override']:.6f}")
                     pos = CryptoPosition(**pos_kwargs2)
                     self.positions[sym] = pos
                     crypto_pool -= prop["notional"]

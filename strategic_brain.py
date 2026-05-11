@@ -474,6 +474,55 @@ def load_strategy(ai_name):
                     "max_concurrent_positions", "min_confidence"]:
             if key not in rules:
                 rules[key] = default_rules.get(key)
+
+        # ── ONE-SHOT TURTLE MIGRATION ───────────────────────────
+        # Pre-existing state files persisted with strategy_type="classic"
+        # from previous deployments. When NOVATRADE_FORCE_TURTLE_MIGRATION=1
+        # is set, flip current_strategy to the Turtle default ONCE, archive
+        # the old playbook into strategy_history, then mark the migration
+        # complete so it never re-runs. The env var can be left set safely:
+        # a state file already marked migrated will skip the flip.
+        try:
+            if (os.environ.get("NOVATRADE_FORCE_TURTLE_MIGRATION", "").strip() == "1"
+                    and not state.get("turtle_migration_applied")):
+                current = state.get("current_strategy", {}) or {}
+                if current.get("strategy_type") != "turtle":
+                    # Archive whatever was active
+                    history = state.setdefault("strategy_history", [])
+                    if current:
+                        history.append({
+                            "archived_at":      datetime.now(timezone.utc).isoformat(),
+                            "archived_reason":  "turtle_migration",
+                            "previous_strategy": current,
+                        })
+                        # Cap history at 50 entries
+                        if len(history) > 50:
+                            state["strategy_history"] = history[-50:]
+                    # Install the Turtle default for crypto
+                    state["current_strategy"] = _default_strategy_turtle(ai_name, asset_class="crypto")
+                    state["last_activation"]  = datetime.now(timezone.utc).isoformat()
+                    # Reset perf counters for the new strategy
+                    state["current_performance"] = {
+                        "trades_under_this_strategy": 0,
+                        "wins": 0, "losses": 0,
+                        "actual_win_rate": 0,
+                        "actual_avg_pnl_pct": 0,
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    log(f"🐢 MIGRATION: {ai_name} playbook flipped to Turtle (previous archived)")
+                state["turtle_migration_applied"] = True
+                _state_cache[ai_name] = state
+                # Persist immediately so the migration sticks even if save_strategy
+                # is never called again this session
+                try:
+                    with open(path, "w") as _wf:
+                        json.dump(state, _wf, default=str, indent=2)
+                except Exception as _we:
+                    log(f"warning migration save failed for {ai_name}: {_we}")
+                return state
+        except Exception as _mig_e:
+            log(f"warning turtle migration failed for {ai_name}: {_mig_e}")
+
         _state_cache[ai_name] = state
         return state
     except FileNotFoundError:

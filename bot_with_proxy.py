@@ -2796,6 +2796,29 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
             notional = sized_notional
             if notional < 8:
                 log(f"⚠️ ${notional:.2f} too small for {symbol}"); continue
+
+            # ── TURTLE ENTRY GATE ───────────────────────────────
+            # If the active playbook is Turtle, the ONLY valid entry is a
+            # daily-close breakout above the 20-day Donchian high (System 1).
+            # Reject any AI-proposed buy that fails this mechanical filter.
+            # This is the hard gate — not an exit-strategy hint.
+            turtle_pre_entry = None
+            if is_turtle_active_for_stocks():
+                try:
+                    turtle_pre_entry = stock_turtle_check_entry(symbol, system=1)
+                    if not turtle_pre_entry.get("eligible"):
+                        log(f"🐢 GATE REJECT {symbol}: Turtle active, no 20d breakout "
+                            f"— {turtle_pre_entry.get('reason','')[:90]}")
+                        continue
+                    log(f"🐢 GATE PASS {symbol}: Turtle breakout confirmed "
+                        f"— ATR=${turtle_pre_entry.get('atr',0):.2f}, "
+                        f"stop=${turtle_pre_entry.get('stop_price',0):.2f}")
+                except Exception as _tge:
+                    # Fail-closed: if the gate errors, skip the trade rather
+                    # than silently fall back to a non-Turtle entry.
+                    log(f"🐢 GATE ERROR {symbol}: {_tge} — skipping (fail-closed)")
+                    continue
+
             try:
                 # ── SMART ENTRY: Limit order below market for better fill ──
                 # Get current price and set limit slightly below ask
@@ -2880,22 +2903,16 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                         strat, rationale = decide_exit_strategy_solo(
                             symbol, trade, bars, ind
                         )
-                    # ── Turtle override: if playbook is Turtle, only enter on Donchian breakout ──
-                    turtle_meta = None
-                    if is_turtle_active_for_stocks():
-                        try:
-                            t_check = stock_turtle_check_entry(symbol, system=1)
-                            if t_check.get("eligible"):
-                                strat = "T"
-                                rationale = f"Turtle System 1 breakout — {t_check.get('reason','')[:60]}"
-                                turtle_meta = t_check
-                                log(f"🐢 {symbol}: Turtle entry confirmed — ATR={t_check['atr']}, "
-                                    f"stop=${t_check['stop_price']:.2f}")
-                            else:
-                                # Turtle is active but this entry isn't a breakout — skip Turtle and fall through
-                                log(f"🐢 {symbol}: Turtle active but not at 20d breakout — using {strat} fallback")
-                        except Exception as te:
-                            log(f"   ⚠️ Turtle check error for {symbol}: {te}")
+                    # ── Turtle metadata: if the entry passed the Turtle gate
+                    # above, the position is a Turtle position. We already have
+                    # the entry signal data in turtle_pre_entry — no need to
+                    # recompute. The gate guarantees this is a real breakout.
+                    turtle_meta = turtle_pre_entry if (turtle_pre_entry and turtle_pre_entry.get("eligible")) else None
+                    if turtle_meta:
+                        strat = "T"
+                        rationale = f"Turtle System 1 breakout — {turtle_meta.get('reason','')[:60]}"
+                        log(f"🐢 {symbol}: Turtle position armed — ATR=${turtle_meta['atr']:.2f}, "
+                            f"2N stop=${turtle_meta['stop_price']:.2f}")
 
                     if strat == "T" and turtle_meta:
                         assign_exit_strategy(symbol, "T", entry_px,

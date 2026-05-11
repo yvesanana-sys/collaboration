@@ -194,6 +194,7 @@ RULES = {
         {"equity": 2000, "autonomous_fund": 600, "collab_floor": 600, "description": "Tier 5 — $300 Claude + $300 Grok autonomous | $600+ collaborative + shorts"},
     ],
     "universe": [
+        # ── Individual stocks ───────────────────────────────────
         # Tier 1 (high-vol, big moves): TSLA first, NVDA second
         "TSLA","NVDA",
         # Tier 2 additions
@@ -202,6 +203,13 @@ RULES = {
         "AMZN","SOFI","MSTR","COIN","RKLB",
         # Tier 4 (full universe)
         "AAPL","MSFT","GOOGL","NFLX","CRM",
+        # ── ETFs (Turtle-friendly: clean trends, no earnings gaps) ──
+        # Broad market: most liquid, cleanest trend behaviour
+        "SPY","QQQ","IWM",
+        # Sector ETFs: sector rotation is a classic Turtle edge
+        "XLK","XLF","XLE","XLV",
+        # Commodities / store-of-value
+        "GLD",
     ],
 }
 
