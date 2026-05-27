@@ -844,11 +844,33 @@ def leaderboard():
     """
     try:
         # Use persistent trade_history (loaded from /data on boot,
-        # contains all owner-tagged closes across both stocks & crypto)
-        # Also merge in CryptoTrader's in-memory crypto closes
+        # contains all owner-tagged closes across both stocks & crypto).
+        # ALSO merge in CryptoTrader's in-memory crypto closes — but
+        # dedup, because _execute_exit writes to BOTH lists. Without
+        # dedup, every crypto close was counted twice in the leaderboard
+        # → inflated trade counts and >100% win rates on the dashboard.
         all_history = list(trade_history)
+
+        # Build a signature set from the persistent history so we can
+        # skip duplicates when merging the in-memory list. Signature is
+        # (symbol, time, pnl_usd) — same close has all three identical
+        # since both code paths derive from one _execute_exit() call.
+        def _sig(t):
+            pnl = t.get("pnl_usd")
+            return (
+                (t.get("symbol") or "").upper(),
+                t.get("time") or "",
+                round(float(pnl), 4) if pnl is not None else None,
+            )
+
+        seen_sigs = {_sig(t) for t in all_history if t.get("pnl_usd") is not None}
+
         if hasattr(crypto_trader, "trade_history"):
             for t in crypto_trader.trade_history:
+                sig = _sig(t)
+                if sig in seen_sigs:
+                    continue   # already counted via persistent history
+                seen_sigs.add(sig)
                 # Merge — CryptoTrader format slightly differs, normalize
                 all_history.append({
                     "action":     t.get("action", "sell"),
