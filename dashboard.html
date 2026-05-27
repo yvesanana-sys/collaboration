@@ -572,6 +572,7 @@ html, body {
     <span class="h-item" id="h-turtle"><span class="dot"></span><span class="h-key">turtle</span><span class="h-val">—</span></span>
     <span class="h-item" id="h-claude"><span class="dot"></span><span class="h-key">claude</span><span class="h-val">—</span></span>
     <span class="h-item" id="h-grok"><span class="dot"></span><span class="h-key">grok</span><span class="h-val">—</span></span>
+    <span class="h-item" id="h-fees"><span class="dot"></span><span class="h-key">fees</span><span class="h-val">—</span></span>
     <span class="h-item" id="h-data"><span class="dot"></span><span class="h-key">data</span><span class="h-val">—</span></span>
   </section>
 
@@ -794,6 +795,21 @@ function renderHealth(stats, crypto, strategist, perf) {
   const gEl = document.getElementById('h-grok');
   gEl.querySelector('.h-val').textContent = gHealthy ? 'ok' : (stats?.grok_fail_reason || 'unknown');
   gEl.className = 'h-item ' + (gHealthy ? '' : 'bad');
+
+  // fees — show effective round-trip rate + BNB discount status
+  const feesEl = document.getElementById('h-fees');
+  if (feesEl) {
+    const f = crypto?.fees;
+    if (f) {
+      const rtPct = (f.round_trip * 100).toFixed(3);
+      const bnb = f.bnb_active ? '🔶 BNB on' : 'no BNB';
+      feesEl.querySelector('.h-val').textContent = `${rtPct}% rt · ${bnb}`;
+      feesEl.className = 'h-item ' + (f.bnb_active ? '' : 'warn');
+    } else {
+      feesEl.querySelector('.h-val').textContent = 'unknown';
+      feesEl.className = 'h-item off';
+    }
+  }
 
   // data quality — flag if leaderboard trades > perf trades (the duplicate bug)
   const dataEl = document.getElementById('h-data');

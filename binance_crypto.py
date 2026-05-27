@@ -163,12 +163,26 @@ CRYPTO_RULES = {
     "breakout_periods":     20,      # 20-period high breakout trigger
     "rsi_momentum_min":     55,      # RSI must be above 55 for momentum entry
     "rsi_oversold_max":     35,      # RSI below 35 = oversold dip entry
-    # ── Fees (Binance.US) ─────────────────────────────────────
-    "maker_fee":            0.0000,
-    "taker_fee":            0.0001,
-    "round_trip_fee":       0.008,   # Binance.US: 0.40% maker/taker × 2 sides = 0.80%
-                                     # (was 0.0002 = 0.02% — incorrectly low, made fee
-                                     # floor too easy to clear and let losing exits through)
+    # ── Fees (Binance.US — updated April 22, 2026) ────────────
+    # New flat fee schedule effective for all users with no tiers:
+    #   0% maker · 0.02% taker · all pairs
+    # BNB fee discount: hold any BNB balance → automatic 5% off all fees
+    #   (paid in BNB). Effective taker with BNB = 0.019%.
+    # We model the WORST case (taker both sides, no BNB) for safety, and
+    # apply BNB discount only when bnb_balance > 0 is detected at runtime.
+    "maker_fee":            0.0000,    # 0% — confirmed (limit order, resting on book)
+    "taker_fee":            0.0002,    # 0.02% — confirmed Binance.US 2026 rate
+    # Round trip = worst case: market in + market out = 2 × taker = 0.04%.
+    # Best case (limit in + limit out) = 0%.
+    # Realistic case (limit in + market stop out) = 0.02%.
+    # We add a 50% safety margin (so 0.04% × 1.5 = 0.06%) for slippage.
+    "round_trip_fee":       0.0006,
+    "bnb_fee_discount":     0.05,      # 5% off when holding any BNB balance
+    # ── Minimum-profit floor ───────────────────────────────────
+    # No trade is taken unless projected gain ≥ this × round_trip_fee.
+    # Default 3x → projected gain must exceed 0.18% to even consider entry.
+    # This is the "won't take a trade unless math works" guardrail.
+    "min_profit_fee_multiple": 3.0,
     # ── Drawdown protection ────────────────────────────────────
     "global_drawdown_pause": 0.40,   # Pause ALL trading if equity drops 40%
     # ── Projection filters ────────────────────────────────────
@@ -197,6 +211,34 @@ CRYPTO_TIERS = [
      "coins": None,
      "note": "Tier 4 — 15% risk, 5 positions, full discovery"},
 ]
+
+def effective_fees(has_bnb: bool = False) -> dict:
+    """
+    Returns effective Binance.US fee rates given current BNB holdings.
+
+    With BNB balance > 0, Binance.US automatically pays fees from BNB
+    and applies a 5% discount on top of the base rate.
+
+    Returns dict with maker, taker, and round_trip floats (decimal, not %).
+    """
+    base_maker = CRYPTO_RULES["maker_fee"]      # 0.0000
+    base_taker = CRYPTO_RULES["taker_fee"]      # 0.0002
+    base_rt    = CRYPTO_RULES["round_trip_fee"] # 0.0006
+    if has_bnb:
+        disc = 1.0 - CRYPTO_RULES["bnb_fee_discount"]   # 0.95
+        return {
+            "maker":      round(base_maker * disc, 6),
+            "taker":      round(base_taker * disc, 6),
+            "round_trip": round(base_rt    * disc, 6),
+            "bnb_active": True,
+        }
+    return {
+        "maker":      base_maker,
+        "taker":      base_taker,
+        "round_trip": base_rt,
+        "bnb_active": False,
+    }
+
 
 def get_crypto_tier(wallet_value: float) -> dict:
     """Get current tier based on wallet total value."""
@@ -2014,6 +2056,7 @@ class CryptoTrader:
         self.losses         = 0
         self.cycle_count    = 0
         self._projections   = {}
+        self._wallet_cache  = None   # Latest get_full_wallet() result — for BNB detection
         self._enabled       = bool(BINANCE_KEY and BINANCE_SECRET)
         self.staking        = StakingManager()
         self._shared_state  = None   # Injected by bot on init
@@ -2518,6 +2561,14 @@ class CryptoTrader:
                 if wallet.get("error"):
                     self._log(f"   ❌ Wallet read failed twice: {wallet['error']}")
                     return 0
+
+            # Cache the wallet so effective_fees() can detect BNB downstream
+            self._wallet_cache = wallet
+            if wallet.get("bnb"):
+                _bnb_val = wallet["bnb"].get("value_usdt", 0)
+                _eff = effective_fees(has_bnb=True)
+                self._log(f"   🔶 BNB fee discount ACTIVE: holding ${_bnb_val:.2f} BNB "
+                          f"→ effective round-trip fee {_eff['round_trip']*100:.3f}%")
 
             crypto_pool   = wallet["usdt_free"]
             wallet_text   = wallet["wallet_summary"]
@@ -3556,19 +3607,28 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                     stop_px= round(entry_px * (1 - CRYPTO_RULES["stop_loss_pct"]), 6)
 
                 # ── Fee-aware profit check ────────────────────
-                # TP must be above entry + fees + min profit
-                # Binance.US: 0.1% taker per trade = 0.2% round-trip
-                fee_rt      = 0.002   # 0.2% round-trip
-                min_profit  = 0.009   # 0.9% minimum net profit
-                min_tp      = round(entry_px * (1 + fee_rt + min_profit), 8)
+                # TP must clear: entry + round_trip_fee + min_profit
+                # Uses effective_fees() so BNB discount is applied
+                # automatically when the wallet holds BNB.
+                _has_bnb = bool(self._wallet_cache and self._wallet_cache.get("bnb"))
+                _fees    = effective_fees(has_bnb=_has_bnb)
+                fee_rt   = _fees["round_trip"]
+                # Floor net gain at fee × multiplier (default 3x = 0.18% no-BNB, 0.17% w/BNB).
+                # The Turtle gate and Donchian logic will reject choppy
+                # setups; this just ensures the bot doesn't take a trade
+                # whose own TP target is below the post-fee break-even.
+                min_profit = max(0.003, fee_rt * CRYPTO_RULES["min_profit_fee_multiple"])  # ≥ 0.3%
+                min_tp     = round(entry_px * (1 + fee_rt + min_profit), 8)
                 if tp_px < min_tp:
                     tp_px = min_tp
-                    self._log(f"   📐 {sym} TP floored to ${tp_px:.8f} (fee-aware minimum)")
+                    self._log(f"   📐 {sym} TP floored to ${tp_px:.8f} (fee-aware minimum, "
+                              f"{'BNB-disc ON' if _has_bnb else 'BNB-disc off'})")
 
                 # Check projected gain is worth trading
                 net_gain_pct = round((tp_px - entry_px) / entry_px * 100 - fee_rt * 100, 2)
-                if net_gain_pct < 0.5:
-                    self._log(f"   ⚠️ {sym} net gain only {net_gain_pct:.1f}% after fees — skipping")
+                if net_gain_pct < (min_profit * 100):
+                    self._log(f"   ⚠️ {sym} net gain only {net_gain_pct:.2f}% after fees "
+                              f"(need ≥{min_profit*100:.2f}%) — skipping")
                     continue
 
                 # ── Per-AI pool sizing (AI Competition Mode) ──
@@ -3954,12 +4014,22 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                 if not v.get("error")
             },
             "recent_trades": list(reversed(self.trade_history))[:10],
+            "fees": {
+                **effective_fees(has_bnb=bool(
+                    self._wallet_cache and self._wallet_cache.get("bnb")
+                )),
+                "base_taker_pct":      CRYPTO_RULES["taker_fee"] * 100,
+                "base_maker_pct":      CRYPTO_RULES["maker_fee"] * 100,
+                "base_round_trip_pct": CRYPTO_RULES["round_trip_fee"] * 100,
+                "bnb_discount_pct":    CRYPTO_RULES["bnb_fee_discount"] * 100,
+                "min_profit_fee_x":    CRYPTO_RULES["min_profit_fee_multiple"],
+            },
             "rules": {
                 "stop_pct":       f"{CRYPTO_RULES['stop_loss_pct']*100:.0f}%",
                 "tp_pct":         f"{CRYPTO_RULES['take_profit_pct']*100:.0f}%",
                 "max_hold_hours": CRYPTO_RULES["max_hold_hours"],
-                "maker_fee":      f"{CRYPTO_RULES['maker_fee']*100:.2f}%",
-                "taker_fee":      f"{CRYPTO_RULES['taker_fee']*100:.2f}%",
+                "maker_fee":      f"{CRYPTO_RULES['maker_fee']*100:.3f}%",
+                "taker_fee":      f"{CRYPTO_RULES['taker_fee']*100:.3f}%",
                 "pool_pct":       f"{CRYPTO_RULES['crypto_pool_pct']*100:.0f}%",
             }
         }

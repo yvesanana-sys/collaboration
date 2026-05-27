@@ -47,18 +47,63 @@ def ask_claude(prompt, system="You are a trading AI. Respond with ONLY valid com
         return res.json()["content"][0]["text"]
 
 def ask_grok(prompt, system="You are a trading AI. Respond with ONLY valid compact JSON. No markdown, no prose, no extra text.", max_tokens=2400):
-    # grok-4-1-fast-reasoning was retired by xAI on May 15, 2026.
-    # grok-4.3 is the current flagship (1M context, $1.25/$2.50 per 1M tokens).
+    """
+    Call xAI Grok with automatic model-fallback.
+
+    xAI has been aggressively retiring models. Different accounts have
+    different access — some teams get redirected from retired models,
+    others 404. We try a chain of known model IDs in order, sticking
+    with the first one that works for the rest of the process lifetime.
+
+    Order (newest → fallback): grok-4 → grok-4-1-fast-reasoning → grok-3
+    Override with GROK_MODEL env var if you know which one your team has.
+    """
+    import os
+    # Allow operator override
+    override = os.environ.get("GROK_MODEL", "").strip()
+    candidates = [override] if override else [
+        "grok-4.3",                  # current flagship, may 404 on older accounts
+        "grok-4",                    # widely available
+        "grok-4-1-fast-reasoning",   # legacy fast — some accounts still have it
+        "grok-3",                    # legacy fallback
+    ]
+    candidates = [c for c in candidates if c]
+
+    # Cache the first working model so we don't waste API calls on 404s
+    cached = getattr(ask_grok, "_working_model", None)
+    if cached and cached not in candidates:
+        candidates.insert(0, cached)
+    elif cached:
+        # Move cached to front
+        candidates = [cached] + [c for c in candidates if c != cached]
+
+    last_err = None
     with httpx.Client(timeout=60) as http:
-        res = http.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"},
-            json={"model": "grok-4.3", "max_tokens": max_tokens,
-                  "messages": [{"role": "system", "content": system},
-                                {"role": "user", "content": prompt}]},
-        )
-        if not res.is_success: raise Exception(f"{res.status_code}: {res.text}")
-        return res.json()["choices"][0]["message"]["content"]
+        for model_id in candidates:
+            try:
+                res = http.post(
+                    "https://api.x.ai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROK_KEY}",
+                             "Content-Type": "application/json"},
+                    json={"model": model_id, "max_tokens": max_tokens,
+                          "messages": [{"role": "system", "content": system},
+                                       {"role": "user",   "content": prompt}]},
+                )
+                if res.is_success:
+                    # Cache for future calls in this process
+                    ask_grok._working_model = model_id
+                    return res.json()["choices"][0]["message"]["content"]
+                # Only fall through on 404 (model not available); other
+                # errors are real and should propagate to the caller.
+                if res.status_code == 404:
+                    last_err = f"{model_id} 404"
+                    continue
+                raise Exception(f"{res.status_code}: {res.text}")
+            except httpx.HTTPError as e:
+                last_err = f"{model_id}: {e}"
+                continue
+    raise Exception(f"All Grok models failed. Last error: {last_err}. "
+                    f"Set GROK_MODEL env var to a model your team has access to.")
 
 def clean_json_str(raw):
     import re
