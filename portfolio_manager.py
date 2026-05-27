@@ -108,14 +108,7 @@ RULES = {
     # Rationale: 1.6:1 R/R ratio + faster turnover = compounds quickly
     # Higher trade volume stress-tests auto-repair system
     "stop_loss_pct":         0.05,   # -5% stop (was -10% — tighter)
-    "take_profit_pct":       0.08,   # +8% TP. Alpaca is commission-free for stocks
-                                     # so this is effectively NET already (only SEC/TAF
-                                     # fees apply on sells, ~$0.01-0.03 — negligible).
-                                     # Crypto side has explicit fee adjustment because
-                                     # Binance.US 0.80% round-trip is meaningful.
-    "stock_fee_buffer_pct":  0.001,  # 0.1% absolute buffer for SEC/TAF fees + slippage.
-                                     # Effectively a wash on stocks but prevents any
-                                     # break-even trap on tight take-profit triggers.
+    "take_profit_pct":       0.08,   # +8% TP (was +20% — bank wins fast)
     "min_confidence":          70,   # Aggressive — lowered to 70 for more entries (was 75)
     "collab_min_confidence":   90,
     "collab_min_signals":      4,

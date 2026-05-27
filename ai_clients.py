@@ -47,11 +47,13 @@ def ask_claude(prompt, system="You are a trading AI. Respond with ONLY valid com
         return res.json()["content"][0]["text"]
 
 def ask_grok(prompt, system="You are a trading AI. Respond with ONLY valid compact JSON. No markdown, no prose, no extra text.", max_tokens=2400):
+    # grok-4-1-fast-reasoning was retired by xAI on May 15, 2026.
+    # grok-4.3 is the current flagship (1M context, $1.25/$2.50 per 1M tokens).
     with httpx.Client(timeout=60) as http:
         res = http.post(
             "https://api.x.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"},
-            json={"model": "grok-4-1-fast-reasoning", "max_tokens": max_tokens,
+            json={"model": "grok-4.3", "max_tokens": max_tokens,
                   "messages": [{"role": "system", "content": system},
                                 {"role": "user", "content": prompt}]},
         )
