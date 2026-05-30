@@ -73,26 +73,29 @@ MODEL_REGISTRY = {
             "upgrade_threshold_wallet": 5000.0,
         },
         "grok": {
-            # xAI retired grok-4-1-fast-reasoning on May 15, 2026. The
-            # current flagship is grok-4.3 (1M context, $1.25/$2.50 per
-            # 1M tokens). grok-4 is also being deprecated. We use 4.3 at
-            # both tiers because xAI's pricing collapsed and the model is
-            # already cheap.
+            # xAI retired grok-4-1-fast-reasoning on May 15, 2026.
+            # Your team's console (console.x.ai → Models) shows the
+            # grok-4.20-0309 family is what you actually have access to.
+            # Strategist gets the REASONING variant — it wakes 3x/day
+            # to write playbooks, and deeper thinking is worth the wait.
+            # Same 1M context, $1.25/$2.50 pricing as the non-reasoning
+            # variant. If your team gets `grok-4.3` access later, swap
+            # the model_id below.
             "default": {
-                "model_id":           "grok-4.3",
+                "model_id":           "grok-4.20-0309-reasoning",
                 "provider":           "xai",
                 "max_tokens":         4000,
                 "input_cost_per_1m":  1.25,
                 "output_cost_per_1m": 2.50,
-                "notes":              "Grok 4.3 — current flagship, 1M ctx",
+                "notes":              "Grok 4.20 reasoning — 1M ctx, strategist tier",
             },
             "premium": {
-                "model_id":           "grok-4.3",
+                "model_id":           "grok-4.20-0309-reasoning",
                 "provider":           "xai",
                 "max_tokens":         4000,
                 "input_cost_per_1m":  1.25,
                 "output_cost_per_1m": 2.50,
-                "notes":              "Grok 4.3 — same model; xAI tiering collapsed post-retirement",
+                "notes":              "Grok 4.20 reasoning — same model; xAI flat pricing",
             },
             "upgrade_threshold_wallet": 5000.0,
         },
@@ -112,13 +115,17 @@ MODEL_REGISTRY = {
             },
         },
         "grok": {
+            # Tactician = fast trade decisions every cycle. We want the
+            # NON-reasoning variant — it commits to an answer faster
+            # without burning tokens thinking, while still being from
+            # the same 4.20 family. Same price as the reasoning variant.
             "default": {
-                "model_id":           "grok-4.3",
+                "model_id":           "grok-4.20-0309-non-reasoning",
                 "provider":           "xai",
                 "max_tokens":         2400,
                 "input_cost_per_1m":  1.25,
                 "output_cost_per_1m": 2.50,
-                "notes":              "Grok 4.3 — post-May-2026 default flagship",
+                "notes":              "Grok 4.20 non-reasoning — fast tactical commits",
             },
         },
     },

@@ -3107,23 +3107,56 @@ if HAVE_STRATEGIC_BRAIN:
                 return res.json()["content"][0]["text"]
 
         def _ask_grok_strategist(prompt: str, system: str = "", max_tokens: int = 4000) -> str:
+            # Build fallback chain: spec first, then known-available models.
+            # If GROK_MODEL env var is set, that overrides everything.
+            import os
             spec = strategic_brain.get_active_model("strategist", "grok",
                                                    wallet=_strategist_wallet())
+            override = os.environ.get("GROK_MODEL", "").strip()
+            if override:
+                candidates = [override]
+            else:
+                # Try the spec's model first, then fall back through models
+                # known available on the team (console.x.ai).
+                candidates = [spec["model_id"]]
+                for alt in ["grok-4.20-0309-reasoning",
+                            "grok-4.20-0309-non-reasoning",
+                            "grok-4.3",
+                            "grok-build-0.1"]:
+                    if alt not in candidates:
+                        candidates.append(alt)
+            # Reuse a cached working model first if we have one (saves 404s)
+            cached = getattr(_ask_grok_strategist, "_working_model", None)
+            if cached:
+                candidates = [cached] + [c for c in candidates if c != cached]
+
+            last_err = None
             with httpx.Client(timeout=120) as http:
-                res = http.post(
-                    "https://api.x.ai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {GROK_KEY}",
-                             "Content-Type": "application/json"},
-                    json={"model": spec["model_id"],
-                          "max_tokens": min(max_tokens, spec.get("max_tokens", 4000)),
-                          "messages": [
-                              {"role": "system", "content": system or "You are a strategic trading AI. Output valid JSON only."},
-                              {"role": "user",   "content": prompt},
-                          ]},
-                )
-                if not res.is_success:
-                    raise Exception(f"{res.status_code}: {res.text}")
-                return res.json()["choices"][0]["message"]["content"]
+                for model_id in candidates:
+                    try:
+                        res = http.post(
+                            "https://api.x.ai/v1/chat/completions",
+                            headers={"Authorization": f"Bearer {GROK_KEY}",
+                                     "Content-Type": "application/json"},
+                            json={"model": model_id,
+                                  "max_tokens": min(max_tokens, spec.get("max_tokens", 4000)),
+                                  "messages": [
+                                      {"role": "system", "content": system or "You are a strategic trading AI. Output valid JSON only."},
+                                      {"role": "user",   "content": prompt},
+                                  ]},
+                        )
+                        if res.is_success:
+                            _ask_grok_strategist._working_model = model_id
+                            return res.json()["choices"][0]["message"]["content"]
+                        if res.status_code == 404:
+                            last_err = f"{model_id} 404"
+                            continue
+                        raise Exception(f"{res.status_code}: {res.text}")
+                    except httpx.HTTPError as e:
+                        last_err = f"{model_id}: {e}"
+                        continue
+            raise Exception(f"All Grok strategist models failed. Last: {last_err}. "
+                            f"Set GROK_MODEL env var to a model your team has access to.")
 
         strategic_brain._set_context(
             log_fn                    = log,

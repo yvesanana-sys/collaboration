@@ -50,22 +50,22 @@ def ask_grok(prompt, system="You are a trading AI. Respond with ONLY valid compa
     """
     Call xAI Grok with automatic model-fallback.
 
-    xAI has been aggressively retiring models. Different accounts have
-    different access — some teams get redirected from retired models,
-    others 404. We try a chain of known model IDs in order, sticking
-    with the first one that works for the rest of the process lifetime.
+    The fallback chain below targets models confirmed available on the
+    user's xAI team (console.x.ai → Models). Order: fast non-reasoning
+    variant first (this is the tactician — speed matters), then
+    reasoning variant, then flagship, then cheapest.
 
-    Order (newest → fallback): grok-4 → grok-4-1-fast-reasoning → grok-3
-    Override with GROK_MODEL env var if you know which one your team has.
+    Override with GROK_MODEL env var to pin a specific model.
     """
     import os
     # Allow operator override
     override = os.environ.get("GROK_MODEL", "").strip()
     candidates = [override] if override else [
-        "grok-4.3",                  # current flagship, may 404 on older accounts
-        "grok-4",                    # widely available
-        "grok-4-1-fast-reasoning",   # legacy fast — some accounts still have it
-        "grok-3",                    # legacy fallback
+        # Confirmed available on team (per console.x.ai screenshot):
+        "grok-4.20-0309-non-reasoning",   # fast tactical decisions — first choice
+        "grok-4.20-0309-reasoning",       # deeper thinking — fallback
+        "grok-4.3",                       # flagship if team gets it later
+        "grok-build-0.1",                 # cheapest, 256K ctx — last resort
     ]
     candidates = [c for c in candidates if c]
 
