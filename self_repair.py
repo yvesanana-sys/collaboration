@@ -99,6 +99,8 @@ PATCHABLE_FILES = [
     "sleep_manager.py",
     "pdt_manager.py",
     "portfolio_manager.py",
+    "strategic_brain.py",   # Turtle migration + AI model registry
+    "turtle_math.py",       # Donchian/ATR primitives (single source of truth)
 ]
 
 MASTER_DOC = "NOVATRADE_MASTER.md"
