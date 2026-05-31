@@ -862,32 +862,66 @@ function renderBattle(lb, crypto) {
 }
 
 function renderStrategy(strategist) {
-  if (!strategist || strategist.error || strategist.enabled === false) {
+  // Three states we care about:
+  //   1. Real error (endpoint failed, module missing)  → red "error"
+  //   2. enabled === false (Phase A by design)         → show playbook + "dormant" tag
+  //   3. enabled === true                              → full strategist info
+  // In ALL cases where we have a payload, render the current playbook —
+  // because the playbook is active even when the strategist (the thing
+  // that rewrites the playbook) is dormant.
+
+  const statusEl = document.getElementById('strat-status');
+
+  if (!strategist || strategist.error) {
+    // Genuine error fetching /strategy
     setT('strat-status', '—');
-    setT('strat-detail', 'strategist offline');
+    setT('strat-detail', strategist?.error
+      ? `endpoint error: ${strategist.error}`
+      : 'strategist unreachable');
+    setT('strat-meta', 'error');
+    return;
+  }
+
+  // Module unloaded? Show that clearly — different from "disabled by design"
+  if (strategist.reason === "module not loaded") {
+    statusEl.innerHTML = '<span>—</span> Not loaded';
+    statusEl.className = 'strat-status classic';
+    setT('strat-detail', 'strategic_brain module not imported on bot');
     setT('strat-meta', '');
     return;
   }
+
+  // We have a payload. Read the current playbook (active even if strategist is dormant).
   const cs = strategist?.ais?.claude?.current_strategy || {};
   const gs = strategist?.ais?.grok?.current_strategy || {};
   const cT = cs.strategy_type === 'turtle';
   const gT = gs.strategy_type === 'turtle';
-  const statusEl = document.getElementById('strat-status');
+  const isDormant = strategist.enabled === false;
+  const phaseTag  = isDormant ? ` · <span style="color:var(--ink-3);font-size:11px;font-family:var(--font-body);font-weight:400;">dormant (Phase A)</span>` : '';
+
   if (cT && gT) {
-    statusEl.innerHTML = '<span class="turtle">🐢</span> Turtle';
+    statusEl.innerHTML = `<span class="turtle">🐢</span> Turtle${phaseTag}`;
     statusEl.className = 'strat-status active';
     setT('strat-detail', `System 1 · ${cs.rules?.entry_donchian_period || 20}d entry · ${cs.rules?.exit_donchian_period || 10}d exit · 2N stop · 1% risk`);
-    setT('strat-meta', `v${cs.version || 1}`);
+    setT('strat-meta', isDormant ? `playbook frozen · v${cs.version || 1}` : `v${cs.version || 1}`);
   } else if (cT || gT) {
-    statusEl.innerHTML = '<span class="turtle">🐢</span> Turtle (partial)';
+    statusEl.innerHTML = `<span class="turtle">🐢</span> Turtle (partial)${phaseTag}`;
     statusEl.className = 'strat-status active';
     setT('strat-detail', `Only ${cT ? 'Claude' : 'Grok'} on Turtle. Other still on classic.`);
-    setT('strat-meta', 'partial');
-  } else {
-    statusEl.innerHTML = '<span>—</span> Classic';
+    setT('strat-meta', isDormant ? 'playbook frozen · partial' : 'partial');
+  } else if (cs.name || gs.name) {
+    statusEl.innerHTML = `<span>—</span> Classic${phaseTag}`;
     statusEl.className = 'strat-status classic';
-    setT('strat-detail', cs.name || 'Default playbook · % stops · fixed TP');
-    setT('strat-meta', `v${cs.version || 0}`);
+    setT('strat-detail', cs.name || gs.name || 'Default playbook · % stops · fixed TP');
+    setT('strat-meta', isDormant ? `playbook frozen · v${cs.version || 0}` : `v${cs.version || 0}`);
+  } else {
+    // Phase A but state files haven't been initialized yet
+    statusEl.innerHTML = `<span>—</span> No playbook yet${phaseTag}`;
+    statusEl.className = 'strat-status classic';
+    setT('strat-detail', isDormant
+      ? 'Phase A — strategist plumbing only, no playbooks written yet'
+      : 'awaiting first strategist activation');
+    setT('strat-meta', '');
   }
 }
 
