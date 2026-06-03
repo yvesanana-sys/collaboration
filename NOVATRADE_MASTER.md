@@ -562,6 +562,13 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 
 ## Bug Fix Log
 
+### Bug Fix — 2026-06-03
+**Error:** Claude/Grok proposing crypto USDT pairs in stock execution cycle
+**Fix:** Added `is_crypto_ticker()` validator function and `STOCK_EXEC_FORBIDDEN_PATTERNS` list to filter crypto stablecoins (USDT, USDC, BUSD, TUSD) before Alpaca order submission. Prevents malformed "Skip USDT" errors when AI recommends BTC/ETH crosses during market analysis spillover.
+**File:** bot_with_proxy.py
+**Status:** ✅ PR opened
+
+
 ### 🚀 v3.1.4 Release — 2026-05-08 — Turtle Trend-Following System (Long-Term Growth)
 
 **Strategic pivot from scalping to trend-following.** After analysis showed the 8% stop / 8% TP scalping strategy was running at 1:1 R/R with break-even at 50% WR — leaving zero margin for error — the system has been re-architected around **Richard Dennis's Turtle Trading System** for long-term growth.
