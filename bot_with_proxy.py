@@ -74,8 +74,6 @@ shared_state: dict = {
     "intraday_buys":       {},
     "pdt_last_reset_date": "",
     "stops_fired_today":   0,
-    "consecutive_losses":  0,   # Reset on any win; drives playbook gate logic
-    "consecutive_wins":    0,   # Reset on any loss; drives winning streak logic
     "restricted_positions": set(),
     "failed_sells":        {},
     # Projections cache
@@ -233,39 +231,6 @@ try:
 except ImportError:
     strategic_brain = None
     HAVE_STRATEGIC_BRAIN = False
-
-# ── Exchange Rules (per-coin Binance.US minimums, persisted to /data) ──
-# Caches min_notional + tick_size + step_size per symbol. Pre-scans the
-# universe on boot, refreshes every 24h. Replaces the old in-memory
-# _EXCHANGE_FILTERS dict that didn't survive redeploys.
-try:
-    import exchange_rules
-    HAVE_EXCHANGE_RULES = True
-except ImportError:
-    exchange_rules = None
-    HAVE_EXCHANGE_RULES = False
-
-# ── Coin Performance (per-coin P&L tracking, AVOID/CAUTION flagging) ──
-# Reads from binance_trade_history.json, computes FIFO P&L, flags losing
-# coins so AIs see "⛔ KAVA -$9.19 (0/12)" in their prompts. Persistent
-# at /data/coin_performance.json. Regenerated after every Binance sync.
-try:
-    import coin_performance
-    HAVE_COIN_PERFORMANCE = True
-except ImportError:
-    coin_performance = None
-    HAVE_COIN_PERFORMANCE = False
-
-# ── Risk Gate (BTC macro filter + circuit breaker + cooldown + weekends) ──
-# Single decision point for "can the bot open new positions right now?"
-# Borrowed from a strategy doc. Combines four rules into one gate that
-# only blocks NEW BUYS — exits/stops/TPs always execute.
-try:
-    import risk_gate
-    HAVE_RISK_GATE = True
-except ImportError:
-    risk_gate = None
-    HAVE_RISK_GATE = False
 
 crypto_trader = CryptoTrader()     # 24/7 crypto — runs parallel to stocks
 
@@ -879,11 +844,33 @@ def leaderboard():
     """
     try:
         # Use persistent trade_history (loaded from /data on boot,
-        # contains all owner-tagged closes across both stocks & crypto)
-        # Also merge in CryptoTrader's in-memory crypto closes
+        # contains all owner-tagged closes across both stocks & crypto).
+        # ALSO merge in CryptoTrader's in-memory crypto closes — but
+        # dedup, because _execute_exit writes to BOTH lists. Without
+        # dedup, every crypto close was counted twice in the leaderboard
+        # → inflated trade counts and >100% win rates on the dashboard.
         all_history = list(trade_history)
+
+        # Build a signature set from the persistent history so we can
+        # skip duplicates when merging the in-memory list. Signature is
+        # (symbol, time, pnl_usd) — same close has all three identical
+        # since both code paths derive from one _execute_exit() call.
+        def _sig(t):
+            pnl = t.get("pnl_usd")
+            return (
+                (t.get("symbol") or "").upper(),
+                t.get("time") or "",
+                round(float(pnl), 4) if pnl is not None else None,
+            )
+
+        seen_sigs = {_sig(t) for t in all_history if t.get("pnl_usd") is not None}
+
         if hasattr(crypto_trader, "trade_history"):
             for t in crypto_trader.trade_history:
+                sig = _sig(t)
+                if sig in seen_sigs:
+                    continue   # already counted via persistent history
+                seen_sigs.add(sig)
                 # Merge — CryptoTrader format slightly differs, normalize
                 all_history.append({
                     "action":     t.get("action", "sell"),
@@ -1087,86 +1074,6 @@ def strategy_ai_endpoint(ai_name):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/exchange_rules")
-def exchange_rules_endpoint():
-    """
-    Per-coin Binance.US trading rules (cached at /data/exchange_rules.json).
-    Shows min_notional, tick_size, step_size, status for each cached symbol,
-    plus the bot's global floor (currently $5).
-
-    Effective minimum per coin = max(global_floor, exchange_per_coin_min).
-    """
-    try:
-        if not HAVE_EXCHANGE_RULES or not exchange_rules:
-            return jsonify({"enabled": False, "reason": "module not loaded"})
-        return jsonify(exchange_rules.get_status())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/coin_performance")
-def coin_performance_endpoint():
-    """
-    Per-coin trading performance report (cached at /data/coin_performance.json).
-    Shows lifetime + 14-day rolling P&L, win rates, AVOID/CAUTION/PROVEN
-    classification, TP-hit rate analysis, manual overrides.
-
-    Query params:
-      ?refresh=1 — force regenerate from latest Binance history
-    """
-    try:
-        if not HAVE_COIN_PERFORMANCE or not coin_performance:
-            return jsonify({"enabled": False, "reason": "module not loaded"})
-        if request.args.get("refresh") == "1":
-            return jsonify(coin_performance.regenerate())
-        return jsonify(coin_performance.get_status())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/coin_performance/override", methods=["POST"])
-def coin_performance_override_endpoint():
-    """
-    Set/clear a manual classification override for a coin.
-    Body: {"symbol": "DOGEUSDT", "status": "AVOID"}  — set
-          {"symbol": "DOGEUSDT", "status": null}     — clear
-    Status must be one of: AVOID, CAUTION, NEUTRAL, PROVEN, null.
-    """
-    try:
-        if not HAVE_COIN_PERFORMANCE or not coin_performance:
-            return jsonify({"enabled": False, "reason": "module not loaded"}), 400
-        data   = request.get_json(silent=True) or {}
-        symbol = (data.get("symbol") or "").upper().strip()
-        status = data.get("status")
-        if not symbol:
-            return jsonify({"error": "symbol required"}), 400
-        ok = coin_performance.set_manual_override(symbol, status)
-        if not ok:
-            return jsonify({"error": "invalid status"}), 400
-        # Re-classify with new override
-        coin_performance.regenerate()
-        return jsonify({"ok": True, "symbol": symbol, "status": status})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/risk_gate")
-def risk_gate_endpoint():
-    """
-    Risk gate status — shows whether new entries are currently allowed
-    and which rule (if any) is blocking them. Includes BTC macro state,
-    threshold values, and last block reason.
-
-    The four rules (in priority order):
-      1. macro_filter — BTC > 200 EMA on 4H
-      2. weekend_pause — Sat/Sun UTC (low liquidity)
-      3. circuit_breaker — -3% wallet loss in 24h
-      4. post_loss_cooldown — yesterday closed negative
-    """
-    try:
-        if not HAVE_RISK_GATE or not risk_gate:
-            return jsonify({"enabled": False, "reason": "module not loaded"})
-        return jsonify(risk_gate.get_status())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 @app.route("/projection")
 def projection_endpoint():
     """
@@ -1211,225 +1118,6 @@ def projection_endpoint():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-@app.route("/bars")
-def bars_endpoint():
-    """
-    OHLC bars for chart rendering. Auto-detects stock vs crypto.
-
-    Query params:
-      ?symbol=BTCUSDT or AAPL    — required
-      ?interval=5m|15m|1h|1d     — default: 5m for crypto, 1d for stocks
-      ?limit=100                 — default 100, max 500
-
-    Returns JSON: {symbol, interval, asset_class, bars: [{t, o, h, l, c, v}], trades: [...]}
-    where trades are this symbol's bot history for plotting markers.
-    """
-    try:
-        symbol   = (request.args.get("symbol") or "").upper().strip()
-        interval = request.args.get("interval", "").lower().strip()
-        limit    = max(1, min(int(request.args.get("limit", 100)), 500))
-        if not symbol:
-            return jsonify({"error": "symbol required"}), 400
-
-        # Auto-detect asset class
-        is_crypto = symbol.endswith("USDT") or symbol.endswith("USDC") or symbol.endswith("USD") and len(symbol) <= 6
-        # Override: if symbol contains slash or is 3 chars+USDT, it's crypto
-        if "USDT" in symbol or "USDC" in symbol:
-            is_crypto = True
-        elif len(symbol) <= 5 and symbol.isalpha():
-            is_crypto = False
-
-        bars_out = []
-
-        if is_crypto:
-            # ── Binance klines ─────────────────────────────────
-            # Map interval: 5m, 15m, 30m, 1h, 4h, 1d
-            interval = interval or "5m"
-            valid_intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-            if interval not in valid_intervals:
-                interval = "5m"
-            try:
-                kl = binance_crypto.binance_get("/api/v3/klines", {
-                    "symbol": symbol, "interval": interval, "limit": limit,
-                }) or []
-                # Each row: [openTime, open, high, low, close, volume, closeTime, ...]
-                for k in kl:
-                    bars_out.append({
-                        "t": int(k[0]),               # ms timestamp
-                        "o": float(k[1]),
-                        "h": float(k[2]),
-                        "l": float(k[3]),
-                        "c": float(k[4]),
-                        "v": float(k[5]),
-                    })
-            except Exception as e:
-                return jsonify({"error": f"binance fetch failed: {e}"}), 502
-
-        else:
-            # ── Alpaca bars ────────────────────────────────────
-            interval = interval or "1d"
-            # market_data.get_bars returns daily; for intraday use get_intraday_bars
-            try:
-                if interval in ("1m", "5m", "15m", "30m", "1h", "4h"):
-                    raw = get_intraday_bars(symbol, timeframe=interval, limit=limit)
-                else:
-                    raw = get_bars(symbol, days=min(limit, 365))
-                # Normalize to our schema
-                for b in (raw or [])[-limit:]:
-                    bars_out.append({
-                        "t": b.get("t") or b.get("timestamp") or 0,
-                        "o": float(b.get("o") or b.get("open") or 0),
-                        "h": float(b.get("h") or b.get("high") or 0),
-                        "l": float(b.get("l") or b.get("low") or 0),
-                        "c": float(b.get("c") or b.get("close") or 0),
-                        "v": float(b.get("v") or b.get("volume") or 0),
-                    })
-            except Exception as e:
-                return jsonify({"error": f"alpaca fetch failed: {e}"}), 502
-
-        # ── Bot trades for this symbol (for chart markers) ────
-        try:
-            all_trades = trade_history if isinstance(trade_history, list) else []
-            symbol_trades = []
-            for t in all_trades:
-                if (t.get("symbol", "") or "").upper() == symbol:
-                    symbol_trades.append({
-                        "t":         t.get("ts_ms") or t.get("ts") or 0,
-                        "time_str":  t.get("time_et") or t.get("time") or "",
-                        "action":    t.get("action") or "?",
-                        "price":     float(t.get("price") or 0),
-                        "qty":       float(t.get("qty") or 0),
-                        "owner":     t.get("owner") or "",
-                        "pnl_usd":   t.get("pnl_usd"),
-                        "pnl_pct":   t.get("pnl_pct"),
-                        "reason":    t.get("reason") or t.get("exit_reason") or "",
-                        "strategy":  t.get("strategy") or t.get("strat") or "",
-                    })
-            # Last ~30 trades for this symbol
-            symbol_trades = symbol_trades[-30:]
-        except Exception:
-            symbol_trades = []
-
-        # ── Open position info (current SL/TP for horizontal lines) ──
-        open_position = None
-        if is_crypto:
-            try:
-                for p in (crypto_trader.list_open_positions() if crypto_trader else []):
-                    if p.get("symbol", "").upper() == symbol:
-                        open_position = {
-                            "entry_price": p.get("entry_price"),
-                            "stop_price":  p.get("stop_price"),
-                            "tp_price":    p.get("tp_price"),
-                            "owner":       p.get("owner"),
-                            "qty":         p.get("qty"),
-                        }
-                        break
-            except Exception:
-                pass
-        else:
-            for p in shared_state.get("positions", []):
-                if (p.get("symbol", "") or "").upper() == symbol:
-                    entry = float(p.get("entry_price") or p.get("avg_entry_price") or 0)
-                    open_position = {
-                        "entry_price": entry,
-                        "stop_price":  round(entry * 0.95, 4) if entry else None,  # 5% SL
-                        "tp_price":    round(entry * 1.08, 4) if entry else None,  # 8% TP
-                        "owner":       p.get("owner"),
-                        "qty":         p.get("qty"),
-                    }
-                    break
-
-        return jsonify({
-            "symbol":         symbol,
-            "interval":       interval,
-            "asset_class":    "crypto" if is_crypto else "stock",
-            "bars":           bars_out,
-            "trades":         symbol_trades,
-            "open_position":  open_position,
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/bar_structure")
-def bar_structure_endpoint():
-    """
-    Bar structure classification for chart dashboard panel.
-    Returns last 10 daily bars classified into 6 structural types
-    plus trend label, compression/expansion flags.
-
-    Query params:
-      ?symbol=BTCUSDT or AAPL  — required
-      ?days=60                 — bars to fetch (default 60)
-
-    Used by the dashboard 'Bar Structure' panel for visual price action context.
-    """
-    try:
-        symbol = (request.args.get("symbol") or "").upper().strip()
-        days   = max(30, min(int(request.args.get("days", 60)), 200))
-        if not symbol:
-            return jsonify({"error": "symbol required"}), 400
-
-        # Auto-detect asset class
-        is_crypto = "USDT" in symbol or "USDC" in symbol
-
-        bars = []
-        if is_crypto:
-            try:
-                kl = binance_crypto.binance_get("/api/v3/klines", {
-                    "symbol": symbol, "interval": "1d", "limit": days,
-                }) or []
-                for k in kl:
-                    bars.append({"t": int(k[0]), "o": float(k[1]), "h": float(k[2]),
-                                 "l": float(k[3]), "c": float(k[4]), "v": float(k[5])})
-            except Exception as e:
-                return jsonify({"error": f"binance fetch failed: {e}"}), 502
-        else:
-            try:
-                raw = get_bars(symbol, days=days)
-                for b in (raw or []):
-                    bars.append({
-                        "t": b.get("t") or b.get("timestamp") or 0,
-                        "o": float(b.get("o") or b.get("open") or 0),
-                        "h": float(b.get("h") or b.get("high") or 0),
-                        "l": float(b.get("l") or b.get("low") or 0),
-                        "c": float(b.get("c") or b.get("close") or 0),
-                        "v": float(b.get("v") or b.get("volume") or 0),
-                    })
-            except Exception as e:
-                return jsonify({"error": f"alpaca fetch failed: {e}"}), 502
-
-        if not bars:
-            return jsonify({"error": "no bars available"}), 404
-
-        try:
-            from projection_engine import classify_bars, compute_donchian, compute_atr
-            classification = classify_bars(bars, atr_period=20)
-            if not classification:
-                return jsonify({"error": "insufficient bars for classification"}), 400
-
-            atr = compute_atr(bars, period=20)
-            donch = compute_donchian(bars, periods=(10, 20, 55))
-
-            return jsonify({
-                "symbol":       symbol,
-                "asset_class":  "crypto" if is_crypto else "stock",
-                "bars_count":   len(bars),
-                "atr":          atr,
-                "donchian":     donch,
-                "recent_bars":  classification["recent_bars"],
-                "last_bar":     classification["last_bar"],
-                "pattern_summary": classification["pattern_summary"],
-                "trend_structure": classification["trend_structure"],
-                "compression":  classification["compression"],
-                "expansion":    classification["expansion"],
-            })
-        except Exception as e:
-            return jsonify({"error": f"classification failed: {e}"}), 500
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 
 @app.route("/prompt_memory")
 def prompt_memory_endpoint():
@@ -1701,13 +1389,90 @@ def get_trail_pct(symbol):
         return RULES["exit_B_trail_stable"]     # 3% for stable
     return RULES["exit_B_trail_default"]        # 5% default
 
+def stock_turtle_check_entry(symbol: str, system: int = 1) -> dict:
+    """
+    Check if a STOCK is a valid Turtle entry RIGHT NOW.
+    Fetches daily bars via existing get_bars helper.
+    Returns same shape as binance_crypto.turtle_check_entry().
+    """
+    try:
+        from turtle_math import compute_turtle_signal
+    except ImportError as e:
+        return {"eligible": False, "reason": f"turtle_math import failed: {e}",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    try:
+        # get_bars is imported at top of bot_with_proxy.py from market_data.
+        # 90 days of daily bars: plenty for 55-day Donchian + ATR(20).
+        bars = get_bars(symbol, days=90)
+    except Exception as e:
+        return {"eligible": False, "reason": f"bar fetch failed: {e}",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    if not bars or len(bars) < 56:
+        return {"eligible": False, "reason": f"insufficient history ({len(bars) if bars else 0}/56 bars)",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    sig = compute_turtle_signal(bars, system=system)
+    if sig is None:
+        return {"eligible": False, "reason": "could not compute signal",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    period = 20 if system == 1 else 55
+    if sig["entry_signal"]:
+        return {"eligible": True,
+                "reason": f"{period}d breakout: ${sig['current_close']:.2f} > ${sig['entry_level']:.2f}",
+                "entry_level": sig["entry_level"], "stop_price": sig["stop_price"],
+                "atr": sig["atr"], "system": system,
+                "donchian_high": sig["entry_level"]}
+    return {"eligible": False,
+            "reason": f"no {period}d breakout: ${sig['current_close']:.2f} ≤ ${sig['entry_level']:.2f}",
+            "entry_level": sig["entry_level"], "stop_price": sig["stop_price"],
+            "atr": sig["atr"], "system": system,
+            "donchian_high": sig["entry_level"]}
+
+
+def stock_turtle_check_exit(symbol: str, entry_price: float, atr_at_entry: float,
+                           system: int = 1) -> dict:
+    """Check if a Turtle stock position should be closed now."""
+    try:
+        from turtle_math import should_turtle_exit
+    except ImportError as e:
+        return {"should_exit": False, "reason": f"turtle_math import failed: {e}",
+                "exit_level": None}
+    try:
+        bars = get_bars(symbol, days=90)
+    except Exception as e:
+        return {"should_exit": False, "reason": f"bar fetch failed: {e}", "exit_level": None}
+    if not bars:
+        return {"should_exit": False, "reason": "no bars", "exit_level": None}
+    return should_turtle_exit(bars, entry_price, atr_at_entry, system=system)
+
+
+def is_turtle_active_for_stocks() -> bool:
+    """
+    Returns True iff EITHER AI's current playbook has strategy_type='turtle'.
+    Stocks are shared between Claude and Grok, so we activate Turtle on
+    stocks whenever either AI's playbook says so.
+    """
+    try:
+        import strategic_brain as _sb
+        for ai_name in ("claude", "grok"):
+            try:
+                state = _sb.load_strategy(ai_name)
+                cs = state.get("current_strategy", {}) or {}
+                if cs.get("strategy_type") == "turtle":
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False
+
+
 def assign_exit_strategy(symbol, strategy, entry_price, confidence=80, rationale="",
-                          atr_at_entry=None, donchian_high=None, system=1):
+                        atr_at_entry=None, donchian_high=None, system=1):
     """
     Assign exit strategy to a position when it's opened.
     Strategy A = fixed take-profit (fast trades, news-driven)
     Strategy B = trailing stop (momentum/trend plays, let winners run)
-    Strategy T = Turtle (ATR-based stop at entry-2N, exit on N-day Donchian breakdown)
+    Strategy T = Turtle (2N ATR stop + Donchian breakdown exit, no TP)
     """
     trail_pct = get_trail_pct(symbol)
     cfg = {
@@ -1720,164 +1485,20 @@ def assign_exit_strategy(symbol, strategy, entry_price, confidence=80, rationale
         "rationale":   rationale[:100],
     }
     if strategy == "T":
-        # Turtle: ATR-based stop, Donchian exit
         cfg["atr_at_entry"]  = atr_at_entry
         cfg["donchian_high"] = donchian_high
         cfg["turtle_system"] = system
         if atr_at_entry:
             stop_price = round(entry_price - (2 * atr_at_entry), 4)
-            cfg["stop_price_abs"] = stop_price
-            stop_pct_implied = (entry_price - stop_price) / entry_price
-            cfg["stop_pct_implied"] = stop_pct_implied
-            log(f"🐢 {symbol} exit strategy: T (Turtle System {system}) — "
-                f"2N stop ${stop_price} ({stop_pct_implied*100:.1f}%), "
-                f"exit on {10 if system==1 else 20}-day low — {rationale[:50]}")
+            cfg["stop_price"] = stop_price
+            log(f"📋 {symbol} exit strategy: T (Turtle System {system}, 2N stop ${stop_price:.2f}, ATR=${atr_at_entry:.2f}) — {rationale[:60]}")
         else:
-            log(f"🐢 {symbol} exit strategy: T (Turtle, ATR missing — falling back to 5% stop)")
+            log(f"📋 {symbol} exit strategy: T (Turtle, no ATR recorded) — {rationale[:60]}")
     elif strategy == "A":
         log(f"📋 {symbol} exit strategy: A (fixed {RULES['exit_A_take_profit']*100:.0f}% TP) — {rationale[:60]}")
     else:
         log(f"📋 {symbol} exit strategy: B (trailing {trail_pct*100:.0f}% stop, {RULES['exit_B_time_stop_days']}d time) — {rationale[:60]}")
     shared_state["position_exits"][symbol] = cfg
-
-def stock_turtle_check_entry(symbol: str, system: int = 1) -> dict:
-    """
-    Check if a stock meets Turtle entry criteria right now.
-    Returns: {eligible, system, entry_price, donchian_high, atr, stop_price, reason}
-
-    Uses daily bars from Alpaca (60 days for System 1, 120 for System 2).
-    """
-    try:
-        from projection_engine import compute_turtle_signal
-    except ImportError:
-        return {"eligible": False, "reason": "projection_engine unavailable"}
-
-    days_needed = 60 if system == 1 else 120
-    try:
-        bars = get_bars(symbol, days=days_needed)
-    except Exception as e:
-        return {"eligible": False, "reason": f"alpaca bars error: {e}"}
-
-    if not bars or len(bars) < (25 if system == 1 else 60):
-        return {"eligible": False, "reason": f"insufficient daily bars ({len(bars or [])})"}
-
-    # Normalize to consistent schema
-    norm_bars = []
-    for b in bars:
-        norm_bars.append({
-            "t": b.get("t") or b.get("timestamp") or 0,
-            "o": float(b.get("o") or b.get("open") or 0),
-            "h": float(b.get("h") or b.get("high") or 0),
-            "l": float(b.get("l") or b.get("low") or 0),
-            "c": float(b.get("c") or b.get("close") or 0),
-            "v": float(b.get("v") or b.get("volume") or 0),
-        })
-
-    sig = compute_turtle_signal(norm_bars, system=system)
-    if not sig:
-        return {"eligible": False, "reason": "signal computation failed"}
-
-    return {
-        "eligible":      sig["entry_signal"],
-        "system":        system,
-        "entry_price":   norm_bars[-1]["c"],
-        "donchian_high": sig["entry_level"],
-        "atr":           sig["atr"],
-        "stop_price":    sig["stop_price"],
-        "reason":        sig["reason"],
-    }
-
-
-def stock_turtle_check_exit(symbol: str, system: int = 1) -> dict:
-    """
-    Check if open stock Turtle position should exit on Donchian breakdown.
-    Returns: {should_exit, exit_type, current_price, donchian_low, reason}
-    """
-    try:
-        from projection_engine import compute_donchian
-    except ImportError:
-        return {"should_exit": False, "reason": "projection_engine unavailable"}
-
-    try:
-        bars = get_bars(symbol, days=30)
-    except Exception:
-        return {"should_exit": False, "reason": "no bars"}
-
-    if not bars:
-        return {"should_exit": False, "reason": "no bars"}
-
-    norm_bars = []
-    for b in bars:
-        norm_bars.append({
-            "t": b.get("t") or b.get("timestamp") or 0,
-            "o": float(b.get("o") or b.get("open") or 0),
-            "h": float(b.get("h") or b.get("high") or 0),
-            "l": float(b.get("l") or b.get("low") or 0),
-            "c": float(b.get("c") or b.get("close") or 0),
-            "v": float(b.get("v") or b.get("volume") or 0),
-        })
-
-    current_price = norm_bars[-1]["c"]
-    exit_period   = 10 if system == 1 else 20
-    donch         = compute_donchian(norm_bars, periods=(exit_period,))
-    donchian_low  = (donch or {}).get(f"low_{exit_period}")
-
-    if donchian_low and current_price < donchian_low:
-        return {
-            "should_exit":   True,
-            "exit_type":     "donchian",
-            "current_price": current_price,
-            "donchian_low":  donchian_low,
-            "reason":        f"Stock Turtle exit: ${current_price:.2f} < {exit_period}-day low ${donchian_low:.2f}",
-        }
-    return {
-        "should_exit":   False,
-        "exit_type":     "none",
-        "current_price": current_price,
-        "donchian_low":  donchian_low,
-        "reason":        f"holding — close ${current_price:.2f} above {exit_period}-day low ${donchian_low or 0:.2f}",
-    }
-
-
-def stock_turtle_position_size(account_equity: float, atr: float, current_price: float,
-                                risk_pct: float = 1.0) -> dict:
-    """
-    Turtle stock sizing: 1% risk / (2 × ATR per share).
-    Returns: {shares, notional_usd, risk_usd, risk_pct}
-    """
-    try:
-        from projection_engine import compute_turtle_position_size
-        result = compute_turtle_position_size(account_equity, atr, current_price, dollar_per_point=1.0)
-        if not result:
-            return None
-        if risk_pct != 1.0:
-            scale = risk_pct / 1.0
-            result["units"]        = round(result["units"] * scale, 2)
-            result["notional_usd"] = round(result["notional_usd"] * scale, 2)
-            result["risk_usd"]     = round(result["risk_usd"] * scale, 2)
-            result["risk_pct"]     = round(result["risk_pct"] * scale, 2)
-        # Round shares to whole number for stocks
-        result["shares"] = max(1, int(result["units"]))
-        result["notional_usd"] = round(result["shares"] * current_price, 2)
-        result["risk_usd"]     = round(result["shares"] * 2 * atr, 2)
-        return result
-    except Exception:
-        return None
-
-
-def is_turtle_active_for_stocks() -> bool:
-    """Check if either AI's playbook is currently in Turtle mode."""
-    if not HAVE_STRATEGIC_BRAIN or not strategic_brain:
-        return False
-    try:
-        for ai in ("claude", "grok"):
-            state = strategic_brain.load_strategy(ai)
-            if state.get("current_strategy", {}).get("strategy_type") == "turtle":
-                return True
-    except Exception:
-        pass
-    return False
-
 
 def decide_exit_strategy_solo(symbol, trade_data, bars, ind):
     """
@@ -2094,71 +1715,7 @@ def check_exit_conditions(positions):
         entry_date  = exit_cfg.get("entry_date", today)
         trail_pct   = exit_cfg.get("trail_pct", RULES["exit_B_trail_default"])
 
-        # ── TURTLE Strategy T: ATR-based stop + Donchian exit ──
-        if strategy == "T":
-            stop_price_abs = exit_cfg.get("stop_price_abs")
-            t_system       = exit_cfg.get("turtle_system", 1)
-            stop_hit = stop_price_abs and current_price <= stop_price_abs
-            if stop_hit:
-                stop_pct_implied = exit_cfg.get("stop_pct_implied", 0)
-                log(f"🛑 [{owner}] TURTLE 2N STOP {symbol} (${current_price:.2f} <= ${stop_price_abs:.2f}, "
-                    f"{pnl_pct*100:.1f}%)")
-                if smart_sell(symbol, "turtle 2N stop", pos):
-                    record_trade("stop_loss", symbol, pos.get("qty"), current_price,
-                                 float(pos.get("market_value", 0)), owner.lower(),
-                                 reason="turtle 2N atr stop", pnl_usd=pnl_usd,
-                                 pnl_pct=pnl_pct, strategy="T",
-                                 entry_price=entry_price)
-                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
-                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
-                    shared_state["position_exits"].pop(symbol, None)
-                    shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
-                    shared_state["consecutive_wins"]   = 0
-                    shared_state["stops_fired_today"]  = shared_state.get("stops_fired_today", 0) + 1
-                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                        try:
-                            strategic_brain.handle_stop_loss_event(
-                                owner.lower(), symbol, pnl_pct * 100,
-                                shared_state["stops_fired_today"],
-                                shared_state["consecutive_losses"],
-                            )
-                        except Exception:
-                            pass
-                continue
-            # Donchian breakdown exit (the actual Turtle "take profit")
-            try:
-                t_exit = stock_turtle_check_exit(symbol, system=t_system)
-                if t_exit.get("should_exit"):
-                    log(f"🐢 [{owner}] TURTLE DONCHIAN EXIT {symbol} ({pnl_pct*100:+.1f}%) — {t_exit['reason']}")
-                    if smart_sell(symbol, "turtle donchian breakdown", pos):
-                        action_type = "take_profit" if pnl_usd > 0 else "stop_loss"
-                        record_trade(action_type, symbol, pos.get("qty"), current_price,
-                                     float(pos.get("market_value", 0)), owner.lower(),
-                                     reason=t_exit["reason"], pnl_usd=pnl_usd,
-                                     pnl_pct=pnl_pct, strategy="T",
-                                     entry_price=entry_price)
-                        shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
-                        shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
-                        shared_state["position_exits"].pop(symbol, None)
-                        if pnl_usd > 0:
-                            shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
-                            shared_state["consecutive_losses"] = 0
-                        else:
-                            shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
-                            shared_state["consecutive_wins"]   = 0
-                        if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                            try:
-                                strategic_brain.record_trade_result(owner.lower(), won=(pnl_usd > 0), pnl_pct=pnl_pct * 100)
-                            except Exception:
-                                pass
-                    continue
-            except Exception as e:
-                log(f"   ⚠️ Turtle exit check error for {symbol}: {e}")
-            # Turtle: no fixed TP, no time stop. Continue holding.
-            log(f"   🐢 [T] {symbol}: holding — ${current_price:.2f} above {10 if t_system==1 else 20}d Donchian low")
-            continue
-
-        # ── UNIVERSAL: Hard stop-loss (Strategy A + B) ────────
+        # ── UNIVERSAL: Hard stop-loss (both strategies) ───────
         if pnl_pct <= -RULES["exit_A_stop_loss"]:
             log(f"🛑 [{owner}] STOP LOSS {symbol} ({pnl_pct*100:.1f}%) strategy={strategy}")
             if smart_sell(symbol, "stop loss", pos):
@@ -2170,27 +1727,58 @@ def check_exit_conditions(positions):
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                 shared_state["position_exits"].pop(symbol, None)
-                # ── Playbook gate ──────────────────────────────
-                shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
-                shared_state["consecutive_wins"]   = 0
-                shared_state["stops_fired_today"]  = shared_state.get("stops_fired_today", 0) + 1
-                if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                    try:
-                        gate = strategic_brain.handle_stop_loss_event(
-                            owner.lower(), symbol, pnl_pct * 100,
-                            shared_state["stops_fired_today"],
-                            shared_state["consecutive_losses"],
-                        )
-                        if gate.get("wake_strategist"):
-                            log(f"🧭 Playbook gate waking strategist [{owner}]: {gate['wake_reason']}")
-                            strategic_brain.activate_strategist(
-                                owner.lower(),
-                                purpose="stop_loss_gate",
-                                wake_reason=gate["wake_reason"],
-                            )
-                    except Exception as _pge:
-                        log(f"⚠️ Playbook gate error: {_pge}")
             continue
+
+        # ── STRATEGY T: Turtle (2N ATR stop + Donchian breakdown) ─
+        # Turtle bypasses A/B entirely. The ONLY two exit conditions are:
+        #   1. Price hits the 2N stop set at entry (a 1-unit loss)
+        #   2. Price closes below the 10-day Donchian low (or 20-day for System 2)
+        # No fixed TP. No trailing. No time stop.
+        if strategy == "T":
+            t_atr    = exit_cfg.get("atr_at_entry")
+            t_system = exit_cfg.get("turtle_system", 1)
+            if t_atr and t_atr > 0:
+                try:
+                    t_exit = stock_turtle_check_exit(symbol, entry_price, t_atr, system=t_system)
+                except Exception as _te:
+                    log(f"   ⚠️ [T] {symbol}: exit check failed: {_te}")
+                    t_exit = {"should_exit": False, "reason": "exit check error"}
+
+                if t_exit.get("should_exit"):
+                    reason = t_exit.get("reason", "turtle exit")
+                    log(f"🐢 [T] [{owner}] TURTLE EXIT {symbol} {pnl_pct*100:+.1f}% — {reason}")
+                    if smart_sell(symbol, f"turtle exit — {reason}", pos):
+                        # Distinguish stop vs trend-end for recording
+                        is_stop = "2N stop" in reason
+                        record_trade("stop_loss" if is_stop else "take_profit",
+                                     symbol, pos.get("qty"), current_price,
+                                     float(pos.get("market_value", 0)), owner.lower(),
+                                     reason=f"turtle {reason}",
+                                     pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="T",
+                                     entry_price=entry_price)
+                        shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                        shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                        shared_state["position_exits"].pop(symbol, None)
+                else:
+                    # Show current 2N stop level for log clarity
+                    stop2n = entry_price - (2 * t_atr)
+                    log(f"   🐢 [T] {symbol}: {pnl_pct*100:+.2f}% | 2N stop=${stop2n:.2f} | holding")
+            else:
+                # ATR missing — degrade to a simple 8% stop, don't get stuck
+                if pnl_pct <= -0.08:
+                    log(f"🛑 [T-FALLBACK] {symbol} {pnl_pct*100:.1f}% — no ATR, using 8% fallback stop")
+                    if smart_sell(symbol, "turtle fallback stop (no ATR)", pos):
+                        record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                                     float(pos.get("market_value", 0)), owner.lower(),
+                                     reason="turtle fallback stop", pnl_usd=pnl_usd,
+                                     pnl_pct=pnl_pct, strategy="T",
+                                     entry_price=entry_price)
+                        shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                        shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                        shared_state["position_exits"].pop(symbol, None)
+                else:
+                    log(f"   🐢 [T] {symbol}: {pnl_pct*100:+.2f}% (no ATR — fallback monitoring)")
+            continue   # Don't fall through to A/B
 
         # ── STRATEGY A: Dynamic projection take-profit (proj_get_exit_guidance) ─
         if strategy == "A":
@@ -2251,14 +1839,6 @@ def check_exit_conditions(positions):
                     shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
-                    # ── Playbook win tracking ─────────────────
-                    shared_state["consecutive_losses"] = 0
-                    shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
-                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                        try:
-                            strategic_brain.record_trade_result(owner.lower(), won=True, pnl_pct=pnl_pct * 100)
-                        except Exception:
-                            pass
             else:
                 log(f"   [A] {symbol}: {pnl_pct*100:+.2f}% → target {RULES['exit_A_take_profit']*100:.0f}% | holding")
 
@@ -2296,18 +1876,6 @@ def check_exit_conditions(positions):
                     shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
-                    # ── Playbook tracking — trail exits are usually wins ─
-                    if pnl_usd > 0:
-                        shared_state["consecutive_losses"] = 0
-                        shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
-                    else:
-                        shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
-                        shared_state["consecutive_wins"]   = 0
-                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                        try:
-                            strategic_brain.record_trade_result(owner.lower(), won=(pnl_usd > 0), pnl_pct=pnl_pct * 100)
-                        except Exception:
-                            pass
 
             # Time stop — sell if stuck after N days
             elif RULES["exit_B_time_stop_days"]:
@@ -2496,7 +2064,6 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
                 crypto_holdings = crypto_wallet.get("holdings_text", ""),
                 crypto_stats    = crypto_stats,
                 stock_cross_ref = crypto_cross,
-                ai_name         = "claude",   # playbook injection per AI
             )
             if crypto_context_str:
                 log("🪙 Crypto context added to R1 prompt — unified call")
@@ -2527,7 +2094,6 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
         features        = features,
         projections     = shared_state.get("last_projections", {}),
         crypto_context  = crypto_context_str,
-        ai_name         = "claude",   # injects playbook into shared R1 prompt
     )
     log(f"🧠 Prompt mode: {situation_mode.upper().replace('_',' ')}")
 
@@ -2796,6 +2362,27 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
             notional = sized_notional
             if notional < 8:
                 log(f"⚠️ ${notional:.2f} too small for {symbol}"); continue
+
+            # ── TURTLE ENTRY GATE (stocks) ──────────────────────
+            # If the active playbook is Turtle, only 20-day Donchian
+            # breakouts are valid entries. Reject any AI-proposed buy
+            # that fails this mechanical filter.
+            turtle_pre_entry = None
+            if is_turtle_active_for_stocks():
+                try:
+                    turtle_pre_entry = stock_turtle_check_entry(symbol, system=1)
+                    if not turtle_pre_entry.get("eligible"):
+                        log(f"🐢 GATE REJECT {symbol}: Turtle active, no 20d breakout "
+                            f"— {turtle_pre_entry.get('reason','')[:90]}")
+                        continue
+                    log(f"🐢 GATE PASS {symbol}: Turtle breakout — "
+                        f"ATR=${turtle_pre_entry.get('atr',0):.2f}, "
+                        f"stop=${turtle_pre_entry.get('stop_price',0):.2f}")
+                except Exception as _tge:
+                    # Fail-closed: skip rather than silently fall back.
+                    log(f"🐢 GATE ERROR {symbol}: {_tge} — skipping (fail-closed)")
+                    continue
+
             try:
                 # ── SMART ENTRY: Limit order below market for better fill ──
                 # Get current price and set limit slightly below ask
@@ -2870,40 +2457,29 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                     entry_px = limit_price if limit_price else (ind["close"] if ind else notional/10)
                     is_collab = trade.get("is_collab", False)
 
-                    if is_collab:
+                    # If we came through the Turtle gate, override the
+                    # exit strategy to T regardless of what the AI proposed.
+                    if turtle_pre_entry and turtle_pre_entry.get("eligible"):
+                        rationale = f"Turtle System 1 breakout — {turtle_pre_entry.get('reason','')[:60]}"
+                        log(f"🐢 {symbol}: Turtle position armed — ATR=${turtle_pre_entry['atr']:.2f}, "
+                            f"2N stop=${turtle_pre_entry['stop_price']:.2f}")
+                        assign_exit_strategy(symbol, "T", entry_px,
+                                            trade.get("confidence", 80), rationale,
+                                            atr_at_entry=turtle_pre_entry.get("atr"),
+                                            donchian_high=turtle_pre_entry.get("donchian_high"),
+                                            system=1)
+                    elif is_collab:
                         # Collaborative trades: use strategy stored in trade data
                         # (agreed by both AIs in Round 3)
                         strat   = trade.get("exit_strategy", "A")
                         rationale = trade.get("exit_rationale", "collaborative trade")
+                        assign_exit_strategy(symbol, strat, entry_px,
+                                            trade.get("confidence", 80), rationale)
                     else:
                         # Autonomous trades: AI decides based on signals
                         strat, rationale = decide_exit_strategy_solo(
                             symbol, trade, bars, ind
                         )
-                    # ── Turtle override: if playbook is Turtle, only enter on Donchian breakout ──
-                    turtle_meta = None
-                    if is_turtle_active_for_stocks():
-                        try:
-                            t_check = stock_turtle_check_entry(symbol, system=1)
-                            if t_check.get("eligible"):
-                                strat = "T"
-                                rationale = f"Turtle System 1 breakout — {t_check.get('reason','')[:60]}"
-                                turtle_meta = t_check
-                                log(f"🐢 {symbol}: Turtle entry confirmed — ATR={t_check['atr']}, "
-                                    f"stop=${t_check['stop_price']:.2f}")
-                            else:
-                                # Turtle is active but this entry isn't a breakout — skip Turtle and fall through
-                                log(f"🐢 {symbol}: Turtle active but not at 20d breakout — using {strat} fallback")
-                        except Exception as te:
-                            log(f"   ⚠️ Turtle check error for {symbol}: {te}")
-
-                    if strat == "T" and turtle_meta:
-                        assign_exit_strategy(symbol, "T", entry_px,
-                                            trade.get("confidence", 80), rationale,
-                                            atr_at_entry=turtle_meta.get("atr"),
-                                            donchian_high=turtle_meta.get("donchian_high"),
-                                            system=1)
-                    else:
                         assign_exit_strategy(symbol, strat, entry_px,
                                             trade.get("confidence", 80), rationale)
                 except Exception as ex:
@@ -3349,7 +2925,7 @@ except Exception:
 
 # Sync Binance trade history from exchange — fetch last 6 months on first boot
 # Runs in background thread so it doesn't delay startup. Triggers AI
-# memory backfill AND coin_performance regen once the fresh history is on disk.
+# memory backfill once the fresh history is on disk.
 def _boot_binance_sync():
     try:
         sync_binance_history()
@@ -3360,13 +2936,6 @@ def _boot_binance_sync():
             _replay_trade_history_into_memory()
         except Exception as re:
             log(f"⚠️ Post-sync replay failed: {re}")
-        # Now that history is fresh on disk, regenerate per-coin performance
-        # report so the AVOID/CAUTION flags are based on latest fills.
-        try:
-            if HAVE_COIN_PERFORMANCE and coin_performance:
-                coin_performance.regenerate()
-        except Exception as cpe:
-            log(f"⚠️ coin_performance post-sync regen failed: {cpe}")
     except Exception as e:
         log(f"⚠️ Binance history sync failed: {e}")
 threading.Thread(target=_boot_binance_sync, daemon=True).start()
@@ -3434,141 +3003,6 @@ if HAVE_CORE_RESERVE:
         log(f"🏦 Core Reserve module loaded — activation threshold ${core_reserve.ACTIVATION_THRESHOLD:.0f}")
     except Exception as _cre:
         log(f"⚠️ Core Reserve init failed: {_cre}")
-
-# ── Exchange Rules context + initial scan ────────────────────────────
-# Pre-fetches per-coin Binance.US filters (min_notional, tick_size, step_size)
-# so the bot and AIs know each coin's actual trading constraints. Persists
-# to /data/exchange_rules.json — survives redeploys, refreshes every 24h.
-if HAVE_EXCHANGE_RULES:
-    try:
-        exchange_rules._set_context(
-            log_fn         = log,
-            binance_get_fn = binance_crypto.binance_get,
-        )
-        # Boot-time scan: only runs if cache is empty or stale (>24h).
-        # Runs in a background thread so it doesn't block startup.
-        def _boot_exchange_scan():
-            try:
-                status = exchange_rules.get_status()
-                cache_age_hours = float("inf")
-                if status.get("last_full_scan"):
-                    from datetime import datetime, timezone
-                    try:
-                        last = datetime.fromisoformat(
-                            status["last_full_scan"].replace("Z", "+00:00")
-                        )
-                        if last.tzinfo is None:
-                            last = last.replace(tzinfo=timezone.utc)
-                        cache_age_hours = (datetime.now(timezone.utc) - last).total_seconds() / 3600
-                    except Exception:
-                        pass
-                if cache_age_hours > 24 or status.get("cached_symbols", 0) < 5:
-                    universe = list(getattr(binance_crypto, "CRYPTO_UNIVERSE", {}).keys())
-                    if universe:
-                        log(f"📋 Scanning Binance.US rules for {len(universe)} symbols "
-                            f"(cache age: {cache_age_hours:.1f}h)...")
-                        exchange_rules.scan_universe(universe)
-                else:
-                    log(f"📋 Exchange rules cache fresh: {status['cached_symbols']} symbols "
-                        f"(scanned {cache_age_hours:.1f}h ago) — bot floor "
-                        f"${exchange_rules.BOT_GLOBAL_FLOOR_USDT:.0f}")
-            except Exception as e:
-                log(f"⚠️ Boot exchange scan failed: {e}")
-        threading.Thread(target=_boot_exchange_scan, daemon=True).start()
-    except Exception as _ere:
-        log(f"⚠️ Exchange Rules init failed: {_ere}")
-
-# ── Coin Performance context + initial regenerate ─────────────────────
-# Reads /data/binance_trade_history.json, runs FIFO matching, classifies
-# each coin as AVOID/CAUTION/NEUTRAL/PROVEN. Output gets injected into
-# every AI cycle prompt so they see "⛔ KAVA -$9 (0/12)" warnings.
-if HAVE_COIN_PERFORMANCE:
-    try:
-        coin_performance._set_context(
-            log_fn         = log,
-            history_loader = _load_binance_history,
-        )
-        # Initial regenerate happens after Binance history is synced.
-        # Run in background thread to not block boot.
-        def _boot_coin_performance():
-            try:
-                coin_performance.regenerate()
-            except Exception as e:
-                log(f"⚠️ coin_performance initial regen failed: {e}")
-        threading.Thread(target=_boot_coin_performance, daemon=True).start()
-    except Exception as _cpe:
-        log(f"⚠️ Coin Performance init failed: {_cpe}")
-
-# ── Risk Gate context init ────────────────────────────────────────────
-# Wires the four-rule entry gate (BTC macro / circuit breaker / cooldown
-# / weekend pause). The gate is consulted at the top of each crypto
-# cycle's "process proposals" step. Exits are NEVER gated.
-if HAVE_RISK_GATE:
-    try:
-        # BTC 4H bars fetcher — uses existing binance_crypto helper
-        def _risk_gate_btc_bars(limit: int = 250) -> list:
-            try:
-                # /api/v3/klines: BTCUSDT, 4h interval, last `limit` bars
-                # Returns: [[open_ts, o, h, l, c, v, close_ts, ...], ...]
-                raw = binance_crypto.binance_get("/api/v3/klines", {
-                    "symbol":   "BTCUSDT",
-                    "interval": "4h",
-                    "limit":    str(limit),
-                })
-                if not raw or not isinstance(raw, list):
-                    return []
-                bars = []
-                for b in raw:
-                    if not b or len(b) < 6:
-                        continue
-                    bars.append({
-                        "open_ts": int(b[0]),
-                        "o":       float(b[1]),
-                        "h":       float(b[2]),
-                        "l":       float(b[3]),
-                        "c":       float(b[4]),
-                        "v":       float(b[5]),
-                    })
-                return bars
-            except Exception:
-                return []
-
-        # Trade history loader — reuses bot's existing function
-        def _risk_gate_trade_history() -> list:
-            try:
-                # Local trade_history.json (bot's own ledger of decisions
-                # AND realized P&L on each close)
-                if not os.path.exists(TRADE_HISTORY_FILE):
-                    return []
-                with open(TRADE_HISTORY_FILE) as f:
-                    return json.load(f) or []
-            except Exception:
-                return []
-
-        # Wallet getter — lazy lookup so we can reference _strategist_wallet
-        # even though it's defined later in this file
-        def _risk_gate_wallet() -> float:
-            try:
-                # Try strategist's wallet getter first (defined later)
-                fn = globals().get("_strategist_wallet")
-                if fn:
-                    return float(fn() or 0.0)
-                # Fallback: use Alpaca equity directly
-                acct = alpaca("GET", "/v2/account") or {}
-                return float(acct.get("equity", 0) or 0)
-            except Exception:
-                return 0.0
-
-        risk_gate._set_context(
-            log_fn          = log,
-            btc_bars_fn     = _risk_gate_btc_bars,
-            trade_history_fn= _risk_gate_trade_history,
-            wallet_fn       = _risk_gate_wallet,
-        )
-        log(f"🛡️ Risk Gate active: BTC 200-EMA macro / -3% circuit breaker / "
-            f"24h post-loss cooldown / weekend pause")
-    except Exception as _rge:
-        log(f"⚠️ Risk Gate init failed: {_rge}")
 
 # ── Strategic Brain context wiring (Phase A: plumbing only) ──────────
 # The strategic brain receives the same dependencies needed to do its job
@@ -3673,45 +3107,56 @@ if HAVE_STRATEGIC_BRAIN:
                 return res.json()["content"][0]["text"]
 
         def _ask_grok_strategist(prompt: str, system: str = "", max_tokens: int = 4000) -> str:
+            # Build fallback chain: spec first, then known-available models.
+            # If GROK_MODEL env var is set, that overrides everything.
+            import os
             spec = strategic_brain.get_active_model("strategist", "grok",
                                                    wallet=_strategist_wallet())
-            with httpx.Client(timeout=120) as http:
-                res = http.post(
-                    "https://api.x.ai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {GROK_KEY}",
-                             "Content-Type": "application/json"},
-                    json={"model": spec["model_id"],
-                          "max_tokens": min(max_tokens, spec.get("max_tokens", 4000)),
-                          "messages": [
-                              {"role": "system", "content": system or "You are a strategic trading AI. Output valid JSON only."},
-                              {"role": "user",   "content": prompt},
-                          ]},
-                )
-                if not res.is_success:
-                    raise Exception(f"{res.status_code}: {res.text}")
-                return res.json()["choices"][0]["message"]["content"]
+            override = os.environ.get("GROK_MODEL", "").strip()
+            if override:
+                candidates = [override]
+            else:
+                # Try the spec's model first, then fall back through models
+                # known available on the team (console.x.ai).
+                candidates = [spec["model_id"]]
+                for alt in ["grok-4.20-0309-reasoning",
+                            "grok-4.20-0309-non-reasoning",
+                            "grok-4.3",
+                            "grok-build-0.1"]:
+                    if alt not in candidates:
+                        candidates.append(alt)
+            # Reuse a cached working model first if we have one (saves 404s)
+            cached = getattr(_ask_grok_strategist, "_working_model", None)
+            if cached:
+                candidates = [cached] + [c for c in candidates if c != cached]
 
-        def _strategist_sentiment_context() -> dict:
-            """Sentiment + news snapshot for strategist — sourced from Grok intel."""
-            ctx = {}
-            try:
-                # BTC price changes from binance
-                btc_now = binance_crypto.binance_get("/api/v3/ticker/24hr", {"symbol": "BTCUSDT"}) or {}
-                ctx["btc_change_24h"]    = round(float(btc_now.get("priceChangePercent", 0)), 2)
-                ctx["btc_change_1h"]     = shared_state.get("btc_change_1h", 0)
-                # SPY trend from shared state
-                ctx["spy_trend"]         = shared_state.get("spy_trend", "neutral")
-                ctx["spy_change_1h"]     = shared_state.get("spy_change_1h", 0)
-                # Fear/greed from shared state (populated by Grok intel cycle)
-                ctx["overall"]           = shared_state.get("market_sentiment", "neutral")
-                ctx["fear_greed_label"]  = shared_state.get("fear_greed_label", "unknown")
-                ctx["fear_greed_score"]  = shared_state.get("fear_greed_score", 50)
-                ctx["news_summary"]      = shared_state.get("latest_news_summary", "none")
-                ctx["social_summary"]    = shared_state.get("latest_social_summary", "none")
-                ctx["whale_summary"]     = shared_state.get("latest_whale_summary", "none")
-            except Exception as e:
-                log(f"⚠️ _strategist_sentiment_context: {e}")
-            return ctx
+            last_err = None
+            with httpx.Client(timeout=120) as http:
+                for model_id in candidates:
+                    try:
+                        res = http.post(
+                            "https://api.x.ai/v1/chat/completions",
+                            headers={"Authorization": f"Bearer {GROK_KEY}",
+                                     "Content-Type": "application/json"},
+                            json={"model": model_id,
+                                  "max_tokens": min(max_tokens, spec.get("max_tokens", 4000)),
+                                  "messages": [
+                                      {"role": "system", "content": system or "You are a strategic trading AI. Output valid JSON only."},
+                                      {"role": "user",   "content": prompt},
+                                  ]},
+                        )
+                        if res.is_success:
+                            _ask_grok_strategist._working_model = model_id
+                            return res.json()["choices"][0]["message"]["content"]
+                        if res.status_code == 404:
+                            last_err = f"{model_id} 404"
+                            continue
+                        raise Exception(f"{res.status_code}: {res.text}")
+                    except httpx.HTTPError as e:
+                        last_err = f"{model_id}: {e}"
+                        continue
+            raise Exception(f"All Grok strategist models failed. Last: {last_err}. "
+                            f"Set GROK_MODEL env var to a model your team has access to.")
 
         strategic_brain._set_context(
             log_fn                    = log,
@@ -3719,7 +3164,6 @@ if HAVE_STRATEGIC_BRAIN:
             ask_grok_strategist_fn    = _ask_grok_strategist,
             get_trade_history_fn      = _strategist_trade_history,
             get_market_context_fn     = _strategist_market_context,
-            get_sentiment_context_fn  = _strategist_sentiment_context,
             record_trade_fn           = record_trade,
             get_wallet_fn             = _strategist_wallet,
         )
@@ -4731,60 +4175,48 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
 
         sold = False
 
-        # ── TURTLE Strategy T: ATR-based stop + Donchian exit ──
+        # ── STRATEGY T: Turtle exit (checked BEFORE universal % stop) ──
+        # Turtle has its own stop math (2N ATR). Don't apply the universal
+        # 5% stop to T positions — Turtle stops can be wider or tighter.
         if strategy == "T":
-            stop_price_abs = strategy_cfg.get("stop_price_abs")
-            t_system       = strategy_cfg.get("turtle_system", 1)
-            owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
-            if stop_price_abs and current_price <= stop_price_abs:
-                log(f"🛑 AUTO TURTLE 2N STOP {symbol} (${current_price:.2f} <= ${stop_price_abs:.2f}) — bot executing")
-                if smart_sell(symbol, "autonomous turtle 2N stop", pos):
-                    record_trade("stop_loss", symbol, pos.get("qty"), current_price,
-                                 pos_value, owner, reason="autonomous turtle 2N stop",
-                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="T",
-                                 entry_price=entry_price)
-                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
-                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
-                    shared_state["position_exits"].pop(symbol, None)
-                    shared_state["sleeping_strategies"].pop(symbol, None)
-                    shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
-                    shared_state["consecutive_wins"]   = 0
-                    shared_state["stops_fired_today"]  = shared_state.get("stops_fired_today", 0) + 1
-                    sold = True
-            if not sold:
+            t_atr    = strategy_cfg.get("atr_at_entry")
+            t_system = strategy_cfg.get("turtle_system", 1)
+            if t_atr and t_atr > 0:
                 try:
-                    t_exit = stock_turtle_check_exit(symbol, system=t_system)
-                    if t_exit.get("should_exit"):
-                        log(f"🐢 AUTO TURTLE DONCHIAN EXIT {symbol} ({pnl_pct*100:+.1f}%) — {t_exit['reason']}")
-                        if smart_sell(symbol, "autonomous turtle donchian", pos):
-                            action_type = "take_profit" if pnl_usd > 0 else "stop_loss"
-                            record_trade(action_type, symbol, pos.get("qty"), current_price,
-                                         pos_value, owner, reason=t_exit["reason"],
-                                         pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="T",
-                                         entry_price=entry_price)
-                            shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
-                            shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
-                            shared_state["position_exits"].pop(symbol, None)
-                            shared_state["sleeping_strategies"].pop(symbol, None)
-                            if pnl_usd > 0:
-                                shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
-                                shared_state["consecutive_losses"] = 0
-                            else:
-                                shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
-                                shared_state["consecutive_wins"]   = 0
-                            if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                                try:
-                                    strategic_brain.record_trade_result(owner, won=(pnl_usd > 0), pnl_pct=pnl_pct * 100)
-                                except Exception:
-                                    pass
-                            sold = True
-                except Exception as e:
-                    log(f"   ⚠️ Auto turtle exit error for {symbol}: {e}")
-            if not sold:
-                log(f"   🐢 AUTO [T] {symbol}: holding — Turtle Donchian still intact")
-            continue
+                    t_exit = stock_turtle_check_exit(symbol, entry_price, t_atr, system=t_system)
+                except Exception as _te:
+                    log(f"   ⚠️ AUTO [T] {symbol}: exit check failed: {_te}")
+                    t_exit = {"should_exit": False, "reason": "exit check error"}
+                if t_exit.get("should_exit"):
+                    reason  = t_exit.get("reason", "turtle exit")
+                    is_stop = "2N stop" in reason
+                    log(f"🐢 AUTO TURTLE EXIT [T] {symbol} {pnl_pct*100:+.1f}% — {reason}")
+                    if smart_sell(symbol, f"autonomous turtle — {reason}", pos):
+                        owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                        record_trade("stop_loss" if is_stop else "take_profit",
+                                     symbol, pos.get("qty"), current_price,
+                                     pos_value, owner,
+                                     reason=f"autonomous turtle {reason}",
+                                     pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="T",
+                                     entry_price=entry_price)
+                        shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                        shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                        shared_state["position_exits"].pop(symbol, None)
+                        shared_state["sleeping_strategies"].pop(symbol, None)
+                        if is_stop:
+                            shared_state["stops_fired_today"] += 1
+                            stops_fired += 1
+                        sold = True
+            else:
+                # No ATR recorded — degrade to universal % stop below
+                pass
+            if sold:
+                continue
+            # If we reach here, T is configured but no exit fired → skip A/B/universal
+            if t_atr and t_atr > 0:
+                continue
 
-        # ── UNIVERSAL: Hard stop-loss (Strategy A + B) ────────
+        # ── UNIVERSAL: Hard stop-loss ─────────────────────────
         if pnl_pct <= -RULES["exit_A_stop_loss"]:
             log(f"🛑 AUTO STOP-LOSS {symbol} {pnl_pct*100:.1f}% — bot executing (AIs sleeping)")
             if smart_sell(symbol, "autonomous stop-loss", pos):
@@ -4800,22 +4232,6 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
                 shared_state["stops_fired_today"] += 1
                 stops_fired += 1
                 sold = True
-                # ── Playbook gate (autonomous path) ───────────
-                shared_state["consecutive_losses"] = shared_state.get("consecutive_losses", 0) + 1
-                shared_state["consecutive_wins"]   = 0
-                if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                    try:
-                        gate = strategic_brain.handle_stop_loss_event(
-                            owner, symbol, pnl_pct * 100,
-                            shared_state["stops_fired_today"],
-                            shared_state["consecutive_losses"],
-                        )
-                        if gate.get("wake_strategist"):
-                            strategic_brain.activate_strategist(
-                                owner, purpose="autonomous_stop_gate",
-                                wake_reason=gate["wake_reason"])
-                    except Exception:
-                        pass
 
         # ── STRATEGY A: Fixed take-profit ─────────────────────
         elif strategy == "A" and not sold:
@@ -4831,14 +4247,6 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
                     shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                     shared_state["position_exits"].pop(symbol, None)
                     shared_state["sleeping_strategies"].pop(symbol, None)
-                    # ── Playbook win tracking ─────────────────
-                    shared_state["consecutive_losses"] = 0
-                    shared_state["consecutive_wins"]   = shared_state.get("consecutive_wins", 0) + 1
-                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                        try:
-                            strategic_brain.record_trade_result(owner, won=True, pnl_pct=pnl_pct * 100)
-                        except Exception:
-                            pass
                     sold = True
 
         # ── STRATEGY B: Trailing stop ─────────────────────────
@@ -5056,14 +4464,6 @@ def trading_loop():
                         if cash_check < thresh_check["active"]:
                             ai_sleep("premarket research done — both AIs sleeping, bot takes over")
                     except Exception: pass
-                    # ── Strategist pre-market activation ──────
-                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                        try:
-                            for _ai in ("claude", "grok"):
-                                strategic_brain.activate_strategist(
-                                    _ai, purpose=strategic_brain.SCHEDULE["pre_market"]["purpose"])
-                        except Exception as _se:
-                            log(f"⚠️ Strategist pre-market activation error: {_se}")
 
             elif mode in ("opening", "prime", "power_hour"):
                 labels = {"opening":"🔔 OPENING","prime":"🚀 PRIME","power_hour":"⚡ POWER HOUR"}
@@ -5124,14 +4524,6 @@ def trading_loop():
                         elif not pos_ah and cash_ah < thresh_ah["active"]:
                             ai_sleep("afterhours done — no positions, both AIs sleeping")
                     except Exception: pass
-                    # ── Strategist post-close activation ──────
-                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                        try:
-                            for _ai in ("claude", "grok"):
-                                strategic_brain.activate_strategist(
-                                    _ai, purpose=strategic_brain.SCHEDULE["post_close"]["purpose"])
-                        except Exception as _se:
-                            log(f"⚠️ Strategist post-close activation error: {_se}")
 
         except Exception as e:
             log(f"❌ Loop error: {e}")
@@ -5163,42 +4555,6 @@ def trading_loop():
                         log("🪙 Crypto: AIs sleeping — running standalone cycle")
                     else:
                         log("🪙 Crypto: running hourly cycle")
-                    # ── Strategist crypto_close (9pm ET) ──────
-                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                        try:
-                            now_et_hr = datetime.now(ZoneInfo("America/New_York")).hour
-                            if now_et_hr == strategic_brain.SCHEDULE["crypto_close"]["hour"]:
-                                for _ai in ("claude", "grok"):
-                                    strategic_brain.activate_strategist(
-                                        _ai, purpose=strategic_brain.SCHEDULE["crypto_close"]["purpose"])
-                        except Exception as _se:
-                            log(f"⚠️ Strategist crypto_close error: {_se}")
-                    # ── Playbook cycle_context for execute_playbook ─
-                    if HAVE_STRATEGIC_BRAIN and strategic_brain:
-                        try:
-                            _pb_ctx = {
-                                "stops_fired_session":  shared_state.get("stops_fired_today", 0),
-                                "consecutive_losses":   shared_state.get("consecutive_losses", 0),
-                                "consecutive_wins":     shared_state.get("consecutive_wins", 0),
-                                "winning_streak":       shared_state.get("consecutive_wins", 0),
-                                "btc_change_1h":        shared_state.get("btc_change_1h", 0.0),
-                                "spy_change_1h":        shared_state.get("spy_change_1h", 0.0),
-                                "sentiment":            shared_state.get("market_sentiment", "neutral"),
-                                "session_drawdown_pct": shared_state.get("session_drawdown_pct", 0.0),
-                                "minutes_since_stop":   shared_state.get("minutes_since_last_stop"),
-                                "session_win_rate_pct": shared_state.get("session_win_rate_pct", 100),
-                                "session_trade_count":  shared_state.get("session_trade_count", 0),
-                            }
-                            for _ai in ("claude", "grok"):
-                                _pb_result = strategic_brain.execute_playbook(_ai, _pb_ctx)
-                                if _pb_result.get("wake_strategist") and not _pb_result.get("block_new_entries"):
-                                    strategic_brain.activate_strategist(
-                                        _ai, purpose="mid_cycle_wake",
-                                        wake_reason=_pb_result.get("wake_reason", "playbook condition"))
-                                if _pb_result.get("active_rules"):
-                                    log(f"🧭 Playbook [{_ai}]: {', '.join(_pb_result['active_rules'])}")
-                        except Exception as _pbe:
-                            log(f"⚠️ Playbook execute error: {_pbe}")
                     crypto_trader.run_crypto_cycle(
                         total_equity      = 0,
                         ask_claude_fn     = ask_claude,
