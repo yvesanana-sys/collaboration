@@ -1,0 +1,143 @@
+name: NovaTrade Health Watchdog
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Last-known-good auto-rollback for the NovaTrade bot.
+#
+#   • On every push to main  → wait for Railway to deploy, then health-check the
+#     live bot. If it's hard-down, restore the `last-known-good` branch onto main
+#     (forward commit, no force-push) so Railway redeploys the working version.
+#   • On a schedule          → if the bot is healthy AND has completed a recent
+#     trading cycle, advance `last-known-good` to the current commit. If it's
+#     down, revert (once — a tree-compare prevents re-reverting the same state).
+#
+# This runs on GitHub's infrastructure, independent of Railway, so it works even
+# when the bot is completely dead — which is exactly when it's needed.
+#
+# SETUP (one time):
+#   1. Settings → Secrets and variables → Actions → Variables → New variable
+#        BOT_URL = https://<your-railway-domain>   (no trailing slash)
+#   2. Settings → Actions → General → Workflow permissions → "Read and write"
+#   3. The `last-known-good` branch is auto-created on the first healthy run,
+#      or seed it manually now while main is healthy:
+#        git push origin main:last-known-good
+#   4. If main is a protected branch, allow GitHub Actions to push to it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 min (GitHub may delay under load)
+  workflow_dispatch:          # manual run button
+
+permissions:
+  contents: write   # push revert commit / move last-known-good
+  issues: write     # open alert issues
+
+concurrency:
+  group: health-watchdog
+  cancel-in-progress: false   # never interrupt a revert mid-flight
+
+env:
+  LKG_BRANCH: last-known-good
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need history + branches for revert/promote
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Decide mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "mode=deploy_check" >> "$GITHUB_OUTPUT"
+            echo "Push detected → waiting for Railway to deploy before checking..."
+            sleep 75
+          else
+            echo "mode=maintain" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Health check → decision
+        id: health
+        env:
+          BOT_URL: ${{ vars.BOT_URL }}
+          MODE: ${{ steps.mode.outputs.mode }}
+        run: python .github/scripts/watchdog_health.py
+
+      # ── REVERT ────────────────────────────────────────────────────────────
+      - name: Auto-revert to last-known-good
+        if: steps.health.outputs.decision == 'revert'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name  "novatrade-watchdog[bot]"
+          git config user.email "novatrade-watchdog@users.noreply.github.com"
+
+          if ! git ls-remote --exit-code --heads origin "$LKG_BRANCH" >/dev/null 2>&1; then
+            echo "::warning::No $LKG_BRANCH branch exists yet — cannot revert. Alerting instead."
+            gh issue create \
+              --title "🚨 Bot down and no last-known-good to revert to" \
+              --label "watchdog,incident" \
+              --body "The watchdog found the bot hard-down (${{ steps.health.outputs.reason }}) but no \`$LKG_BRANCH\` branch exists yet, so it can't auto-revert. Restore the bot manually, then seed the branch: \`git push origin main:$LKG_BRANCH\`." || true
+            exit 0
+          fi
+
+          git fetch origin "$LKG_BRANCH"
+          LKG_TREE=$(git rev-parse "origin/$LKG_BRANCH^{tree}")
+          HEAD_TREE=$(git rev-parse "HEAD^{tree}")
+
+          if [ "$LKG_TREE" = "$HEAD_TREE" ]; then
+            echo "::warning::HEAD already equals $LKG_BRANCH and the bot is STILL down — not reverting (would loop). This is an external problem (Railway/exchange/secrets)."
+            gh issue create \
+              --title "🚨 Bot down even on last-known-good code" \
+              --label "watchdog,incident" \
+              --body "The deployed code already matches \`$LKG_BRANCH\` and the bot is still failing health checks. The watchdog will NOT revert (nothing to revert to). Likely an external cause — Railway outage, missing/expired secrets, or an exchange API problem. ${{ steps.health.outputs.reason }}" || true
+            exit 0
+          fi
+
+          echo "Restoring all files from $LKG_BRANCH onto main..."
+          git checkout "origin/$LKG_BRANCH" -- .
+          git add -A
+          git commit -m "auto-revert: restore $LKG_BRANCH (failed post-deploy health check)"
+          git push origin HEAD:main
+
+          gh issue create \
+            --title "↩️ Auto-reverted a failed deploy" \
+            --label "watchdog,incident" \
+            --body "A push to main failed its health check and was automatically reverted to \`$LKG_BRANCH\`. Railway is redeploying the working version. Reason: ${{ steps.health.outputs.reason }}. Review the bad commit before pushing again." || true
+
+      # ── PROMOTE ───────────────────────────────────────────────────────────
+      - name: Promote current commit to last-known-good
+        if: steps.health.outputs.decision == 'promote'
+        run: |
+          git config user.name  "novatrade-watchdog[bot]"
+          git config user.email "novatrade-watchdog@users.noreply.github.com"
+          echo "Bot healthy with a fresh trading cycle — advancing $LKG_BRANCH to HEAD."
+          git push origin "HEAD:$LKG_BRANCH" --force
+
+      # ── ALERT (soft) ──────────────────────────────────────────────────────
+      - name: Alert (no auto-action)
+        if: steps.health.outputs.decision == 'alert'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "⚠️ Bot health warning (no auto-revert)" \
+            --label "watchdog" \
+            --body "The watchdog saw something off but did NOT auto-revert (the server is reachable, so a rollback isn't clearly the right move). Please check the bot. Reason: ${{ steps.health.outputs.reason }}" || true
+
+      - name: Summary
+        run: |
+          echo "### Watchdog result" >> "$GITHUB_STEP_SUMMARY"
+          echo "- mode: \`${{ steps.mode.outputs.mode }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- decision: \`${{ steps.health.outputs.decision }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- reason: ${{ steps.health.outputs.reason }}" >> "$GITHUB_STEP_SUMMARY"
