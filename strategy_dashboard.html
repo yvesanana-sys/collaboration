@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NovaTrade // Strategy Committee</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0c10; --panel:#10141b; --panel-2:#161b24; --line:#1f2733;
+    --ink:#e6edf3; --dim:#7d8895; --faint:#4a5560;
+    --long:#3ddc84; --short:#ff5d5d; --warn:#ffb454; --accent:#5ccfe6;
+    --veto:#3a1f24; --prio:#13301f; --neutral:#191f29;
+    --grid:rgba(92,207,230,.04);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:13px; line-height:1.45; min-height:100vh;
+    background-image:
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:34px 34px;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:22px 20px 60px}
+  /* ---- top bar ---- */
+  header{
+    display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+    border:1px solid var(--line);background:linear-gradient(180deg,var(--panel-2),var(--panel));
+    padding:14px 18px;border-radius:10px;
+  }
+  .brand{font-weight:700;letter-spacing:.14em;font-size:14px}
+  .brand .sub{color:var(--faint);font-weight:400}
+  .spacer{flex:1}
+  .stat{display:flex;flex-direction:column;line-height:1.2}
+  .stat .k{font-size:10px;letter-spacing:.12em;color:var(--dim);text-transform:uppercase}
+  .stat .v{font-size:15px;font-weight:600}
+  .regime-badge{
+    display:inline-flex;align-items:center;gap:9px;padding:7px 13px;border-radius:999px;
+    border:1px solid var(--accent);color:var(--accent);font-weight:600;letter-spacing:.1em;
+    background:rgba(92,207,230,.07);text-transform:uppercase;font-size:12px;
+  }
+  .pulse{width:8px;height:8px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 0 rgba(92,207,230,.6);animation:pulse 2.2s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(92,207,230,.5)}70%{box-shadow:0 0 0 9px rgba(92,207,230,0)}100%{box-shadow:0 0 0 0 rgba(92,207,230,0)}}
+
+  h2{font-size:11px;letter-spacing:.2em;color:var(--dim);text-transform:uppercase;
+    margin:26px 0 12px;display:flex;align-items:center;gap:10px}
+  h2::after{content:"";flex:1;height:1px;background:var(--line)}
+
+  /* ---- regime matrix ---- */
+  .matrix{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{padding:9px 11px;text-align:center;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500;letter-spacing:.06em;font-size:10px;text-transform:uppercase;
+    background:var(--panel-2)}
+  td.name{text-align:left;color:var(--ink);white-space:nowrap}
+  td.name .num{color:var(--faint);margin-right:7px}
+  .cell{display:inline-block;min-width:74px;padding:3px 0;border-radius:5px;font-size:10px;
+    letter-spacing:.05em;text-transform:uppercase}
+  .w-prio{background:var(--prio);color:var(--long);border:1px solid rgba(61,220,132,.25)}
+  .w-veto{background:var(--veto);color:var(--short);border:1px solid rgba(255,93,93,.22)}
+  .w-low{background:var(--neutral);color:var(--dim)}
+  .w-mid{background:var(--neutral);color:var(--ink)}
+  col.active,th.active{background:rgba(92,207,230,.08)!important}
+  td.active{box-shadow:inset 0 0 0 1px rgba(92,207,230,.22)}
+
+  /* ---- signal cards ---- */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:13px}
+  .card{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+    padding:14px 15px;position:relative;overflow:hidden;
+    opacity:0;transform:translateY(8px);animation:rise .5s forwards}
+  @keyframes rise{to{opacity:1;transform:none}}
+  .card.flat{opacity:.5}
+  .card .edge{position:absolute;left:0;top:0;bottom:0;width:3px}
+  .card.long .edge{background:var(--long)} .card.short .edge{background:var(--short)}
+  .card.flat .edge{background:var(--faint)}
+  .crow{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+  .sname{font-weight:600;letter-spacing:.03em}
+  .dir{font-weight:700;letter-spacing:.1em;font-size:11px;padding:2px 8px;border-radius:5px}
+  .dir.long{color:var(--long);background:var(--prio)}
+  .dir.short{color:var(--short);background:var(--veto)}
+  .dir.flat{color:var(--faint);background:var(--neutral)}
+  .sym{color:var(--accent);font-size:11px;letter-spacing:.06em}
+  .levels{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0 10px}
+  .lvl{background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:7px 8px}
+  .lvl .k{font-size:9px;letter-spacing:.1em;color:var(--dim);text-transform:uppercase}
+  .lvl .v{font-size:14px;font-weight:600}
+  .lvl.tp .v{color:var(--long)} .lvl.sl .v{color:var(--short)}
+  .meta{display:flex;align-items:center;gap:14px;font-size:11px;color:var(--dim);margin-top:4px}
+  .rr{color:var(--ink);font-weight:600}
+  .conf{flex:1;display:flex;align-items:center;gap:8px}
+  .bar{flex:1;height:5px;background:var(--neutral);border-radius:3px;overflow:hidden}
+  .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--long))}
+  .reason{color:var(--faint);font-size:11px;margin-top:9px;line-height:1.4}
+  .empty{color:var(--faint);text-align:center;padding:28px;border:1px dashed var(--line);border-radius:10px}
+  footer{margin-top:30px;color:var(--faint);font-size:11px;text-align:center;letter-spacing:.05em}
+  .live{color:var(--long)} .stale{color:var(--warn)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">NOVATRADE <span class="sub">// STRATEGY COMMITTEE</span></div>
+    <div class="spacer"></div>
+    <div class="stat"><span class="k">Equity</span><span class="v" id="equity">$—</span></div>
+    <div class="stat"><span class="k">Free Capital</span><span class="v" id="capital">$—</span></div>
+    <div class="regime-badge"><span class="pulse"></span><span id="regime">—</span></div>
+  </header>
+
+  <h2>Regime Weighting Matrix</h2>
+  <div class="matrix"><table id="matrix"></table></div>
+
+  <h2>Live Signals <span id="sigcount" style="color:var(--faint);letter-spacing:0"></span></h2>
+  <div class="grid" id="signals"></div>
+
+  <footer>
+    data <span id="datasrc" class="stale">awaiting feed</span> ·
+    updated <span id="updated">—</span> ·
+    signal-only — no orders are placed from this view
+  </footer>
+</div>
+
+<script>
+/* ---------------------------------------------------------------------------
+   DATA CONTRACT — GET /api/strategies returns this shape. The Flask blueprint
+   in dashboard_strategies.py serves it. If the endpoint is unreachable, the
+   baked-in SAMPLE below renders so the page is never blank.
+--------------------------------------------------------------------------- */
+const STRATS = [
+  ["01","Trend Confluence"],   ["02","Volatility Squeeze"], ["03","Mean Reversion"],
+  ["04","SMC / Order Blocks"], ["05","Macro Divergence"],   ["06","Volume Profile POC"],
+  ["07","Pair Trading"],       ["08","GMMA Ribbon"],        ["09","Opening Range Breakout"],
+  ["10","Dynamic DCA"]
+];
+const REGIMES = ["Strong Trend","Ranging","High Volatility"];
+// weight class per strategy per regime: prio | veto | low | mid
+const WEIGHTS = {
+  "Trend Confluence":   ["prio","veto","mid"],
+  "Volatility Squeeze": ["low","low","prio"],
+  "Mean Reversion":     ["veto","prio","low"],
+  "SMC / Order Blocks": ["prio","mid","mid"],
+  "Macro Divergence":   ["veto","low","prio"],
+  "Volume Profile POC": ["low","prio","mid"],
+  "Pair Trading":       ["mid","mid","mid"],
+  "GMMA Ribbon":        ["prio","veto","low"],
+  "Opening Range Breakout":["mid","low","prio"],
+  "Dynamic DCA":        ["low","low","low"]
+};
+const LABEL = {prio:"prioritize",veto:"veto",low:"quiet",mid:"normal"};
+
+const SAMPLE = {
+  equity:53.40, capital:24.11, updated:new Date().toISOString(),
+  data_source:"sample",
+  regime:{label:"Ranging"},
+  signals:[
+    {strategy:"Mean Reversion",symbol:"SOL/USDT",direction:"long",entry:142.10,stop:138.90,
+     take_profit:148.50,rr:2.0,confidence:78,reason:"Price 2.3σ below VWAP → mean-revert long"},
+    {strategy:"Volume Profile POC",symbol:"ETH/USDT",direction:"long",entry:2410.0,stop:2372.0,
+     take_profit:2486.0,rr:2.0,confidence:68,reason:"Bounce off POC 2408 (volume support)"},
+    {strategy:"SMC / Order Blocks",symbol:"BTC/USDT",direction:"short",entry:64120,stop:64980,
+     take_profit:62400,rr:2.0,confidence:80,reason:"Bearish liquidity sweep + rejection + FVG"}
+  ]
+};
+
+function weightCell(cls,active){
+  const map={prio:"w-prio",veto:"w-veto",low:"w-low",mid:"w-mid"};
+  return `<td class="${active?'active':''}"><span class="cell ${map[cls]}">${LABEL[cls]}</span></td>`;
+}
+function renderMatrix(activeRegime){
+  const ai = REGIMES.indexOf(activeRegime);
+  let html = "<thead><tr><th style='text-align:left'>Strategy</th>";
+  REGIMES.forEach((r,i)=> html += `<th class="${i===ai?'active':''}">${r}</th>`);
+  html += "</tr></thead><tbody>";
+  STRATS.forEach(([num,name])=>{
+    html += `<tr><td class="name"><span class="num">${num}</span>${name}</td>`;
+    WEIGHTS[name].forEach((w,i)=> html += weightCell(w,i===ai));
+    html += "</tr>";
+  });
+  document.getElementById("matrix").innerHTML = html + "</tbody>";
+}
+
+function fmt(n){
+  if(n==null||isNaN(n)) return "—";
+  const a=Math.abs(n);
+  return a>=1000 ? n.toLocaleString(undefined,{maximumFractionDigits:0})
+       : a>=1    ? n.toFixed(2) : n.toPrecision(4);
+}
+function card(s,i){
+  const d = (s.direction||"flat").toLowerCase();
+  return `<div class="card ${d} ${s.fired===false?'flat':''}" style="animation-delay:${i*60}ms">
+    <span class="edge"></span>
+    <div class="crow"><span class="sname">${s.strategy}</span>
+      <span class="dir ${d}">${d}</span></div>
+    <div class="sym">${s.symbol||""}</div>
+    <div class="levels">
+      <div class="lvl"><div class="k">Entry</div><div class="v">${fmt(s.entry)}</div></div>
+      <div class="lvl sl"><div class="k">Stop</div><div class="v">${fmt(s.stop)}</div></div>
+      <div class="lvl tp"><div class="k">Target</div><div class="v">${fmt(s.take_profit)}</div></div>
+    </div>
+    <div class="meta">
+      <span>R:R <span class="rr">${(s.rr??2).toFixed(1)}</span></span>
+      <span class="conf">conf
+        <span class="bar"><i style="width:${Math.max(0,Math.min(100,s.confidence||0))}%"></i></span>
+        ${Math.round(s.confidence||0)}</span>
+    </div>
+    <div class="reason">${s.reason||""}</div>
+  </div>`;
+}
+function render(d){
+  document.getElementById("equity").textContent  = "$"+fmt(d.equity);
+  document.getElementById("capital").textContent = "$"+fmt(d.capital);
+  document.getElementById("regime").textContent  = d.regime?.label || "—";
+  document.getElementById("updated").textContent =
+    new Date(d.updated||Date.now()).toLocaleTimeString();
+  const src=document.getElementById("datasrc");
+  src.textContent = d.data_source==="sample" ? "sample (no feed)" : "live feed";
+  src.className   = d.data_source==="sample" ? "stale" : "live";
+  renderMatrix(d.regime?.label);
+  const fired=(d.signals||[]).filter(s=>s.fired!==false);
+  document.getElementById("sigcount").textContent = `(${fired.length} firing)`;
+  document.getElementById("signals").innerHTML =
+    fired.length ? fired.map(card).join("")
+    : `<div class="empty">No strategy is firing on the current bar.<br>The Committee stands aside.</div>`;
+}
+async function tick(){
+  try{
+    const r = await fetch("/api/strategies",{cache:"no-store"});
+    if(!r.ok) throw 0;
+    render(await r.json());
+  }catch(e){ render(SAMPLE); }   // endpoint not wired yet → sample
+}
+tick(); setInterval(tick, 30000);   // refresh every 30s
+</script>
+</body>
+</html>
