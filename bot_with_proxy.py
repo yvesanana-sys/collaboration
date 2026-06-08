@@ -23,6 +23,20 @@ BOT_NAME       = "NovaTrade"
 PORT           = int(os.environ.get("PORT", 8080))
 
 app = Flask(__name__)
+# ── Strategy Committee dashboard (signal-only; serves /strategies) ──────────
+from dashboard_strategies import strategy_dashboard, set_ohlcv_provider
+import binance_crypto as _bc, pandas as _pd
+
+def _dash_ohlcv(symbol, timeframe="1h", limit=300):
+    bars = _bc.get_crypto_bars(symbol.replace("/", ""), interval=timeframe,
+                               limit=min(limit, 1000))
+    df = _pd.DataFrame(bars).rename(columns={"o": "open", "h": "high", "l": "low",
+                                             "c": "close", "v": "volume"})
+    return df[["open", "high", "low", "close", "volume"]]
+
+app.register_blueprint(strategy_dashboard)
+set_ohlcv_provider(_dash_ohlcv)
+# ────────────────────────────────────────────────────────────────────────────
 CORS(app)
 
 # ── Global shared state ───────────────────────────────────────
