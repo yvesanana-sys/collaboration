@@ -211,7 +211,14 @@ def parse_json(raw):
         return result
     except: return None
 
+# Last exception text seen by ask_with_retry — lets safe_ask_claude/grok
+# classify a failure (credits vs network) even though ask_with_retry
+# swallows exceptions and returns None.
+_last_ask_error = None
+
 def ask_with_retry(ask_fn, prompt, system, retries=3):
+    global _last_ask_error
+    _last_ask_error = None
     for attempt in range(retries+1):
         try:
             raw    = ask_fn(prompt, system)
@@ -223,6 +230,11 @@ def ask_with_retry(ask_fn, prompt, system, retries=3):
             else:
                 log(f"⚠️ All retries failed. Raw: {raw[:200]}")
         except Exception as e:
+            _last_ask_error = str(e)
+            if classify_ai_error(e) in ("credits_exhausted", "auth_error"):
+                # Billing/auth errors won't fix themselves — don't burn retries
+                log(f"❌ Non-retryable API error: {e}")
+                return None
             if attempt < retries:
                 log(f"⚠️ API error {attempt+1}: {e}")
                 time.sleep(3)
@@ -239,13 +251,48 @@ def classify_ai_error(error_str):
     """
     e = str(error_str).lower()
     if any(x in e for x in ["credit", "billing", "quota", "insufficient_quota",
-                              "rate_limit", "429", "payment", "balance", "overloaded"]):
+                              "payment", "balance"]):
         return "credits_exhausted"
+    if any(x in e for x in ["rate_limit", "429", "overloaded"]):
+        # Transient — handled like a network error (retry, then 30-min
+        # auto-recover) rather than a hard credits-down that needs a top-up
+        return "rate_limited"
     if any(x in e for x in ["timeout", "connection", "network", "resolve", "unreachable"]):
         return "network_error"
     if any(x in e for x in ["401", "403", "invalid_api_key", "authentication"]):
         return "auth_error"
     return "unknown_error"
+
+def _mark_ai_failure(ai, error_str):
+    """
+    Shared failure bookkeeping for safe_ask_claude / safe_ask_grok.
+    Classifies the error and updates health flags:
+      credits_exhausted → immediate handoff, stays down until manual top-up
+      auth_error        → immediate handoff, stays down until key fixed
+      anything else     → fail-count threshold, 30-min auto-recover
+    """
+    other      = "Grok" if ai == "claude" else "Claude"
+    error_type = classify_ai_error(error_str) if error_str else "unknown_error"
+    shared_state[f"{ai}_fail_count"]  = shared_state.get(f"{ai}_fail_count", 0) + 1
+    shared_state[f"{ai}_fail_reason"] = error_type
+
+    if error_type == "credits_exhausted":
+        shared_state[f"{ai}_healthy"]    = False
+        shared_state[f"{ai}_credits_ok"] = False
+        shared_state[f"last_{ai}_fail"]  = datetime.now().isoformat()
+        console = "console.anthropic.com" if ai == "claude" else "console.x.ai"
+        log(f"💳 {ai.upper()} CREDITS EXHAUSTED — Immediate handoff to {other}")
+        log(f"   ACTION REQUIRED: Top up API credits at {console}")
+        log(f"   {other} will handle ALL trading until {ai.title()} credits are restored")
+    elif error_type == "auth_error":
+        shared_state[f"{ai}_healthy"]   = False
+        shared_state[f"last_{ai}_fail"] = datetime.now().isoformat()
+        env_key = "ANTHROPIC_KEY" if ai == "claude" else "GROK_KEY"
+        log(f"🔑 {ai.upper()} AUTH ERROR — Check {env_key} in Railway variables")
+    elif shared_state[f"{ai}_fail_count"] >= RULES["failover_max_retries"]:
+        shared_state[f"{ai}_healthy"]   = False
+        shared_state[f"last_{ai}_fail"] = datetime.now().isoformat()
+        log(f"❌ {ai.title()} UNHEALTHY ({error_type}) — {other} taking over")
 
 def safe_ask_claude(prompt, system, retries=3):
     """
@@ -258,40 +305,17 @@ def safe_ask_claude(prompt, system, retries=3):
     """
     try:
         result = ask_with_retry(ask_claude, prompt, system, retries=retries)
-        if result:
-            shared_state["claude_healthy"]    = True
-            shared_state["claude_fail_count"] = 0
-            shared_state["claude_fail_reason"] = None
-        else:
-            shared_state["claude_fail_count"] += 1
-            if shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
-                shared_state["claude_healthy"]   = False
-                shared_state["last_claude_fail"] = datetime.now().isoformat()
-                log(f"⚠️ Claude UNHEALTHY — Grok taking over")
-        return result
     except Exception as e:
-        error_type = classify_ai_error(str(e))
-        shared_state["claude_fail_count"]  += 1
-        shared_state["claude_fail_reason"]  = error_type
-
-        if error_type == "credits_exhausted":
-            # Immediate handoff — no point retrying
-            shared_state["claude_healthy"]    = False
-            shared_state["claude_credits_ok"] = False
-            shared_state["last_claude_fail"]  = datetime.now().isoformat()
-            log(f"💳 CLAUDE CREDITS EXHAUSTED — Immediate handoff to Grok")
-            log(f"   ACTION REQUIRED: Top up Anthropic API credits at console.anthropic.com")
-            log(f"   Grok will handle ALL trading until Claude credits are restored")
-        elif error_type == "auth_error":
-            shared_state["claude_healthy"]   = False
-            shared_state["last_claude_fail"] = datetime.now().isoformat()
-            log(f"🔑 CLAUDE AUTH ERROR — Check ANTHROPIC_KEY in Railway variables")
-        else:
-            if shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
-                shared_state["claude_healthy"]   = False
-                shared_state["last_claude_fail"] = datetime.now().isoformat()
-                log(f"❌ Claude UNHEALTHY ({error_type}) — Grok taking over")
+        _mark_ai_failure("claude", str(e))
         return None
+    if result:
+        shared_state["claude_healthy"]     = True
+        shared_state["claude_credits_ok"]  = True
+        shared_state["claude_fail_count"]  = 0
+        shared_state["claude_fail_reason"] = None
+        return result
+    _mark_ai_failure("claude", _last_ask_error)
+    return None
 
 def safe_ask_grok(prompt, system, retries=3):
     """
@@ -301,39 +325,17 @@ def safe_ask_grok(prompt, system, retries=3):
     """
     try:
         result = ask_with_retry(ask_grok, prompt, system, retries=retries)
-        if result:
-            shared_state["grok_healthy"]    = True
-            shared_state["grok_fail_count"] = 0
-            shared_state["grok_fail_reason"] = None
-        else:
-            shared_state["grok_fail_count"] += 1
-            if shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
-                shared_state["grok_healthy"]   = False
-                shared_state["last_grok_fail"] = datetime.now().isoformat()
-                log(f"⚠️ Grok UNHEALTHY — Claude taking over")
-        return result
     except Exception as e:
-        error_type = classify_ai_error(str(e))
-        shared_state["grok_fail_count"]  += 1
-        shared_state["grok_fail_reason"]  = error_type
-
-        if error_type == "credits_exhausted":
-            shared_state["grok_healthy"]    = False
-            shared_state["grok_credits_ok"] = False
-            shared_state["last_grok_fail"]  = datetime.now().isoformat()
-            log(f"💳 GROK CREDITS EXHAUSTED — Immediate handoff to Claude")
-            log(f"   ACTION REQUIRED: Top up xAI API credits at console.x.ai")
-            log(f"   Claude will handle ALL trading until Grok credits are restored")
-        elif error_type == "auth_error":
-            shared_state["grok_healthy"]   = False
-            shared_state["last_grok_fail"] = datetime.now().isoformat()
-            log(f"🔑 GROK AUTH ERROR — Check GROK_KEY in Railway variables")
-        else:
-            if shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
-                shared_state["grok_healthy"]   = False
-                shared_state["last_grok_fail"] = datetime.now().isoformat()
-                log(f"❌ Grok UNHEALTHY ({error_type}) — Claude taking over")
+        _mark_ai_failure("grok", str(e))
         return None
+    if result:
+        shared_state["grok_healthy"]     = True
+        shared_state["grok_credits_ok"]  = True
+        shared_state["grok_fail_count"]  = 0
+        shared_state["grok_fail_reason"] = None
+        return result
+    _mark_ai_failure("grok", _last_ask_error)
+    return None
 
 def check_ai_health():
     """Check AI health; auto-recover network errors after 30min. Returns (c_ok, g_ok, mode)."""
@@ -346,7 +348,15 @@ def check_ai_health():
                 fail_time = datetime.fromisoformat(last_fail)
                 mins_down = (now - fail_time).seconds // 60
                 if fail_reason == "credits_exhausted":
-                    log(f"💳 {ai.title()} credits exhausted ({mins_down}m) — top-up needed")
+                    if (now - fail_time).seconds >= 3600:
+                        # Probe hourly so a credit top-up is picked up
+                        # without needing a redeploy
+                        shared_state[f"{ai}_healthy"]     = True
+                        shared_state[f"{ai}_fail_count"]  = 0
+                        shared_state[f"{ai}_fail_reason"] = None
+                        log(f"💳 {ai.title()} probing after {mins_down}m down — checking if credits restored")
+                    else:
+                        log(f"💳 {ai.title()} credits exhausted ({mins_down}m) — top-up needed")
                     continue
                 elif fail_reason == "auth_error":
                     log(f"🔑 {ai.title()} auth error ({mins_down}m) — check Railway env key")

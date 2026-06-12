@@ -73,6 +73,8 @@ shared_state: dict = {
     "grok_credits_ok":     True,
     "claude_fail_reason":  "",
     "grok_fail_reason":    "",
+    "claude_fail_count":   0,
+    "grok_fail_count":     0,
     "failover_mode":       False,
     # Sleep/wake
     "ai_sleeping":         False,
