@@ -156,7 +156,10 @@ CRYPTO_RULES = {
     # ── Position sizing (tier-based) ─────────────────────────
     # More aggressive at small equity — needed to compound to goal
     "max_positions":        3,       # Aggressive — 3 concurrent crypto positions (was 2)
-    "min_trade_usdt":       8.0,     # Binance.US minimum
+    "min_trade_usdt":       10.0,    # Binance.US MIN_NOTIONAL — hard exchange floor; orders < $10 are rejected
+    "min_order_usdt":       10.50,   # Sizing floor WITH headroom: size every order ≥ this so a price tick or
+                                     # in-kind fee can't drop the fill below the $10 MIN_NOTIONAL. Use for ALL
+                                     # position sizing; min_trade_usdt is only the final hard reject in place_crypto_buy.
     # ── Entry filters ─────────────────────────────────────────
     "min_confidence":       60,      # Aggressive — lowered to 60 (was 65)
     "vol_spike_multiplier": 1.5,     # Volume must be 1.5x average to confirm breakout
@@ -2686,7 +2689,15 @@ class CryptoTrader:
         risk_pct      = tier["risk_pct"]
         tier_max_pos  = tier["max_pos"]
         tier_coins    = tier["coins"]  # None = all universe unlocked
-        trade_budget  = round(total_available * risk_pct, 2)
+        # Floor the per-trade budget to the exchange order minimum. On a small
+        # wallet, risk_pct × wallet can fall below Binance's $10 MIN_NOTIONAL
+        # (e.g. 30% × $24 = $7.23) — the AI would then be told to propose an
+        # order the exchange always rejects, so nothing ever trades. Raise it
+        # to the sizing floor, capped at 97% of what's actually available.
+        _raw_budget   = total_available * risk_pct
+        _budget_floor = CRYPTO_RULES["min_order_usdt"]
+        _budget_cap   = total_available * 0.97
+        trade_budget  = round(min(max(_raw_budget, _budget_floor), _budget_cap), 2)
         CRYPTO_RULES["max_positions"] = tier_max_pos
 
         self._log(f"   📊 {tier['note']}")
@@ -3550,11 +3561,26 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
         # its own share. Reserved / safety capital is taken from both
         # equally so neither AI gets an unfair advantage.
         if ENABLE_AI_COMPETITION:
-            # AI pools are split AFTER reserve is removed
-            claude_pool = round(tradeable_usdt * CLAUDE_POOL_PCT, 2)
-            grok_pool   = round(tradeable_usdt * GROK_POOL_PCT,   2)
+            # Availability-aware split (applied AFTER reserve is removed).
+            # An AI that produced no response this cycle — e.g. Anthropic API
+            # credits exhausted, which leaves claude_resp == None — forfeits its
+            # slice to the AI that did respond, so capital is never stranded
+            # behind a dead engine. Self-heals automatically the moment both
+            # AIs respond again — no redeploy, no manual toggle.
+            _claude_ok = bool(claude_resp)
+            _grok_ok   = bool(grok_resp)
+            if _claude_ok and _grok_ok:
+                claude_pool = round(tradeable_usdt * CLAUDE_POOL_PCT, 2)
+                grok_pool   = round(tradeable_usdt * GROK_POOL_PCT,   2)
+                _solo = ""
+            elif _claude_ok:
+                claude_pool, grok_pool, _solo = round(tradeable_usdt, 2), 0.0, " [solo: Claude — Grok idle]"
+            elif _grok_ok:
+                claude_pool, grok_pool, _solo = 0.0, round(tradeable_usdt, 2), " [solo: Grok — Claude idle]"
+            else:
+                claude_pool, grok_pool, _solo = 0.0, 0.0, " [both idle]"
             self._log(f"   🥊 Pool split: Claude=${claude_pool:.2f} | "
-                      f"Grok=${grok_pool:.2f} (of ${tradeable_usdt:.2f} tradeable USDT)")
+                      f"Grok=${grok_pool:.2f} (of ${tradeable_usdt:.2f} tradeable USDT){_solo}")
         else:
             claude_pool = tradeable_usdt
             grok_pool   = tradeable_usdt
@@ -3587,8 +3613,12 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                     continue
                 if sym in self.positions:
                     continue
-                if notional < CRYPTO_RULES["min_trade_usdt"]:
-                    continue
+                # Raise weak or blank sizing UP to the order floor instead of
+                # silently dropping the signal. If the AI omits notional (→ 0)
+                # or proposes a sub-$10 order, treat it as a floor-sized order;
+                # real affordability is enforced later against the AI's own pool.
+                if notional < CRYPTO_RULES["min_order_usdt"]:
+                    notional = CRYPTO_RULES["min_order_usdt"]
 
                 # Validate against projection
                 proj = self._projections.get(sym, {})
@@ -3641,9 +3671,17 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                 else:
                     pool_for_sizing = crypto_pool
 
+                # Per-trade cap: at most 95% of the sizing pool (headroom for
+                # fees/ticks), but never below the exchange order floor. The old
+                # flat 60% cap produced sub-$10 orders on small wallets (60% of a
+                # $12 slice = $7.2 → always rejected). On a small account a single
+                # order may legitimately be most of the pool.
+                _pool_for_cap = max(pool_for_sizing, total_sellable)
+                _sized        = min(notional, round(_pool_for_cap * 0.95, 2))
+                _sized        = max(_sized, CRYPTO_RULES["min_order_usdt"])
                 proposals.append({
                     "symbol":    sym,
-                    "notional":  min(notional, max(pool_for_sizing, total_sellable) * 0.6),
+                    "notional":  _sized,
                     "entry":     entry_px,
                     "tp":        tp_px,
                     "stop":      stop_px,
@@ -3695,14 +3733,19 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             # try its picks instead.
             if ENABLE_AI_COMPETITION and owner in ("claude", "grok"):
                 ai_pool_avail = claude_pool if owner == "claude" else grok_pool
-                if ai_pool_avail < CRYPTO_RULES["min_trade_usdt"]:
+                # Use the sizing floor (incl. headroom) as the affordability
+                # gate so we never accept a slot we can only fund below the
+                # exchange's $10 MIN_NOTIONAL.
+                if ai_pool_avail < CRYPTO_RULES["min_order_usdt"]:
                     self._log(f"   🥊 {owner.title()} pool exhausted "
-                              f"(${ai_pool_avail:.2f} < ${CRYPTO_RULES['min_trade_usdt']}) "
+                              f"(${ai_pool_avail:.2f} < ${CRYPTO_RULES['min_order_usdt']}) "
                               f"— skipping {sym}, giving slot to other AI")
                     continue
-                # Cap notional to AI's own pool — never overspend
+                # Cap notional to AI's own pool — never overspend. Use 98% so the
+                # result stays above the $10 floor even after the haircut
+                # (0.98 × $10.50 = $10.29 > $10).
                 if notional > ai_pool_avail:
-                    notional = round(ai_pool_avail * 0.95, 2)  # 95% leaves room for fees
+                    notional = round(ai_pool_avail * 0.98, 2)
                     self._log(f"   🥊 {owner.title()} sizing {sym} to ${notional:.2f} "
                               f"(pool cap)")
 
@@ -4152,15 +4195,23 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                     continue
                 if sym in self.positions:
                     continue
-                if notional < CRYPTO_RULES["min_trade_usdt"]:
-                    continue
+                # Raise weak/blank sizing up to the floor (same rule as the
+                # standalone cycle) so this path can't silently drop a valid
+                # signal for being under the exchange minimum.
+                if notional < CRYPTO_RULES["min_order_usdt"]:
+                    notional = CRYPTO_RULES["min_order_usdt"]
                 proj = self._projections.get(sym, {})
                 if proj.get("error") or not proj.get("viable"):
                     self._log(f"   🪙 {sym} proj not viable — skip")
                     continue
+                # Floor-aware per-trade cap (mirrors run_crypto_cycle): ≤95% of
+                # the pool, never below the order floor. Replaces the flat 60%
+                # cap that produced sub-$10 orders on small wallets.
+                _r1_sized = min(notional, round(crypto_pool * 0.95, 2))
+                _r1_sized = max(_r1_sized, CRYPTO_RULES["min_order_usdt"])
                 proposals.append({
                     "symbol":    sym,
-                    "notional":  min(notional, crypto_pool * 0.6),
+                    "notional":  _r1_sized,
                     "entry":     entry or proj["proj_low"],
                     "tp":        tp    or proj["proj_high"],
                     "conf":      conf,
