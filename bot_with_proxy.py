@@ -141,6 +141,16 @@ shared_state: dict = {
     "trend_alerts":        [],
     "trend_scan_results":  {},
     "deposit_detected":    False,
+    # Sentiment pipeline — populated by Grok intel cycle (crypto) and
+    # sleep brief (stocks); consumed by strategist market context
+    "market_sentiment":      "neutral",
+    "latest_news_summary":   "",
+    "latest_social_summary": "",
+    "latest_whale_summary":  "",
+    "btc_change_1h":         0.0,
+    "spy_change_1h":         0.0,
+    "fear_greed":            None,
+    "sentiment_updated":     "",
 }
 
 # RULES imported from portfolio_manager
@@ -170,7 +180,7 @@ from market_data import (
     _compute_breakout, compute_indicators, get_chart_section,
     get_news_context, get_fear_greed_index, get_earnings_calendar,
     get_market_context, get_spy_trend, get_biggest_gainers,
-    get_recent_ipos, get_market_mode,
+    get_recent_ipos, get_market_mode, get_1h_changes,
 )
 import market_data as _market_data
 
@@ -3096,6 +3106,26 @@ if HAVE_STRATEGIC_BRAIN:
                     ctx["crypto_positions"] = len(crypto_pos)
                 except Exception:
                     ctx["crypto_positions"] = 0
+                # Sentiment pipeline — 1h momentum, fear/greed, and the
+                # latest Grok intel summaries published to shared_state
+                try:
+                    changes = get_1h_changes()
+                    ctx["btc_change_1h"] = f"{changes['btc_change_1h']:+.2f}%"
+                    ctx["spy_change_1h"] = f"{changes['spy_change_1h']:+.2f}%"
+                except Exception:
+                    pass
+                fg = get_fear_greed_index() or shared_state.get("fear_greed")
+                if fg:
+                    shared_state["fear_greed"] = fg
+                    ctx["fear_greed_index"] = f"{fg.get('value', '?')}/100 ({fg.get('label', '?')}) — {fg.get('signal', '')}"
+                ctx["market_sentiment"] = shared_state.get("market_sentiment", "neutral")
+                for key in ("latest_news_summary",
+                            "latest_social_summary",
+                            "latest_whale_summary"):
+                    if shared_state.get(key):
+                        ctx[key] = shared_state[key]
+                if shared_state.get("sentiment_updated"):
+                    ctx["sentiment_as_of"] = shared_state["sentiment_updated"]
             except Exception as e:
                 log(f"⚠️ Strategist market context fetch failed: {e}")
             return ctx
@@ -3373,6 +3403,8 @@ def run_cycle():
     # ── Phase 1 features ──────────────────────────────────────
     log("😱 Fetching Fear & Greed Index...")
     fear_greed = get_fear_greed_index()
+    if fear_greed:
+        shared_state["fear_greed"] = fear_greed
 
     log("📅 Checking earnings calendar...")
     pos_syms_list = [p["symbol"] for p in positions] if positions else []
@@ -3874,6 +3906,12 @@ JSON (keep under 600 chars):
             log(f"🔴 Grok brief: sentiment={grok_brief.get('market_sentiment')} "
                 f"momentum={grok_brief.get('momentum_strength')} "
                 f"watchlist={[w.get('symbol') for w in grok_brief.get('grok_watchlist',[])]}")
+            # Publish brief sentiment to the strategist pipeline
+            if grok_brief.get("market_sentiment"):
+                shared_state["market_sentiment"] = grok_brief["market_sentiment"]
+            if grok_brief.get("sentiment_notes"):
+                shared_state["latest_social_summary"] = str(grok_brief["sentiment_notes"])[:500]
+            shared_state["sentiment_updated"] = datetime.now(timezone.utc).isoformat()
     except Exception as e:
         log(f"❌ Grok brief: {e}")
 

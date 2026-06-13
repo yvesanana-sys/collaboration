@@ -2102,6 +2102,46 @@ class CryptoTrader:
             ss["crypto_year_start"] = wallet_value
             ss["crypto_last_year"]  = cur_year
 
+    def _publish_intel_sentiment(self, intel: str):
+        """
+        Split Grok's intel bullets into news/social/whale summaries plus
+        an aggregate bullish/bearish read, and publish to shared_state so
+        the strategist (strategic_brain) gets real sentiment context
+        instead of defaults.
+        """
+        if not self._shared_state or not intel:
+            return
+        social, whale, news = [], [], []
+        bull = bear = 0
+        for line in intel.splitlines():
+            line = line.strip().lstrip("•-* ")
+            if not line:
+                continue
+            low = line.lower()
+            bull += low.count("bullish")
+            bear += low.count("bearish")
+            if any(k in low for k in ("whale", "lookonchain", "large wallet",
+                                      "on-chain", "onchain")):
+                whale.append(line)
+            elif any(k in low for k in ("twitter", "x/", " on x", "reddit",
+                                        "r/", "influencer", "trending")):
+                social.append(line)
+            else:
+                news.append(line)
+        ss = self._shared_state
+        ss["latest_news_summary"]   = " | ".join(news)[:500]
+        ss["latest_social_summary"] = " | ".join(social)[:500]
+        ss["latest_whale_summary"]  = " | ".join(whale)[:500]
+        if bull > bear:
+            ss["market_sentiment"] = "bullish"
+        elif bear > bull:
+            ss["market_sentiment"] = "bearish"
+        else:
+            ss["market_sentiment"] = "neutral"
+        ss["sentiment_updated"] = datetime.now(timezone.utc).isoformat()
+        self._log(f"   📡 Sentiment published: {ss['market_sentiment']} "
+                  f"(news={len(news)} social={len(social)} whale={len(whale)})")
+
     def format_crypto_gains(self, wallet_value: float) -> str:
         """Return a one-line crypto gains summary."""
         if not self._shared_state:
@@ -3125,6 +3165,7 @@ PRIORITY: Find best entry, buy low, plan exit above fees.
             if raw_intel and len(raw_intel) > 20:
                 grok_intel = raw_intel[:900]  # Increased from 600 — more intel = better decisions
                 self._log(f"   🔴 Grok intel: {grok_intel[:200]}...")
+                self._publish_intel_sentiment(raw_intel)
         except Exception as e:
             self._log(f"   ⚠️ Grok research failed: {e}")
 

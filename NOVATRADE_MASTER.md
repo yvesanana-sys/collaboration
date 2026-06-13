@@ -501,7 +501,7 @@ Below the $1,000 Core Reserve activation threshold. Phase 1.5 module loaded but 
 - [ ] **Deploy v3.1.3 to Railway** (6 files: `strategic_brain.py`, `bot_with_proxy.py`, `binance_crypto.py`, `prompt_builder.py`, `sleep_manager.py`, `risk_gate.py`, `dashboard.html`)
 - [ ] **Monitor first strategist activation** in Railway logs — verify both Claude and Grok strategists respond cleanly at 9am ET pre-market call
 - [ ] **Verify `/coin_performance` endpoint** is being polled by new dashboard (Coin Health panel)
-- [ ] **Wire sentiment data into shared_state** — currently the strategist reads default values; full sentiment context activates once Grok intel populates `shared_state["market_sentiment"]`, `["latest_news_summary"]`, `["latest_social_summary"]`, `["latest_whale_summary"]`, `["btc_change_1h"]`, `["spy_change_1h"]`
+- [x] **Wire sentiment data into shared_state** — DONE (sentiment pipeline). Grok crypto intel cycle now publishes `market_sentiment` + news/social/whale summaries via `_publish_intel_sentiment()`; sleep brief publishes `market_sentiment`/`sentiment_notes`; `get_1h_changes()` tracks `btc_change_1h`/`spy_change_1h`; fear/greed cached in `shared_state["fear_greed"]`. All flow into the strategist prompt via `_strategist_market_context()`.
 - [ ] Watch TSLA if it returns — bot cannot sell due to Alpaca 403, must close manually
 - [ ] Claim FET staking rewards on Binance.US (~small USDT amount)
 - [ ] Add funding to Binance.US to unlock Tier 2 when ready
@@ -542,10 +542,11 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 - Auto-revert on win-rate drop
 - Dashboard tier panel with proposal/revert audit trail
 
-### Sentiment Pipeline Enrichment
-- Wire Grok's news/social/whale fetch into `shared_state["market_sentiment"]`, `["latest_news_summary"]`, `["latest_social_summary"]`, `["latest_whale_summary"]` so the strategist receives real-time sentiment context (currently the keys exist as defaults but aren't populated by Grok intel cycle)
-- Add fear/greed index lookup (alternative.me or similar)
-- Wire BTC/SPY 1h change tracking into shared_state for `btc_change_1h` / `spy_change_1h`
+### Sentiment Pipeline Enrichment — ✅ SHIPPED
+- Grok's news/social/whale intel now populates `shared_state["market_sentiment"]`, `["latest_news_summary"]`, `["latest_social_summary"]`, `["latest_whale_summary"]` every crypto AI cycle (`CryptoTrader._publish_intel_sentiment` in `binance_crypto.py`); the stock sleep brief also publishes its `market_sentiment`/`sentiment_notes`
+- Fear/greed index (alternative.me, already fetched daily) is now cached in `shared_state["fear_greed"]` and refetched live at each strategist activation
+- BTC/SPY 1h change tracking via `market_data.get_1h_changes()` (5-min cache) → `shared_state["btc_change_1h"]` / `["spy_change_1h"]`
+- All of the above is appended to the strategist prompt through `_strategist_market_context()` in `bot_with_proxy.py`
 
 ### Phase 1.6 — Smaller wins
 - **Dust convert** — integrate Binance.US `/sapi/v1/asset/dust` to sweep <$10 holdings into USDT/BTC. Frees up otherwise stuck capital.
