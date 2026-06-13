@@ -1039,18 +1039,16 @@ def evolution_endpoint():
     try:
         if not HAVE_AI_EVOLUTION or not ai_evolution:
             return jsonify({"enabled": False, "reason": "module not loaded"})
-        # Translate prompt_builder memory stats into the shape ai_evolution expects
+        # Same stats source the Pass B cycle uses (owner-tagged closes in
+        # persistent trade_history) so tier display matches tier decisions
         c_stats = {"trades": 0, "total_pnl": 0.0}
         g_stats = {"trades": 0, "total_pnl": 0.0}
         try:
-            mem_stats = prompt_builder.memory.get_stats()
-            ai_p      = mem_stats.get("ai_patterns", {})
             for ai, dest in (("claude", c_stats), ("grok", g_stats)):
-                p = ai_p.get(ai, {})
-                w = int(p.get("wins", 0) or 0)
-                l = int(p.get("losses", 0) or 0)
-                dest["trades"]    = w + l
-                dest["total_pnl"] = float(p.get("total_pnl_usd", 0) or 0)
+                closes = [t for t in trade_history
+                          if t.get("owner") == ai and t.get("pnl_usd") is not None]
+                dest["trades"]    = len(closes)
+                dest["total_pnl"] = sum(float(t["pnl_usd"]) for t in closes)
         except Exception:
             pass
         result = ai_evolution.get_full_status(c_stats, g_stats)
@@ -1250,6 +1248,9 @@ _market_data._set_context(RULES, log, shared_state_ref=shared_state)
 _github_deploy._set_context(log)
 # AI clients needs log + shared_state
 _ai_clients._set_context(log, shared_state_ref=shared_state)
+# AI evolution (Pass B) only needs log
+if HAVE_AI_EVOLUTION and ai_evolution:
+    ai_evolution._set_context(log)
 # Intelligence needs ask_grok + parse_json (now from ai_clients)
 _intelligence._set_context(RULES, log,
                             ask_grok_fn   = ask_grok,
@@ -4503,6 +4504,32 @@ def trading_loop():
                     except Exception as cre:
                         log(f"⚠️ Core Reserve check failed: {cre}")
                         run_cycle._last_core_check = now_unix    # Don't retry-storm on failure
+
+            # ── AI EVOLUTION PASS B (hourly; AI call ≤ once/72h per AI) ──
+            # Tier-ups and auto-reverts are rule-based and free; the
+            # self-modification proposal is cooldown-gated inside the module.
+            if HAVE_AI_EVOLUTION and ai_evolution and ai_evolution.ENABLE_SELF_MODIFICATION:
+                if not hasattr(run_cycle, "_last_evo_check"):
+                    run_cycle._last_evo_check = 0
+                if now_unix - run_cycle._last_evo_check >= 3600:    # 1 hour
+                    run_cycle._last_evo_check = now_unix
+                    for _evo_ai, _evo_ask in (("claude", safe_ask_claude),
+                                              ("grok",   safe_ask_grok)):
+                        try:
+                            _closes = [t for t in trade_history
+                                       if t.get("owner") == _evo_ai
+                                       and t.get("pnl_usd") is not None]
+                            _res = ai_evolution.run_evolution_cycle(
+                                _evo_ai,
+                                trades        = len(_closes),
+                                total_pnl     = sum(float(t["pnl_usd"]) for t in _closes),
+                                recent_results= [t["pnl_usd"] for t in _closes[-10:]],
+                                ask_fn        = _evo_ask,
+                            )
+                            if _res.get("actions"):
+                                log(f"🧬 Evolution [{_evo_ai}]: {', '.join(_res['actions'])}")
+                        except Exception as evo_e:
+                            log(f"⚠️ Evolution cycle failed for {_evo_ai}: {evo_e}")
 
             # ── MAIN TRADING LOGIC ───────────────────────────
 

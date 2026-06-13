@@ -1332,6 +1332,24 @@ function renderBattle(lb) {
   }
 }
 
+// Evolution tier badges on the battle panel's role labels — hover for
+// the recent proposal/revert audit trail (Pass B)
+function renderEvolution(evo) {
+  if (!evo || evo.error || !evo.ai_states) return;  // keep static "tactician" label
+  for (const ai of ['claude', 'grok']) {
+    const st = evo.ai_states[ai];
+    const el = document.getElementById(`${ai}-role`);
+    if (!st || !el) continue;
+    const tierName = (st.current_tier_name || '').toLowerCase();
+    el.textContent = `T${st.current_tier ?? 0} ${tierName}` +
+                     (st.prompt_version ? ` · prompt v${st.prompt_version}` : '');
+    const hist = (st.evolution_history || []).slice(-4).reverse()
+      .map(e => `${(e.ts || '').slice(0, 10)} ${e.type}: ${e.message}`)
+      .join('\n');
+    el.title = hist || 'no evolution events yet — tier-ups, prompt proposals and reverts appear here';
+  }
+}
+
 function renderStrategy(strategist) {
   // 1. Real error → red "error" · 2. enabled === false (Phase A) → playbook +
   // "dormant" tag · 3. enabled === true → full info. Whenever we have a
@@ -1521,13 +1539,14 @@ async function fetchAll() {
   statusText.textContent = 'syncing…';
   statusLive.className = 'live warn';
   try {
-    const [stats, crypto, perf, hist, leaderboard, strategist] = await Promise.all([
+    const [stats, crypto, perf, hist, leaderboard, strategist, evolution] = await Promise.all([
       apiFetch('/stats').catch(e => ({ error: e.message })),
       apiFetch('/crypto_status').catch(e => ({ error: e.message })),
       apiFetch('/performance').catch(e => ({ error: e.message })),
       apiFetch('/history?limit=500').catch(e => ({ error: e.message })),
       apiFetch('/leaderboard').catch(e => ({ error: e.message })),
       apiFetch('/strategy').catch(e => ({ error: e.message })),
+      apiFetch('/evolution').catch(e => ({ error: e.message })),
     ]);
 
     D.stats = stats; D.crypto = crypto; D.perf = perf;
@@ -1539,6 +1558,7 @@ async function fetchAll() {
     renderHealth(stats, crypto, strategist);
     renderBanner(stats);
     renderBattle(leaderboard);
+    renderEvolution(evolution);
     renderStrategy(strategist);
     renderStocks(stats);
     renderCrypto(crypto);
