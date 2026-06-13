@@ -3213,6 +3213,14 @@ if HAVE_STRATEGIC_BRAIN:
             record_trade_fn           = record_trade,
             get_wallet_fn             = _strategist_wallet,
         )
+        # Phase C — Core Reserve handover: hand the same strategist
+        # channels to the reserve for collaborative allocation reviews
+        if HAVE_CORE_RESERVE and core_reserve:
+            core_reserve._set_context(
+                ask_claude_fn = _ask_claude_strategist,
+                ask_grok_fn   = _ask_grok_strategist,
+            )
+            log("🏦 Core Reserve strategist handover wired (Phase C)")
         # Surface the active model spec for visibility
         wallet_now = _strategist_wallet()
         c_spec = strategic_brain.get_active_model("strategist", "claude", wallet=wallet_now)
