@@ -31,6 +31,23 @@ import json
 import os
 from datetime import datetime, timezone, timedelta
 
+# ── Crypto playbook selection ───────────────────────────────
+# Controls which strategy both AIs run for CRYPTO. Change this value and
+# redeploy to switch; the next load_strategy() call re-aligns each AI's
+# active crypto playbook to match (one-shot, idempotent — see load_strategy).
+#
+#   "mean_reversion" : oversold dip-buying (RSI<35), small frequent targets,
+#                      ATR/percent stop. Trades continuously — matches the
+#                      AIs' natural picks. Bypasses the Turtle breakout gate.
+#   "turtle"         : 20-day Donchian breakout only. Rare entries; sits out
+#                      chop/downtrends. (Was forced on via the 2026-06 turtle
+#                      migration — that is what blocked 100% of recent picks.)
+#
+# NOTE: the Turtle entry gate in binance_crypto.py fires ONLY when the active
+# playbook's strategy_type == "turtle". Any other value disables that gate, so
+# the AIs' picks flow through the normal projection/stop/TP path instead.
+CRYPTO_STRATEGY_MODE = "mean_reversion"
+
 # ── Model configuration ─────────────────────────────────────
 # Single source of truth for ALL AI model choices in NovaTrade.
 # Both strategist and tactician models live here so that swapping
@@ -287,6 +304,48 @@ def _default_strategy_turtle(ai_name: str, asset_class: str = "crypto") -> dict:
     }
 
 
+def _default_strategy_meanrevert(ai_name: str, asset_class: str = "crypto") -> dict:
+    """
+    Mean-reversion crypto playbook — the counterpart to Turtle.
+
+    Buys oversold dips (RSI<35) on a stabilizing price rather than breakouts,
+    aims for small frequent targets, and exits on an ATR/percent stop. This is
+    what the tacticians naturally pick, so it removes the contradiction that had
+    the Turtle gate vetoing every signal.
+
+    strategy_type is intentionally NOT "turtle" — that single field is what the
+    binance_crypto.py entry gate checks, so this value bypasses the Donchian
+    breakout requirement. Stops/TP are still applied by the executor's ATR logic
+    and enforced by the 5-minute exit monitor (default 8% stop if no ATR).
+    """
+    return {
+        "id":              f"S-{ai_name}-meanrevert-{asset_class}",
+        "name":            f"Mean-Reversion {asset_class.title()} v1",
+        "version":         1,
+        "strategy_type":   "mean_reversion",   # ← NOT 'turtle' → breakout gate is bypassed
+        "active_since":    datetime.now(timezone.utc).isoformat(),
+        "rules": {
+            "entry_logic":             "Oversold dip-buy: RSI < 35 with price stabilizing; AI confirms "
+                                       "with news/volume. NO breakout required. Prefer liquid coins.",
+            "rsi_entry_max":           35,
+            "stop_loss_atr_multiple":  1.5,
+            "take_profit_atr_multiple": 2.5,
+            "stop_loss_pct":           5,      # fallback if ATR unavailable
+            "take_profit_pct":         3,      # small, frequent targets
+            "max_hold_hours":          24,
+            "min_confidence":          60,
+            "max_concurrent_positions": 2,     # ~$24 wallet / $10 floor → 2 positions max
+            "preferred_indicators":    ["RSI", "ATR", "volume_ratio", "bollinger"],
+            "on_stop_loss":            "no_pause",
+        },
+        "rationale":           "Frequent small oversold-dip trades on liquid coins. Matches the "
+                               "continuous-compounding goal on a small wallet; ATR stop caps downside.",
+        "predicted_win_rate":  55,
+        "predicted_avg_pnl_pct": 0.6,
+        "predicted_until":     (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+    }
+
+
 def _default_strategy_state(ai_name: str) -> dict:
     """Initial state file for a new AI."""
     return {
@@ -416,6 +475,58 @@ def load_strategy(ai_name: str) -> dict:
                     return state
             except Exception as _mig_e:
                 log(f"⚠️ Turtle migration failed for {ai_name}: {_mig_e}")
+
+            # ── CRYPTO STRATEGY ALIGNMENT (one-shot per mode change) ──────
+            # Make the active crypto playbook match CRYPTO_STRATEGY_MODE (top of
+            # file). Runs AFTER the turtle migration so it has the final say —
+            # with turtle_migration_applied already True, the block above is
+            # skipped and this one flips the AI off Turtle. Idempotent: once the
+            # stored marker equals the desired mode, this is a no-op (no rewrite).
+            try:
+                _desired   = (CRYPTO_STRATEGY_MODE or "").strip().lower()
+                _want_type = {"turtle": "turtle",
+                              "mean_reversion": "mean_reversion"}.get(_desired)
+                _cur       = state.get("current_strategy", {}) or {}
+                _cur_type  = _cur.get("strategy_type", "default")
+                _need_write = False
+                if _want_type and _cur_type != _want_type:
+                    _hist = state.setdefault("strategy_history", [])
+                    if _cur:
+                        _hist.append({
+                            "archived_at":       datetime.now(timezone.utc).isoformat(),
+                            "archived_reason":   f"crypto_strategy_align:{_desired}",
+                            "previous_strategy": _cur,
+                        })
+                        if len(_hist) > 50:
+                            state["strategy_history"] = _hist[-50:]
+                    if _desired == "mean_reversion":
+                        state["current_strategy"] = _default_strategy_meanrevert(ai_name, asset_class="crypto")
+                    elif _desired == "turtle":
+                        state["current_strategy"] = _default_strategy_turtle(ai_name, asset_class="crypto")
+                    state["last_activation"]     = datetime.now(timezone.utc).isoformat()
+                    state["current_performance"] = {
+                        "trades_under_this_strategy": 0,
+                        "wins":                        0,
+                        "losses":                      0,
+                        "actual_win_rate":             0,
+                        "actual_avg_pnl_pct":          0,
+                        "started_at":                  datetime.now(timezone.utc).isoformat(),
+                    }
+                    log(f"🔄 STRATEGY ALIGN: {ai_name} crypto playbook -> {_desired} "
+                        f"(was '{_cur_type}'; Turtle gate "
+                        f"{'ON' if _desired == 'turtle' else 'OFF'})")
+                    _need_write = True
+                if _want_type and state.get("crypto_strategy_mode") != _desired:
+                    state["crypto_strategy_mode"] = _desired
+                    _need_write = True
+                if _need_write:
+                    try:
+                        with open(path, "w") as _af:
+                            json.dump(state, _af, default=str, indent=2)
+                    except Exception as _awe:
+                        log(f"⚠️ Strategy-align save failed for {ai_name}: {_awe}")
+            except Exception as _align_e:
+                log(f"⚠️ Crypto strategy align failed for {ai_name}: {_align_e}")
 
             _state_cache[ai_name] = state
             return state
