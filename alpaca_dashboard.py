@@ -76,6 +76,10 @@ def load_accounts():
                 "key":    str(a["key"]),
                 "secret": str(a["secret"]),
                 "paper":  bool(a.get("paper", False)),
+                # Optional Binance.US keys — if present, this account also shows a
+                # crypto panel. Use READ-ONLY Binance.US keys (Enable Reading only).
+                "binance_key":    str(a.get("binance_key", "")),
+                "binance_secret": str(a.get("binance_secret", "")),
             })
     return clean
 
@@ -124,6 +128,57 @@ def _get(acct, path, params=None):
     return r.json()
 
 
+# ── Binance.US (optional, read-only) ────────────────────────
+BINANCE_BASE = "https://api.binance.us"
+
+
+def fetch_binance_view(acct):
+    """
+    Optional crypto panel. Returns the account's Binance.US holdings valued in
+    USD, or None if no Binance keys are configured. Read-only: only the signed
+    /account balance call and the public price feed are used — never an order.
+    Use Binance.US API keys with READING permission only.
+    """
+    import hmac, hashlib
+    key, secret = acct.get("binance_key", ""), acct.get("binance_secret", "")
+    if not (key and secret):
+        return None
+
+    ts = int(time.time() * 1000)
+    query = f"timestamp={ts}&recvWindow=5000"
+    sig = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+    acct_r = requests.get(
+        f"{BINANCE_BASE}/api/v3/account?{query}&signature={sig}",
+        headers={"X-MBX-APIKEY": key}, timeout=HTTP_TIMEOUT,
+    )
+    acct_r.raise_for_status()
+    balances = acct_r.json().get("balances", [])
+
+    # Public price map (no auth) to value holdings in USD via USDT pairs.
+    prices = {p["symbol"]: float(p["price"])
+              for p in requests.get(f"{BINANCE_BASE}/api/v3/ticker/price",
+                                    timeout=HTTP_TIMEOUT).json()}
+    STABLE = {"USD", "USDT", "USDC", "BUSD"}
+
+    holdings, total, dust = [], 0.0, 0.0
+    for b in balances:
+        asset = b.get("asset", "")
+        amt = float(b.get("free", 0) or 0) + float(b.get("locked", 0) or 0)
+        if amt <= 0:
+            continue
+        if asset in STABLE:
+            usd = amt
+        else:
+            usd = amt * prices.get(f"{asset}USDT", prices.get(f"{asset}USD", 0))
+        total += usd
+        if usd < 1.0:
+            dust += usd
+            continue
+        holdings.append({"asset": asset, "amount": amt, "usd": usd})
+    holdings.sort(key=lambda x: x["usd"], reverse=True)
+    return {"total_usd": total, "dust_usd": dust, "holdings": holdings}
+
+
 def fetch_account_view(acct):
     """Assemble one account's full performance view from Alpaca ground truth."""
     account = _get(acct, "/v2/account")
@@ -157,6 +212,13 @@ def fetch_account_view(acct):
     # Biggest movers first by absolute unrealized P&L
     pos_out.sort(key=lambda x: abs(x["unrealized_pl"]), reverse=True)
 
+    # Optional Binance.US crypto panel — never let it break the Alpaca view.
+    crypto = None
+    try:
+        crypto = fetch_binance_view(acct)
+    except Exception as e:
+        crypto = {"error": f"Binance.US read failed: {e}"}
+
     return {
         "name":          acct["name"],
         "mode":          "PAPER" if acct["paper"] else "LIVE",
@@ -169,6 +231,7 @@ def fetch_account_view(acct):
         "day_pl_pct":    day_pl_pct,
         "unrealized_pl": unrealized,
         "positions":     pos_out,
+        "crypto":        crypto,
         "history":       {
             "equity": [float(x) for x in (hist.get("equity") or [])],
         },
@@ -341,6 +404,23 @@ async function loadAccount(i){
       <td class="${cls(p.unrealized_pl)}">${fmtUSD(p.unrealized_pl)} (${fmtPct(p.unrealized_plpc)})</td>
     </tr>`).join('') : '';
 
+  // Optional Binance.US crypto panel
+  let cryptoHTML = '';
+  const cr = d.crypto;
+  if(cr && cr.error){
+    cryptoHTML = `<div class="sechead">Crypto · Binance.US</div><div class="err">${cr.error}</div>`;
+  } else if(cr && cr.holdings){
+    const crows = cr.holdings.length ? cr.holdings.map(h=>`
+      <tr><td>${h.asset}<span class="badge CRYPTO">CRYPTO</span></td>
+          <td>${h.amount.toLocaleString('en-US',{maximumFractionDigits:6})}</td>
+          <td>${fmtUSD(h.usd)}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="empty" style="padding:16px 4px">No holdings above $1.</td></tr>';
+    cryptoHTML = `
+      <div class="sechead">Crypto · Binance.US — ${fmtUSD(cr.total_usd)}${cr.dust_usd>0?` <span style="color:var(--muted)">(incl. ${fmtUSD(cr.dust_usd)} dust)</span>`:''}</div>
+      <table><thead><tr><th>Asset</th><th>Amount</th><th>Value</th></tr></thead>
+      <tbody>${crows}</tbody></table>`;
+  }
+
   view.innerHTML = `
     <div class="hero">
       <div class="acct">${d.name} · ${d.mode}${d.status&&d.status!=='ACTIVE'?' · '+d.status:''}</div>
@@ -353,11 +433,12 @@ async function loadAccount(i){
       <div class="stat"><div class="k">Buying power</div><div class="v">${fmtUSD(d.buying_power)}</div></div>
       <div class="stat"><div class="k">Open P&L</div><div class="v ${cls(d.unrealized_pl)}">${fmtUSD(d.unrealized_pl)}</div></div>
     </div>
-    <div class="sechead">Positions · ${d.positions.length}</div>
+    <div class="sechead">Positions · ${d.positions.length} <span style="color:var(--muted)">· stocks &amp; options</span></div>
     ${d.positions.length ? `<table>
       <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Last</th><th>Value</th><th>Open P&L</th></tr></thead>
       <tbody>${rows}</tbody></table>`
-      : '<div class="empty">No open positions in this account.</div>'}`;
+      : '<div class="empty">No open stock or option positions in this account.</div>'}
+    ${cryptoHTML}`;
 }
 
 setInterval(()=>{ if(accounts.length) loadAccount(active); }, 30000); // refresh active account
