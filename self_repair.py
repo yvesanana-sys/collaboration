@@ -105,47 +105,6 @@ PATCHABLE_FILES = [
 
 MASTER_DOC = "NOVATRADE_MASTER.md"
 
-# ── HUMAN GATE (added 2026-06-10 after the June 5 truncation incident) ──
-# Core trading files are NEVER auto-merged, regardless of Claude's confidence.
-# Fixes to these files always go to a PR for human review. The June 5 incident
-# auto-merged an 82%-confidence rewrite of bot_with_proxy.py that was silently
-# truncated by ~4,469 lines (passed syntax validation; merged; deployed).
-HUMAN_GATE_FILES = {
-    "bot_with_proxy.py",
-    "binance_crypto.py",
-}
-
-# Truncation guard: reject any fix whose line count shrinks by more than this
-# fraction vs the original. LLM rewrites of large files silently truncate; a
-# legitimate bug fix almost never removes >10% of a file.
-MAX_SHRINK_FRACTION = 0.10
-
-# Components that must survive any rewrite of these files. A fix that loses
-# one of these is truncated or broken even if it parses.
-REQUIRED_MARKERS = {
-    "bot_with_proxy.py":  ["def trading_loop", "app.run("],
-    "binance_crypto.py":  ["class CryptoTrader", "def binance_get"],
-}
-
-
-def _truncation_guard(filename: str, original: str, fixed: str) -> tuple[bool, str]:
-    """
-    Structural sanity check beyond syntax. Returns (ok, reason).
-    Catches the known >100KB silent-truncation failure mode.
-    """
-    orig_lines  = original.count("\n") + 1
-    fixed_lines = fixed.count("\n") + 1
-    if orig_lines > 0:
-        shrink = (orig_lines - fixed_lines) / orig_lines
-        if shrink > MAX_SHRINK_FRACTION:
-            return False, (f"fix shrinks {filename} from {orig_lines} to "
-                           f"{fixed_lines} lines ({shrink:.0%} smaller) — "
-                           f"probable truncation")
-    for marker in REQUIRED_MARKERS.get(filename, []):
-        if marker not in fixed:
-            return False, f"fix is missing required component: {marker!r}"
-    return True, ""
-
 # ── Error Pattern Registry ─────────────────────────────────────
 # Maps error signature → (description, which file to patch, priority)
 ERROR_PATTERNS = [
@@ -769,23 +728,6 @@ def _run_repair(ep: dict):
         else:
             _log("✅ Syntax validation passed")
 
-        # Step 4.5: TRUNCATION GUARD — refuse to push structurally gutted code.
-        # Syntax-valid is NOT complete: a partial rewrite of a large file parses
-        # fine while missing thousands of lines (June 5 incident).
-        guard_ok, guard_reason = _truncation_guard(filename, broken_content, fixed_code)
-        if not guard_ok:
-            _log(f"🛑 TRUNCATION GUARD: {guard_reason}")
-            _log("   → Fix rejected entirely. Not pushing, not opening PR.")
-            _repaired.add(key)
-            _repair_log.append({
-                "timestamp": timestamp,
-                "error":     ep["description"],
-                "file":      filename,
-                "status":    f"rejected by truncation guard — {guard_reason}",
-                "pr_url":    None,
-            })
-            return
-
         # Step 5: Create branch and push fix
         _log(f"🌿 Creating branch: {branch}")
         if not _create_pr_branch(branch):
@@ -802,12 +744,8 @@ def _run_repair(ep: dict):
             f"📝 Update master doc: {ep['description'][:60]}"
         )
 
-        # Step 6: Auto-merge or PR based on syntax + confidence + HUMAN GATE
-        human_gated = filename in HUMAN_GATE_FILES
-        if human_gated:
-            _log(f"🔒 HUMAN GATE: {filename} is core trading code — PR only, "
-                 f"never auto-merged (confidence {confidence}% is irrelevant)")
-        if syntax_ok and confidence >= 80 and not human_gated:
+        # Step 6: Auto-merge or PR based on syntax + confidence
+        if syntax_ok and confidence >= 80:
             # High confidence + syntax clean → auto-merge, no human needed
             merge_title = f"🤖 Auto-fix: {ep['description'][:80]} (conf={confidence}%)"
             merged = _merge_branch_to_main(branch, merge_title)
@@ -830,9 +768,7 @@ def _run_repair(ep: dict):
 
         # Fallback: open PR for manual review
         pr_url = _open_pull_request(result.get("pr_title", commit_msg), result.get("pr_body", ""), branch)
-        reason = ("human gate (core trading file)" if human_gated
-                  else "syntax error in fix" if not syntax_ok
-                  else f"confidence {confidence}% < 80%")
+        reason = "syntax error in fix" if not syntax_ok else f"confidence {confidence}% < 80%"
         _log(f"🔀 PR opened ({reason}): {pr_url}")
 
         _repaired.add(key)

@@ -49,25 +49,10 @@ CONTINGENCY TRIGGERS (run hourly, rule-based, no AI calls)
    - Any slice deviates >15% from target → rebalance to target
    - Runs at most once per 30 days
 
-5. CATASTROPHIC TRIM (Phase C hard floor)
-   - BTC -50% from entry sustained 30+ days → trim 50%
-   - Fires regardless of strategist input
-
-═══════════════════════════════════════════════════════════════════════
-PHASE C — STRATEGIST HANDOVER
-═══════════════════════════════════════════════════════════════════════
-The target allocation is no longer fixed: both strategists review the
-reserve weekly (plus reserve-specific wake triggers — BTC -10% in 24h,
-reserve -20% from peak, drift ≥25pp) and propose allocations. A change
-only applies when BOTH agree within 10pp per slice, clamped to hard
-bounds (BTC 20-70%, SPY 10-60%, Cash 10-50%). On a split, status quo
-wins. All hard-rule contingencies above keep running unconditionally.
-
 ═══════════════════════════════════════════════════════════════════════
 """
 import json
 import os
-import re
 from datetime import datetime, timezone, timedelta
 from collections import deque
 
@@ -105,29 +90,6 @@ COOLDOWN_OPPORTUNITY = 168     # 1 week
 COOLDOWN_TAKEPROFIT  = 168
 COOLDOWN_REBALANCE   = 720     # 30 days
 
-# ── Phase C: Strategist handover ─────────────────────────────
-# Both strategists collaboratively set the target allocation; the
-# hard-rule contingencies above stay untouched as catastrophic
-# protection. Status quo wins unless BOTH agree on a change.
-ENABLE_STRATEGIST_RESERVE = True
-REVIEW_INTERVAL_HOURS     = 168    # Weekly scheduled review
-REVIEW_COOLDOWN_HOURS     = 48     # Min gap between any two reviews
-AGREEMENT_TOLERANCE_PP    = 10     # Max per-slice gap (pct points) to count as agreement
-ALLOCATION_BOUNDS = {              # Hard floors/caps strategists cannot exceed
-    "BTC":  (0.20, 0.70),
-    "SPY":  (0.10, 0.60),
-    "USDT": (0.10, 0.50),
-}
-# Catastrophic protection — fires regardless of strategist input
-CATASTROPHIC_BTC_DD       = 0.50   # BTC −50% from entry…
-CATASTROPHIC_BTC_DAYS     = 30     # …sustained 30+ days
-CATASTROPHIC_TRIM_PCT     = 0.50   # → trim 50% of BTC slice
-COOLDOWN_CATASTROPHIC     = 720    # 30 days between catastrophic trims
-# Reserve-specific wake triggers (off-schedule collaborative review)
-WAKE_BTC_DROP_24H         = 0.10   # BTC −10% in 24h
-WAKE_RESERVE_DD           = 0.20   # Reserve value −20% from its peak
-WAKE_DRIFT                = 0.25   # Slice drift ≥25pp from target
-
 # Persistent state file
 STATE_FILE = "/data/core_reserve.json"
 FALLBACK_STATE_FILE = "./core_reserve.json"
@@ -143,8 +105,6 @@ alpaca       = None       # bot's alpaca() function (trading API)
 get_full_wallet = None    # binance_crypto.get_full_wallet
 record_trade = None       # bot's record_trade
 get_stock_price = None    # bot's market-data SPY price fetcher (uses DATA_URL)
-ask_claude   = None       # bot's _ask_claude_strategist (Phase C reviews)
-ask_grok     = None       # bot's _ask_grok_strategist   (Phase C reviews)
 
 # Stock symbol fallback chain (in case SPY isn't tradeable for some reason)
 EQUITY_TICKER = "SPY"    # The actual ticker we'll buy on Alpaca
@@ -153,12 +113,9 @@ EQUITY_TICKER = "SPY"    # The actual ticker we'll buy on Alpaca
 # ──────────────────────────────────────────────────────────────
 def _set_context(log_fn=None, binance_get_fn=None, binance_post_fn=None,
                  alpaca_fn=None, wallet_fn=None, record_trade_fn=None,
-                 stock_price_fn=None, ask_claude_fn=None, ask_grok_fn=None):
-    """Inject runtime dependencies. Safe to call more than once —
-    only non-None params overwrite (Phase C adds the strategist
-    channels in a second call after they're constructed)."""
+                 stock_price_fn=None):
+    """Inject runtime dependencies. Called once on boot."""
     global log, binance_get, binance_post, alpaca, get_full_wallet, record_trade, get_stock_price
-    global ask_claude, ask_grok
     if log_fn:           log = log_fn
     if binance_get_fn:   binance_get = binance_get_fn
     if binance_post_fn:  binance_post = binance_post_fn
@@ -166,8 +123,6 @@ def _set_context(log_fn=None, binance_get_fn=None, binance_post_fn=None,
     if wallet_fn:        get_full_wallet = wallet_fn
     if record_trade_fn:  record_trade = record_trade_fn
     if stock_price_fn:   get_stock_price = stock_price_fn
-    if ask_claude_fn:    ask_claude = ask_claude_fn
-    if ask_grok_fn:      ask_grok = ask_grok_fn
 
 
 # ──────────────────────────────────────────────────────────────
@@ -207,13 +162,6 @@ def _default_state():
         "spy_price_history":  [],
         # Event log (append-only audit trail)
         "events":             [],
-        # Phase C: strategist handover
-        "target_allocation":  None,        # Strategist-agreed override; None → module default
-        "last_review":        None,
-        "review_log":         [],          # Proposal/outcome audit trail (capped 50)
-        "reserve_peak_value": 0.0,         # For wake-trigger drawdown detection
-        "btc_dd50_since":     None,        # When BTC first crossed −50% from entry
-        "last_catastrophic":  None,
     }
 
 
@@ -388,20 +336,6 @@ def get_target_reserve_value(combined_wallet: float) -> float:
     return combined_wallet * get_active_reserve_pct(combined_wallet)
 
 
-def get_target_allocation() -> dict:
-    """
-    Active target allocation. Phase C: a strategist-agreed override
-    (validated + bounds-clamped at review time) takes precedence over
-    the module default.
-    """
-    s = _load_state()
-    ta = s.get("target_allocation")
-    if (isinstance(ta, dict) and set(ta) == set(TARGET_ALLOCATION)
-            and abs(sum(ta.values()) - 1.0) < 0.02):
-        return ta
-    return TARGET_ALLOCATION
-
-
 def get_current_reserve_value() -> dict:
     """
     Compute current reserve value from live prices + tracked qty.
@@ -453,7 +387,7 @@ def get_status() -> dict:
         "actual_reserve_value": current["total"],
         "shortfall":        round(max(0, target_value - current["total"]), 2),
         "slices":           current,
-        "target_allocation": {k: round(v * 100, 1) for k, v in get_target_allocation().items()},
+        "target_allocation": {k: round(v * 100, 1) for k, v in TARGET_ALLOCATION.items()},
         "total_contributions": round(s["total_contributions"], 2),
         "pnl_usd":          round(pnl_usd, 2),
         "pnl_pct":          round(pnl_pct, 2),
@@ -465,22 +399,6 @@ def get_status() -> dict:
         "last_rebalance":   s.get("last_rebalance"),
         "recent_events":    recent_events,
         "state_file":       STATE_FILE,
-        "phase_c": {
-            "strategist_handover": ENABLE_STRATEGIST_RESERVE,
-            "wired":             bool(ask_claude and ask_grok),
-            "allocation_source": "strategist" if s.get("target_allocation") else "default",
-            "last_review":       s.get("last_review"),
-            "next_review_in_h":  round(max(0.0, REVIEW_INTERVAL_HOURS
-                                           - min(_hours_since(s.get("last_review")),
-                                                 REVIEW_INTERVAL_HOURS)), 1),
-            "agreement_tolerance_pp": AGREEMENT_TOLERANCE_PP,
-            "allocation_bounds": {k: [round(lo * 100), round(hi * 100)]
-                                  for k, (lo, hi) in ALLOCATION_BOUNDS.items()},
-            "catastrophic_rule": f"BTC -{CATASTROPHIC_BTC_DD*100:.0f}% from entry "
-                                 f"{CATASTROPHIC_BTC_DAYS}+ days → trim {CATASTROPHIC_TRIM_PCT*100:.0f}%",
-            "btc_dd50_since":    s.get("btc_dd50_since"),
-            "recent_reviews":    list(reversed(s.get("review_log", [])))[:5],
-        },
     }
 
 
@@ -684,10 +602,9 @@ def check_and_deposit():
         return False
 
     # Distribute shortfall by target allocation
-    alloc    = get_target_allocation()
-    btc_buy  = shortfall * alloc["BTC"]
-    spy_buy  = shortfall * alloc["SPY"]
-    cash_add = shortfall * alloc["USDT"]
+    btc_buy  = shortfall * TARGET_ALLOCATION["BTC"]
+    spy_buy  = shortfall * TARGET_ALLOCATION["SPY"]
+    cash_add = shortfall * TARGET_ALLOCATION["USDT"]
 
     s["total_contributions"] = round(s["total_contributions"] + shortfall, 2)
     _record_event("DEPOSIT",
@@ -727,14 +644,6 @@ def _update_price_history():
             s["spy_price_history"] = s["spy_price_history"][-PRICE_HISTORY_LEN:]
         if spy > s["spy"].get("ath_price", 0):
             s["spy"]["ath_price"] = spy
-    # Reserve peak — wake-trigger drawdown reference (Phase C)
-    if s["activated"]:
-        try:
-            total = get_current_reserve_value()["total"]
-            if total > s.get("reserve_peak_value", 0):
-                s["reserve_peak_value"] = round(total, 2)
-        except Exception:
-            pass
     s["last_check"] = now_iso
     _save_state()
 
@@ -884,24 +793,23 @@ def _check_drift_rebalance():
     total = current["total"]
     if total < 100:    # Too small to bother
         return []
-    alloc = get_target_allocation()
     actual = {
         "BTC":  current["btc_value"]  / total,
         "SPY":  current["spy_value"]  / total,
         "USDT": current["cash_value"] / total,
     }
-    max_drift = max(abs(actual[k] - alloc[k]) for k in alloc)
+    max_drift = max(abs(actual[k] - TARGET_ALLOCATION[k]) for k in TARGET_ALLOCATION)
     if max_drift < REBALANCE_DRIFT_THRESHOLD:
         return []
     _record_event("REBALANCE",
                  f"Drift {max_drift*100:.1f}% > {REBALANCE_DRIFT_THRESHOLD*100:.0f}% — rebalancing "
-                 f"(BTC {actual['BTC']*100:.0f}% → {alloc['BTC']*100:.0f}%, "
-                 f"SPY {actual['SPY']*100:.0f}% → {alloc['SPY']*100:.0f}%, "
-                 f"Cash {actual['USDT']*100:.0f}% → {alloc['USDT']*100:.0f}%)",
+                 f"(BTC {actual['BTC']*100:.0f}% → 50%, "
+                 f"SPY {actual['SPY']*100:.0f}% → 30%, "
+                 f"Cash {actual['USDT']*100:.0f}% → 20%)",
                  drift_pct=max_drift*100)
     # Trim overweight slices first, then top up underweight
     for slice_name in ["BTC", "SPY"]:
-        target_value = total * alloc[slice_name]
+        target_value = total * TARGET_ALLOCATION[slice_name]
         slice_key = "btc" if slice_name == "BTC" else "spy"
         actual_value = current[f"{slice_key}_value"]
         if actual_value > target_value * 1.05:    # Trim overweight
@@ -916,14 +824,14 @@ def _check_drift_rebalance():
     # Re-read state — cash slice now has the trim proceeds
     s = _load_state()
     cash = s["cash_usdt"]
-    target_cash = total * alloc["USDT"]
+    target_cash = total * TARGET_ALLOCATION["USDT"]
     excess_cash = cash - target_cash
     if excess_cash > 50:
         current = get_current_reserve_value()    # Refresh prices
         # Distribute excess between BTC and SPY proportionally
         new_total   = current["total"] + excess_cash    # virtual after redeploy
-        btc_target  = new_total * alloc["BTC"]
-        spy_target  = new_total * alloc["SPY"]
+        btc_target  = new_total * TARGET_ALLOCATION["BTC"]
+        spy_target  = new_total * TARGET_ALLOCATION["SPY"]
         btc_short   = max(0, btc_target - current["btc_value"])
         spy_short   = max(0, spy_target - current["spy_value"])
         total_short = btc_short + spy_short
@@ -938,299 +846,6 @@ def _check_drift_rebalance():
     s["last_rebalance"] = datetime.now(timezone.utc).isoformat()
     _save_state()
     return ["rebalance"]
-
-
-def _check_catastrophic_trim():
-    """
-    Phase C hard floor: BTC down 50%+ from entry, sustained 30+ days
-    → trim 50% of the BTC slice. Fires regardless of strategist input
-    — this is the catastrophic protection that stays rule-based.
-    """
-    s = _load_state()
-    fired = []
-    if s["btc"]["qty"] <= 0 or s["btc"].get("entry_price", 0) <= 0:
-        return fired
-    current = _get_btc_price()
-    if current <= 0:
-        return fired
-    entry = s["btc"]["entry_price"]
-    dd = (entry - current) / entry
-    if dd < CATASTROPHIC_BTC_DD:
-        # Recovered above the threshold — reset the countdown
-        if s.get("btc_dd50_since"):
-            s["btc_dd50_since"] = None
-            _save_state()
-        return fired
-    now = datetime.now(timezone.utc)
-    if not s.get("btc_dd50_since"):
-        s["btc_dd50_since"] = now.isoformat()
-        _record_event("CATASTROPHIC_WATCH",
-                     f"BTC -{dd*100:.0f}% from entry ${entry:,.0f} — "
-                     f"{CATASTROPHIC_BTC_DAYS}d catastrophic countdown started")
-        return fired
-    days_under = _hours_since(s["btc_dd50_since"]) / 24
-    if (days_under >= CATASTROPHIC_BTC_DAYS
-            and _hours_since(s.get("last_catastrophic")) >= COOLDOWN_CATASTROPHIC):
-        sell_qty = s["btc"]["qty"] * CATASTROPHIC_TRIM_PCT
-        _record_event("CATASTROPHIC_TRIM_BTC",
-                     f"BTC -{dd*100:.0f}% from entry ${entry:,.0f} sustained "
-                     f"{days_under:.0f}d → trim {CATASTROPHIC_TRIM_PCT*100:.0f}% "
-                     f"({sell_qty:.6f} BTC) — hard rule, overrides strategist",
-                     drawdown_pct=round(dd*100, 1), days_under=round(days_under, 1),
-                     sell_qty=sell_qty)
-        if _sell_btc(sell_qty):
-            s["last_catastrophic"] = now.isoformat()
-            _save_state()
-            fired.append("btc_catastrophic")
-    return fired
-
-
-# ──────────────────────────────────────────────────────────────
-# PHASE C — STRATEGIST HANDOVER (collaborative allocation reviews)
-# ──────────────────────────────────────────────────────────────
-def _build_review_prompt(ai_name: str) -> str:
-    """Reserve briefing the strategist reads before proposing allocation."""
-    s = _load_state()
-    current = get_current_reserve_value()
-    alloc   = get_target_allocation()
-    combined = _get_combined_wallet_value()
-    rival = "Grok" if ai_name == "claude" else "Claude"
-    btc_rsi = _compute_rsi(s["btc_price_history"])
-    spy_rsi = _compute_rsi(s["spy_price_history"])
-    events = "\n".join(
-        f"  • [{e.get('ts','?')[:10]}] {e.get('message','')}"
-        for e in s.get("events", [])[-5:]
-    ) or "  (none)"
-    bounds = "\n".join(
-        f"  {k}: {lo*100:.0f}%–{hi*100:.0f}%"
-        for k, (lo, hi) in ALLOCATION_BOUNDS.items()
-    )
-
-    def _slice_line(key, label, price):
-        sl = s[key]
-        entry = sl.get("entry_price", 0)
-        pnl = ((price - entry) / entry * 100) if entry > 0 and price > 0 else 0
-        return (f"  {label}: qty {sl['qty']:.6f} @ entry ${entry:,.2f}, "
-                f"now ${price:,.2f} ({pnl:+.1f}%), ATH ${sl.get('ath_price', 0):,.2f}")
-
-    return f"""You are {ai_name.upper()}-STRATEGIST reviewing the CORE RESERVE — the slow, long-horizon compounding sleeve, separate from your tactical trading pool.
-
-═══ RESERVE STATE ═══
-Total value:   ${current['total']:,.2f} (peak ${s.get('reserve_peak_value', 0):,.2f})
-Contributions: ${s.get('total_contributions', 0):,.2f}
-Combined wallet: ${combined:,.2f}
-{_slice_line('btc', 'BTC', current['btc_price'])}
-{_slice_line('spy', 'SPY', current['spy_price'])}
-  Cash (USDT): ${current['cash_value']:,.2f}
-
-═══ CURRENT ALLOCATION ═══
-Actual:  BTC {current['btc_pct']:.0f}% / SPY {current['spy_pct']:.0f}% / Cash {current['cash_pct']:.0f}%
-Target:  BTC {alloc['BTC']*100:.0f}% / SPY {alloc['SPY']*100:.0f}% / Cash {alloc['USDT']*100:.0f}%
-Daily RSI: BTC {btc_rsi:.0f} / SPY {spy_rsi:.0f}
-
-═══ RECENT RESERVE EVENTS ═══
-{events}
-
-═══ HARD BOUNDS (you cannot exceed these) ═══
-{bounds}
-
-═══ STANDING HARD RULES (run regardless of your decision) ═══
-• Defensive trim, opportunity buy, take-profit trim, drift rebalance
-• CATASTROPHIC: BTC -{CATASTROPHIC_BTC_DD*100:.0f}% from entry sustained {CATASTROPHIC_BTC_DAYS}+ days → auto-trim {CATASTROPHIC_TRIM_PCT*100:.0f}%
-
-═══ YOUR TASK ═══
-Propose the reserve's target allocation for the coming week. This is a
-COLLABORATIVE decision: {rival}-Strategist answers the same briefing
-independently, and the allocation only changes if your proposals agree
-within {AGREEMENT_TOLERANCE_PP} percentage points per slice. If you split,
-the status quo stays. This sleeve compounds for years — favor boring
-and robust over clever.
-
-Reply ONLY with valid JSON:
-{{
-  "target_allocation": {{"BTC": {alloc['BTC']*100:.0f}, "SPY": {alloc['SPY']*100:.0f}, "USDT": {alloc['USDT']*100:.0f}}},
-  "rationale": "1-3 sentences, evidence-based"
-}}
-
-Percentages must sum to 100 and respect the hard bounds. Proposing the
-current target is a perfectly good answer when nothing warrants change."""
-
-
-def _clamp_allocation(alloc: dict) -> dict:
-    """
-    Clamp slices to hard bounds, then bring the sum back to 1.0 by
-    distributing the residual only across slices that still have
-    headroom — plain renormalization could push a slice back past
-    its cap.
-    """
-    clamped = {k: min(hi, max(lo, float(alloc.get(k, 0))))
-               for k, (lo, hi) in ALLOCATION_BOUNDS.items()}
-    for _ in range(4):
-        diff = 1.0 - sum(clamped.values())
-        if abs(diff) < 0.001:
-            break
-        if diff > 0:    # Under-allocated — room up to each cap
-            room = {k: ALLOCATION_BOUNDS[k][1] - clamped[k] for k in clamped}
-        else:           # Over-allocated — room down to each floor
-            room = {k: clamped[k] - ALLOCATION_BOUNDS[k][0] for k in clamped}
-        total_room = sum(room.values())
-        if total_room < abs(diff):
-            return dict(TARGET_ALLOCATION)   # Bounds make the ask infeasible
-        for k in clamped:
-            clamped[k] += diff * (room[k] / total_room)
-    return {k: round(v, 4) for k, v in clamped.items()}
-
-
-def _parse_allocation_response(raw: str) -> dict:
-    """
-    Parse a strategist reply → {"alloc": {...fractions...}, "rationale": str}
-    or None on failure. Accepts 0–1 fractions or 0–100 percentages.
-    """
-    if not raw:
-        return None
-    try:
-        cleaned = re.sub(r"```(?:json)?", "", raw).strip()
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start < 0 or end <= start:
-            return None
-        data = json.loads(cleaned[start:end + 1])
-        ta = data.get("target_allocation")
-        if not isinstance(ta, dict):
-            return None
-        alloc = {k: float(ta.get(k, 0)) for k in TARGET_ALLOCATION}
-        total = sum(alloc.values())
-        if total > 3:                      # Percent scale → fractions
-            alloc = {k: v / 100 for k, v in alloc.items()}
-            total = sum(alloc.values())
-        if not 0.85 <= total <= 1.15:      # Garbage — neither scale sums sanely
-            return None
-        return {"alloc": _clamp_allocation(alloc),
-                "rationale": str(data.get("rationale", ""))[:300]}
-    except Exception:
-        return None
-
-
-def run_strategist_review(reason: str = "scheduled weekly review") -> dict:
-    """
-    Phase C collaborative review: both strategists propose a target
-    allocation; it only changes when both agree within tolerance.
-    Returns a summary dict ({"ran": False} when guards block it).
-    """
-    result = {"ran": False, "reason": reason}
-    if not (ENABLE_CORE_RESERVE and ENABLE_STRATEGIST_RESERVE):
-        return result
-    s = _load_state()
-    if not s["activated"]:
-        return result
-    if not (ask_claude and ask_grok):
-        result["skipped"] = "strategist channels not wired"
-        return result
-    if _hours_since(s.get("last_review")) < REVIEW_COOLDOWN_HOURS:
-        result["skipped"] = "cooldown"
-        return result
-
-    # Stamp up front so failed reviews also respect the cooldown
-    now_iso = datetime.now(timezone.utc).isoformat()
-    s["last_review"] = now_iso
-    _save_state()
-    result["ran"] = True
-
-    system = ("You are a long-horizon portfolio strategist for a small "
-              "compounding reserve. Reply ONLY with valid JSON.")
-    proposals = {}
-    for name, ask in (("claude", ask_claude), ("grok", ask_grok)):
-        try:
-            raw = ask(_build_review_prompt(name), system)
-            proposals[name] = _parse_allocation_response(raw)
-        except Exception as e:
-            log(f"⚠️ Reserve review: {name} strategist failed: {e}")
-            proposals[name] = None
-
-    c, g = proposals.get("claude"), proposals.get("grok")
-    entry = {"ts": now_iso, "reason": reason}
-    for name, p in (("claude", c), ("grok", g)):
-        entry[name] = ({"alloc": {k: round(v * 100, 1) for k, v in p["alloc"].items()},
-                        "rationale": p["rationale"]} if p else "failed")
-
-    if not c or not g:
-        outcome = "no_change_partial_response"
-        _record_event("RESERVE_REVIEW",
-                     f"Strategist review ({reason}): "
-                     f"{'Claude' if not c else 'Grok'} response unusable — "
-                     f"status quo kept (both must agree)")
-    else:
-        max_gap_pp = max(abs(c["alloc"][k] - g["alloc"][k]) * 100
-                         for k in TARGET_ALLOCATION)
-        if max_gap_pp <= AGREEMENT_TOLERANCE_PP:
-            consensus = _clamp_allocation(
-                {k: (c["alloc"][k] + g["alloc"][k]) / 2 for k in TARGET_ALLOCATION})
-            old = get_target_allocation()
-            s["target_allocation"] = consensus
-            outcome = "agreed"
-            _record_event("RESERVE_REVIEW_AGREED",
-                         f"Strategists agreed ({reason}): "
-                         f"BTC {old['BTC']*100:.0f}→{consensus['BTC']*100:.0f}% / "
-                         f"SPY {old['SPY']*100:.0f}→{consensus['SPY']*100:.0f}% / "
-                         f"Cash {old['USDT']*100:.0f}→{consensus['USDT']*100:.0f}%",
-                         max_gap_pp=round(max_gap_pp, 1))
-            # Let the new target take effect without waiting out the
-            # 30-day rebalance cooldown
-            s["last_rebalance"] = None
-            _save_state()
-            _check_drift_rebalance()
-        else:
-            outcome = "no_change_split"
-            _record_event("RESERVE_REVIEW_SPLIT",
-                         f"Strategists split ({reason}): max gap "
-                         f"{max_gap_pp:.0f}pp > {AGREEMENT_TOLERANCE_PP}pp — status quo kept",
-                         max_gap_pp=round(max_gap_pp, 1))
-
-    entry["outcome"] = outcome
-    result["outcome"] = outcome
-    s = _load_state()
-    s["review_log"].append(entry)
-    if len(s["review_log"]) > 50:
-        s["review_log"] = s["review_log"][-50:]
-    _save_state()
-    return result
-
-
-def _check_review_triggers() -> str:
-    """
-    Reserve-specific wake triggers — conditions that justify an
-    off-schedule collaborative review. Returns a reason string or "".
-    """
-    s = _load_state()
-    # BTC sharp drop in 24h
-    history = s["btc_price_history"]
-    if len(history) >= 2:
-        day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
-        day_prices = [p[1] for p in history
-                      if datetime.fromisoformat(p[0].replace("Z", "+00:00")) >= day_ago]
-        current = _get_btc_price()
-        if day_prices and current > 0:
-            high = max(day_prices)
-            drop = (high - current) / high
-            if drop >= WAKE_BTC_DROP_24H:
-                return f"btc_drop_24h_{drop*100:.0f}pct"
-    # Reserve drawdown from peak
-    peak = s.get("reserve_peak_value", 0)
-    current_val = get_current_reserve_value()
-    if peak > 0 and current_val["total"] > 0:
-        dd = (peak - current_val["total"]) / peak
-        if dd >= WAKE_RESERVE_DD:
-            return f"reserve_drawdown_{dd*100:.0f}pct"
-    # Severe allocation drift
-    total = current_val["total"]
-    if total >= 100:
-        alloc = get_target_allocation()
-        actual = {"BTC":  current_val["btc_value"] / total,
-                  "SPY":  current_val["spy_value"] / total,
-                  "USDT": current_val["cash_value"] / total}
-        drift = max(abs(actual[k] - alloc[k]) for k in alloc)
-        if drift >= WAKE_DRIFT:
-            return f"allocation_drift_{drift*100:.0f}pct"
-    return ""
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1257,17 +872,6 @@ def run_hourly_check():
             fired_all.extend(_check_opportunity_buy())
             fired_all.extend(_check_take_profit())
             fired_all.extend(_check_drift_rebalance())
-            fired_all.extend(_check_catastrophic_trim())
-            # Phase C — collaborative strategist reviews
-            if ENABLE_STRATEGIST_RESERVE and ask_claude and ask_grok:
-                if _hours_since(s.get("last_review")) >= REVIEW_INTERVAL_HOURS:
-                    review_reason = "scheduled weekly review"
-                else:
-                    review_reason = _check_review_triggers()
-                if review_reason:
-                    rv = run_strategist_review(review_reason)
-                    if rv.get("ran"):
-                        fired_all.append(f"strategist_review:{rv.get('outcome', '?')}")
     except Exception as e:
         log(f"⚠️ Core reserve hourly check failed: {e}")
     return {

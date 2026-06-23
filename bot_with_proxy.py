@@ -23,20 +23,6 @@ BOT_NAME       = "NovaTrade"
 PORT           = int(os.environ.get("PORT", 8080))
 
 app = Flask(__name__)
-# ── Strategy Committee dashboard (signal-only; serves /strategies) ──────────
-from dashboard_strategies import strategy_dashboard, set_ohlcv_provider
-import binance_crypto as _bc, pandas as _pd
-
-def _dash_ohlcv(symbol, timeframe="1h", limit=300):
-    bars = _bc.get_crypto_bars(symbol.replace("/", ""), interval=timeframe,
-                               limit=min(limit, 1000))
-    df = _pd.DataFrame(bars).rename(columns={"o": "open", "h": "high", "l": "low",
-                                             "c": "close", "v": "volume"})
-    return df[["open", "high", "low", "close", "volume"]]
-
-app.register_blueprint(strategy_dashboard)
-set_ohlcv_provider(_dash_ohlcv)
-# ────────────────────────────────────────────────────────────────────────────
 CORS(app)
 
 # ── Global shared state ───────────────────────────────────────
@@ -73,8 +59,6 @@ shared_state: dict = {
     "grok_credits_ok":     True,
     "claude_fail_reason":  "",
     "grok_fail_reason":    "",
-    "claude_fail_count":   0,
-    "grok_fail_count":     0,
     "failover_mode":       False,
     # Sleep/wake
     "ai_sleeping":         False,
@@ -141,16 +125,6 @@ shared_state: dict = {
     "trend_alerts":        [],
     "trend_scan_results":  {},
     "deposit_detected":    False,
-    # Sentiment pipeline — populated by Grok intel cycle (crypto) and
-    # sleep brief (stocks); consumed by strategist market context
-    "market_sentiment":      "neutral",
-    "latest_news_summary":   "",
-    "latest_social_summary": "",
-    "latest_whale_summary":  "",
-    "btc_change_1h":         0.0,
-    "spy_change_1h":         0.0,
-    "fear_greed":            None,
-    "sentiment_updated":     "",
 }
 
 # RULES imported from portfolio_manager
@@ -180,7 +154,7 @@ from market_data import (
     _compute_breakout, compute_indicators, get_chart_section,
     get_news_context, get_fear_greed_index, get_earnings_calendar,
     get_market_context, get_spy_trend, get_biggest_gainers,
-    get_recent_ipos, get_market_mode, get_1h_changes,
+    get_recent_ipos, get_market_mode,
 )
 import market_data as _market_data
 
@@ -1039,16 +1013,18 @@ def evolution_endpoint():
     try:
         if not HAVE_AI_EVOLUTION or not ai_evolution:
             return jsonify({"enabled": False, "reason": "module not loaded"})
-        # Same stats source the Pass B cycle uses (owner-tagged closes in
-        # persistent trade_history) so tier display matches tier decisions
+        # Translate prompt_builder memory stats into the shape ai_evolution expects
         c_stats = {"trades": 0, "total_pnl": 0.0}
         g_stats = {"trades": 0, "total_pnl": 0.0}
         try:
+            mem_stats = prompt_builder.memory.get_stats()
+            ai_p      = mem_stats.get("ai_patterns", {})
             for ai, dest in (("claude", c_stats), ("grok", g_stats)):
-                closes = [t for t in trade_history
-                          if t.get("owner") == ai and t.get("pnl_usd") is not None]
-                dest["trades"]    = len(closes)
-                dest["total_pnl"] = sum(float(t["pnl_usd"]) for t in closes)
+                p = ai_p.get(ai, {})
+                w = int(p.get("wins", 0) or 0)
+                l = int(p.get("losses", 0) or 0)
+                dest["trades"]    = w + l
+                dest["total_pnl"] = float(p.get("total_pnl_usd", 0) or 0)
         except Exception:
             pass
         result = ai_evolution.get_full_status(c_stats, g_stats)
@@ -1248,9 +1224,6 @@ _market_data._set_context(RULES, log, shared_state_ref=shared_state)
 _github_deploy._set_context(log)
 # AI clients needs log + shared_state
 _ai_clients._set_context(log, shared_state_ref=shared_state)
-# AI evolution (Pass B) only needs log
-if HAVE_AI_EVOLUTION and ai_evolution:
-    ai_evolution._set_context(log)
 # Intelligence needs ask_grok + parse_json (now from ai_clients)
 _intelligence._set_context(RULES, log,
                             ask_grok_fn   = ask_grok,
@@ -3107,26 +3080,6 @@ if HAVE_STRATEGIC_BRAIN:
                     ctx["crypto_positions"] = len(crypto_pos)
                 except Exception:
                     ctx["crypto_positions"] = 0
-                # Sentiment pipeline — 1h momentum, fear/greed, and the
-                # latest Grok intel summaries published to shared_state
-                try:
-                    changes = get_1h_changes()
-                    ctx["btc_change_1h"] = f"{changes['btc_change_1h']:+.2f}%"
-                    ctx["spy_change_1h"] = f"{changes['spy_change_1h']:+.2f}%"
-                except Exception:
-                    pass
-                fg = get_fear_greed_index() or shared_state.get("fear_greed")
-                if fg:
-                    shared_state["fear_greed"] = fg
-                    ctx["fear_greed_index"] = f"{fg.get('value', '?')}/100 ({fg.get('label', '?')}) — {fg.get('signal', '')}"
-                ctx["market_sentiment"] = shared_state.get("market_sentiment", "neutral")
-                for key in ("latest_news_summary",
-                            "latest_social_summary",
-                            "latest_whale_summary"):
-                    if shared_state.get(key):
-                        ctx[key] = shared_state[key]
-                if shared_state.get("sentiment_updated"):
-                    ctx["sentiment_as_of"] = shared_state["sentiment_updated"]
             except Exception as e:
                 log(f"⚠️ Strategist market context fetch failed: {e}")
             return ctx
@@ -3214,14 +3167,6 @@ if HAVE_STRATEGIC_BRAIN:
             record_trade_fn           = record_trade,
             get_wallet_fn             = _strategist_wallet,
         )
-        # Phase C — Core Reserve handover: hand the same strategist
-        # channels to the reserve for collaborative allocation reviews
-        if HAVE_CORE_RESERVE and core_reserve:
-            core_reserve._set_context(
-                ask_claude_fn = _ask_claude_strategist,
-                ask_grok_fn   = _ask_grok_strategist,
-            )
-            log("🏦 Core Reserve strategist handover wired (Phase C)")
         # Surface the active model spec for visibility
         wallet_now = _strategist_wallet()
         c_spec = strategic_brain.get_active_model("strategist", "claude", wallet=wallet_now)
@@ -3412,8 +3357,6 @@ def run_cycle():
     # ── Phase 1 features ──────────────────────────────────────
     log("😱 Fetching Fear & Greed Index...")
     fear_greed = get_fear_greed_index()
-    if fear_greed:
-        shared_state["fear_greed"] = fear_greed
 
     log("📅 Checking earnings calendar...")
     pos_syms_list = [p["symbol"] for p in positions] if positions else []
@@ -3915,12 +3858,6 @@ JSON (keep under 600 chars):
             log(f"🔴 Grok brief: sentiment={grok_brief.get('market_sentiment')} "
                 f"momentum={grok_brief.get('momentum_strength')} "
                 f"watchlist={[w.get('symbol') for w in grok_brief.get('grok_watchlist',[])]}")
-            # Publish brief sentiment to the strategist pipeline
-            if grok_brief.get("market_sentiment"):
-                shared_state["market_sentiment"] = grok_brief["market_sentiment"]
-            if grok_brief.get("sentiment_notes"):
-                shared_state["latest_social_summary"] = str(grok_brief["sentiment_notes"])[:500]
-            shared_state["sentiment_updated"] = datetime.now(timezone.utc).isoformat()
     except Exception as e:
         log(f"❌ Grok brief: {e}")
 
@@ -4504,32 +4441,6 @@ def trading_loop():
                     except Exception as cre:
                         log(f"⚠️ Core Reserve check failed: {cre}")
                         run_cycle._last_core_check = now_unix    # Don't retry-storm on failure
-
-            # ── AI EVOLUTION PASS B (hourly; AI call ≤ once/72h per AI) ──
-            # Tier-ups and auto-reverts are rule-based and free; the
-            # self-modification proposal is cooldown-gated inside the module.
-            if HAVE_AI_EVOLUTION and ai_evolution and ai_evolution.ENABLE_SELF_MODIFICATION:
-                if not hasattr(run_cycle, "_last_evo_check"):
-                    run_cycle._last_evo_check = 0
-                if now_unix - run_cycle._last_evo_check >= 3600:    # 1 hour
-                    run_cycle._last_evo_check = now_unix
-                    for _evo_ai, _evo_ask in (("claude", safe_ask_claude),
-                                              ("grok",   safe_ask_grok)):
-                        try:
-                            _closes = [t for t in trade_history
-                                       if t.get("owner") == _evo_ai
-                                       and t.get("pnl_usd") is not None]
-                            _res = ai_evolution.run_evolution_cycle(
-                                _evo_ai,
-                                trades        = len(_closes),
-                                total_pnl     = sum(float(t["pnl_usd"]) for t in _closes),
-                                recent_results= [t["pnl_usd"] for t in _closes[-10:]],
-                                ask_fn        = _evo_ask,
-                            )
-                            if _res.get("actions"):
-                                log(f"🧬 Evolution [{_evo_ai}]: {', '.join(_res['actions'])}")
-                        except Exception as evo_e:
-                            log(f"⚠️ Evolution cycle failed for {_evo_ai}: {evo_e}")
 
             # ── MAIN TRADING LOGIC ───────────────────────────
 

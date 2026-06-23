@@ -485,54 +485,6 @@ def get_fear_greed_index() -> dict:
         log(f"⚠️ Fear & Greed fetch failed: {e}")
         return {}
 
-# ── 1-hour change tracking (BTC + SPY) ──────────────────────
-_h1_cache = {"ts": 0.0}
-
-def get_1h_changes() -> dict:
-    """
-    BTC and SPY % change over the last hour — strategist context +
-    wake-trigger inputs. Cached 5 minutes. Mirrors results into
-    shared_state["btc_change_1h"] / ["spy_change_1h"] so other
-    modules can read them without refetching.
-    """
-    now = time.time()
-    if now - _h1_cache["ts"] < 300:
-        return {"btc_change_1h": shared_state.get("btc_change_1h", 0.0),
-                "spy_change_1h": shared_state.get("spy_change_1h", 0.0)}
-
-    btc_chg = shared_state.get("btc_change_1h", 0.0)
-    spy_chg = shared_state.get("spy_change_1h", 0.0)
-
-    try:
-        # 13 × 5m candles = exactly 60 min between first and last close
-        r = requests.get("https://api.binance.us/api/v3/klines",
-                         params={"symbol": "BTCUSDT", "interval": "5m", "limit": 13},
-                         timeout=8)
-        if r.ok:
-            k = r.json()
-            if len(k) >= 2 and float(k[0][4]) > 0:
-                btc_chg = round((float(k[-1][4]) - float(k[0][4]))
-                                / float(k[0][4]) * 100, 2)
-    except Exception as e:
-        log(f"⚠️ BTC 1h change fetch failed: {e}")
-
-    try:
-        # Stale bars when market is closed → change over last open hour
-        bars = get_intraday_bars("SPY", timeframe="5Min", hours=2)
-        if len(bars) >= 13 and bars[-13]["c"] > 0:
-            spy_chg = round((bars[-1]["c"] - bars[-13]["c"])
-                            / bars[-13]["c"] * 100, 2)
-        elif len(bars) >= 2 and bars[0]["c"] > 0:
-            spy_chg = round((bars[-1]["c"] - bars[0]["c"])
-                            / bars[0]["c"] * 100, 2)
-    except Exception as e:
-        log(f"⚠️ SPY 1h change fetch failed: {e}")
-
-    shared_state["btc_change_1h"] = btc_chg
-    shared_state["spy_change_1h"] = spy_chg
-    _h1_cache["ts"] = now
-    return {"btc_change_1h": btc_chg, "spy_change_1h": spy_chg}
-
 def get_earnings_calendar(symbols: list) -> dict:
     """
     Check if any of our symbols have earnings in the next 5 days.

@@ -6,778 +6,592 @@
 <title>NovaTrade</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Söhne&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 /* ============================================================
-   NovaTrade — single-viewport trading cockpit
-   Dark glass terminal by default · light mode via toggle (T)
-   Display: Space Grotesk · Body: Inter · Numbers: JetBrains Mono
-   Everything fits in 100vh — panels scroll internally, not the page.
+   NovaTrade — financial broadsheet aesthetic
+   Light theme (warm paper) by default · OLED dark via toggle
+   Display: Fraunces (serif) · Body: IBM Plex Sans · Mono: IBM Plex Mono
+   Single warm accent (vermilion). Color used only for signal.
 ============================================================ */
-:root, [data-theme="dark"] {
-  --bg:        #0a0d13;
-  --glow-1:    rgba(34, 211, 238, 0.06);
-  --glow-2:    rgba(167, 139, 250, 0.05);
-  --panel:     rgba(18, 23, 33, 0.88);
-  --panel-2:   #161b27;
-  --panel-top: rgba(255, 255, 255, 0.025);
-  --border:    #1e2535;
-  --border-2:  #2b3449;
-  --txt:       #e8edf6;
-  --txt-2:     #a7b1c5;
-  --txt-3:     #5f6a82;
-  --acc:       #22d3ee;
-  --acc-soft:  rgba(34, 211, 238, 0.12);
-  --claude:    #fb923c;
-  --claude-soft: rgba(251, 146, 60, 0.12);
-  --grok:      #a78bfa;
-  --grok-soft: rgba(167, 139, 250, 0.12);
-  --good:      #34d399;
-  --good-soft: rgba(52, 211, 153, 0.12);
-  --bad:       #f87171;
-  --bad-soft:  rgba(248, 113, 113, 0.12);
-  --warn:      #fbbf24;
-  --warn-soft: rgba(251, 191, 36, 0.12);
-  --cash:      #64748b;
-  --shadow:    0 10px 30px rgba(0, 0, 0, 0.35);
-  --font-display: 'Space Grotesk', 'Inter', sans-serif;
-  --font-body:    'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+:root {
+  /* Light (cream paper) */
+  --paper:        #f5f1e8;
+  --paper-2:      #efeadd;
+  --paper-3:      #e8e1d0;
+  --ink:          #1a1816;
+  --ink-2:        #3a3530;
+  --ink-3:        #6b645b;
+  --ink-4:        #9b9389;
+  --rule:         #d4cab5;
+  --rule-soft:    rgba(26, 24, 22, 0.08);
+  --accent:       #c1421f;   /* vermilion */
+  --accent-soft:  rgba(193, 66, 31, 0.08);
+  --good:         #0f6b3e;
+  --good-soft:    rgba(15, 107, 62, 0.08);
+  --bad:          #a01d28;
+  --bad-soft:     rgba(160, 29, 40, 0.08);
+  --warn:         #c08116;
+  --warn-soft:    rgba(192, 129, 22, 0.08);
+
+  --font-display: 'Fraunces', 'Cambria', 'Georgia', serif;
+  --font-body:    'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono:    'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
 }
-[data-theme="light"] {
-  --bg:        #edf0f6;
-  --glow-1:    rgba(8, 145, 178, 0.05);
-  --glow-2:    rgba(124, 58, 237, 0.04);
-  --panel:     rgba(255, 255, 255, 0.92);
-  --panel-2:   #f3f5fa;
-  --panel-top: rgba(255, 255, 255, 0.6);
-  --border:    #dde3ee;
-  --border-2:  #c5cfdf;
-  --txt:       #101726;
-  --txt-2:     #45526b;
-  --txt-3:     #93a0b5;
-  --acc:       #0891b2;
-  --acc-soft:  rgba(8, 145, 178, 0.10);
-  --claude:    #ea7317;
-  --claude-soft: rgba(234, 115, 23, 0.10);
-  --grok:      #7c3aed;
-  --grok-soft: rgba(124, 58, 237, 0.10);
-  --good:      #059669;
-  --good-soft: rgba(5, 150, 105, 0.10);
-  --bad:       #dc2626;
-  --bad-soft:  rgba(220, 38, 38, 0.10);
-  --warn:      #d97706;
-  --warn-soft: rgba(217, 119, 6, 0.10);
-  --cash:      #94a3b8;
-  --shadow:    0 8px 24px rgba(16, 23, 38, 0.08);
+[data-theme="dark"] {
+  --paper:        #0c0b0a;
+  --paper-2:      #131210;
+  --paper-3:      #1c1a18;
+  --ink:          #ede8df;
+  --ink-2:        #c8c1b3;
+  --ink-3:        #8a8276;
+  --ink-4:        #5d5750;
+  --rule:         #2a2725;
+  --rule-soft:    rgba(237, 232, 223, 0.08);
+  --accent:       #e8744e;
+  --accent-soft:  rgba(232, 116, 78, 0.10);
+  --good:         #5cb784;
+  --good-soft:    rgba(92, 183, 132, 0.10);
+  --bad:          #e07a7a;
+  --bad-soft:     rgba(224, 122, 122, 0.10);
+  --warn:         #e0b06a;
+  --warn-soft:    rgba(224, 176, 106, 0.10);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; }
-body {
-  background:
-    radial-gradient(900px 480px at 12% -10%, var(--glow-1), transparent 60%),
-    radial-gradient(900px 520px at 88% -10%, var(--glow-2), transparent 60%),
-    var(--bg);
-  color: var(--txt);
+html, body {
+  background: var(--paper);
+  color: var(--ink);
   font-family: var(--font-body);
-  font-size: 13px;
-  line-height: 1.45;
-  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/* ─── App frame: header / KPIs / main — exactly one viewport ── */
-.app {
-  display: grid;
-  grid-template-rows: auto auto 1fr;
-  gap: 10px;
-  height: 100%;
-  max-width: 1920px;
+/* ─── Layout ─────────────────────────────────────────────── */
+.page {
+  max-width: 1400px;
   margin: 0 auto;
-  padding: 12px 16px 14px;
+  padding: 32px 40px 80px;
 }
+@media (max-width: 640px) { .page { padding: 20px 16px 60px; } }
 
-/* ─── Topbar ─────────────────────────────────────────────── */
-.topbar {
+/* ─── Masthead ───────────────────────────────────────────── */
+.masthead {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 0 2px;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--ink);
+  margin-bottom: 28px;
 }
-.brand {
+.mast-title {
   font-family: var(--font-display);
   font-weight: 700;
-  font-size: 19px;
+  font-size: 28px;
   letter-spacing: -0.02em;
-  white-space: nowrap;
+  font-variation-settings: 'opsz' 144;
 }
-.brand .tick { color: var(--acc); }
-.pill {
+.mast-title .dot { color: var(--accent); }
+.mast-meta {
+  display: flex;
+  gap: 18px;
+  align-items: baseline;
   font-size: 11px;
-  font-weight: 500;
-  padding: 3px 11px;
-  border-radius: 999px;
-  border: 1px solid var(--border-2);
-  color: var(--txt-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 340px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
 }
-.pill.active { color: var(--good); border-color: var(--good); background: var(--good-soft); }
-.pill.sleep  { color: var(--txt-2); }
-.pill.bad    { color: var(--bad); border-color: var(--bad); background: var(--bad-soft); }
-
-.health { display: flex; align-items: center; gap: 2px; margin-left: auto; }
-.h-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  color: var(--txt-3);
-  padding: 3px 7px;
-  border-radius: 6px;
-  cursor: default;
-  transition: background 0.15s;
-}
-.h-item:hover { background: var(--panel-2); color: var(--txt-2); }
-.h-item .dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--good);
-  box-shadow: 0 0 6px var(--good);
-  flex-shrink: 0;
-}
-.h-item.bad  .dot { background: var(--bad);  box-shadow: 0 0 6px var(--bad); }
-.h-item.warn .dot { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
-.h-item.off  .dot { background: var(--txt-3); box-shadow: none; }
-.health a {
-  font-size: 10px;
-  color: var(--txt-3);
-  text-decoration: none;
-  padding: 3px 7px;
-  border-radius: 6px;
-}
-.health a:hover { color: var(--acc); background: var(--panel-2); }
-
-.top-right { display: flex; align-items: center; gap: 10px; }
-.url-input {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--txt);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  padding: 5px 9px;
-  width: 200px;
-  outline: none;
-  transition: border-color 0.15s;
-}
-.url-input:focus { border-color: var(--acc); }
-.live {
+.mast-meta .live {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
-  color: var(--txt-2);
-  white-space: nowrap;
+  color: var(--ink-2);
 }
-.live::before {
+.mast-meta .live::before {
   content: '';
-  width: 7px; height: 7px;
+  width: 6px; height: 6px;
   border-radius: 50%;
   background: var(--good);
+  display: inline-block;
+  box-shadow: 0 0 0 0 var(--good);
   animation: pulse 2.2s ease-out infinite;
 }
-.live.offline::before { background: var(--bad); animation: none; }
-.live.warn::before    { background: var(--warn); animation: none; }
+.mast-meta .live.offline::before { background: var(--bad); animation: none; }
+.mast-meta .live.warn::before    { background: var(--warn); animation: none; }
 @keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 var(--good-soft); }
-  70%  { box-shadow: 0 0 0 7px transparent; }
-  100% { box-shadow: 0 0 0 0 transparent; }
+  0%   { box-shadow: 0 0 0 0 rgba(15,107,62,0.45); }
+  70%  { box-shadow: 0 0 0 8px rgba(15,107,62,0); }
+  100% { box-shadow: 0 0 0 0 rgba(15,107,62,0); }
 }
-#last-update { font-size: 10px; color: var(--txt-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-
+.mast-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
 .btn {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  color: var(--txt-2);
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--ink-2);
   font-family: var(--font-body);
   font-size: 11px;
   font-weight: 500;
-  padding: 5px 11px;
-  border-radius: 8px;
+  padding: 5px 10px;
+  border-radius: 2px;
   cursor: pointer;
+  letter-spacing: 0.02em;
   transition: border-color 0.15s, color 0.15s;
+}
+.btn:hover { border-color: var(--ink-2); color: var(--ink); }
+.btn-accent { color: var(--accent); border-color: var(--accent-soft); }
+.btn-accent:hover { border-color: var(--accent); }
+
+/* ─── Hero numbers ───────────────────────────────────────── */
+.hero {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr 1fr 1.1fr;
+  gap: 32px;
+  padding: 32px 0 28px;
+  border-bottom: 1px solid var(--ink);
+  margin-bottom: 0;
+}
+@media (max-width: 900px) {
+  .hero { grid-template-columns: 1fr 1fr; gap: 24px; padding: 20px 0; }
+  .hero .h-cell:first-child { grid-column: 1 / -1; }
+}
+.h-cell .h-label {
+  font-family: var(--font-body);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+.h-cell .h-val {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: 'opsz' 144;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.h-cell.hero-main .h-val { font-size: 64px; }
+.h-cell .h-val        { font-size: 32px; }
+@media (max-width: 900px) {
+  .h-cell.hero-main .h-val { font-size: 52px; }
+  .h-cell .h-val        { font-size: 26px; }
+}
+.h-cell .h-sub {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.h-val.good { color: var(--good); }
+.h-val.bad  { color: var(--bad);  }
+.h-val.warn { color: var(--warn); }
+
+/* ─── Health strip ───────────────────────────────────────── */
+.health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--ink);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.h-item {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  padding: 0 18px;
+  border-right: 1px solid var(--rule-soft);
+  white-space: nowrap;
 }
-.btn:hover { border-color: var(--acc); color: var(--txt); }
-.btn svg { display: block; }
-.btn .ring-track { stroke: var(--border-2); }
-.btn .ring-fill  { stroke: var(--acc); transition: stroke-dashoffset 1s linear; }
-.theme-btn { padding: 5px 9px; border-radius: 8px; }
-
-/* ─── KPI strip ──────────────────────────────────────────── */
-.kpis {
-  display: grid;
-  grid-template-columns: 1.35fr 1fr 1fr 1fr 1fr 1fr;
-  gap: 10px;
+.h-item:first-child { padding-left: 0; }
+.h-item:last-child  { border-right: none; }
+@media (max-width: 700px) {
+  .h-item { padding: 4px 12px; border-right: none; }
 }
-.kpi {
-  background: linear-gradient(180deg, var(--panel-top), transparent 55%), var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 11px 16px 10px;
-  box-shadow: var(--shadow);
-  animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-}
-.kpis .kpi:nth-child(2) { animation-delay: 0.04s; }
-.kpis .kpi:nth-child(3) { animation-delay: 0.08s; }
-.kpis .kpi:nth-child(4) { animation-delay: 0.12s; }
-.kpis .kpi:nth-child(5) { animation-delay: 0.16s; }
-.kpis .kpi:nth-child(6) { animation-delay: 0.20s; }
-.kpi .k-label {
-  font-size: 9px;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
-  color: var(--txt-3);
-  font-weight: 600;
-  margin-bottom: 3px;
-}
-.kpi .k-val {
-  font-family: var(--font-display);
-  font-size: 24px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.1;
-  border-radius: 6px;
-}
-.kpi.main .k-val { font-size: 27px; color: var(--acc); text-shadow: 0 0 24px var(--acc-soft); }
-.kpi .k-sub { font-size: 10px; color: var(--txt-3); margin-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.k-val.good { color: var(--good); }
-.k-val.bad  { color: var(--bad); }
-.k-val.warn { color: var(--warn); }
-.k-val.flash-up   { animation: flash-good 0.9s ease-out; }
-.k-val.flash-down { animation: flash-bad 0.9s ease-out; }
-@keyframes flash-good { 0% { background: var(--good-soft); } 100% { background: transparent; } }
-@keyframes flash-bad  { 0% { background: var(--bad-soft);  } 100% { background: transparent; } }
-
-/* ─── Main grid: 12 cols × 2 rows, fills remaining height ── */
-.main {
-  display: grid;
-  grid-template-columns: repeat(12, 1fr);
-  grid-template-rows: 1.12fr 1fr;
-  gap: 10px;
-  min-height: 0;
-}
-.panel {
-  background: linear-gradient(180deg, var(--panel-top), transparent 45%), var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: var(--shadow);
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  min-width: 0;
-  animation: rise 0.55s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-}
-.main .panel:nth-child(2) { animation-delay: 0.06s; }
-.main .panel:nth-child(3) { animation-delay: 0.12s; }
-.main .panel:nth-child(4) { animation-delay: 0.18s; }
-.main .panel:nth-child(5) { animation-delay: 0.24s; }
-@keyframes rise {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-.p-chart  { grid-column: span 7; }
-.p-battle { grid-column: span 5; }
-.p-pos    { grid-column: span 4; }
-.p-closes { grid-column: span 5; }
-.p-side   { grid-column: span 3; }
-
-.panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
+.h-item .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--good);
   flex-shrink: 0;
 }
-.panel-title {
-  font-family: var(--font-display);
-  font-weight: 600;
+.h-item.bad  .dot { background: var(--bad); }
+.h-item.warn .dot { background: var(--warn); }
+.h-item.off  .dot { background: var(--ink-4); }
+.h-item .h-key { color: var(--ink-3); }
+.h-item .h-val { color: var(--ink); font-weight: 500; }
+
+.banner {
+  padding: 12px 0;
   font-size: 13px;
-  letter-spacing: 0.01em;
+  color: var(--ink-3);
+  font-style: italic;
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 14;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 28px;
 }
-.panel-title .accent { color: var(--acc); }
-.panel-meta {
-  font-size: 9px;
-  color: var(--txt-3);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.panel-body { flex: 1; min-height: 0; overflow-y: auto; }
-.panel-body::-webkit-scrollbar { width: 8px; }
-.panel-body::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
-.panel-body::-webkit-scrollbar-track { background: transparent; }
+.banner.sleep { color: var(--ink-3); }
+.banner.active { color: var(--good); font-style: normal; font-family: var(--font-body); }
 
-/* ─── Equity chart ───────────────────────────────────────── */
-.chart-body { display: flex; flex-direction: column; overflow: hidden; }
-.range-tabs { display: inline-flex; gap: 2px; background: var(--panel-2); border-radius: 8px; padding: 2px; }
-.range-tab {
-  background: transparent;
-  border: none;
-  color: var(--txt-3);
-  font-family: var(--font-body);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  padding: 3px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  text-transform: uppercase;
-  transition: color 0.15s, background 0.15s;
+/* ─── Grid ───────────────────────────────────────────────── */
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
 }
-.range-tab:hover { color: var(--txt); }
-.range-tab.on { color: var(--acc); background: var(--acc-soft); }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
 
-.chart-wrap { position: relative; flex: 1; min-height: 0; }
-.chart-wrap svg { display: block; width: 100%; height: 100%; cursor: crosshair; color: var(--acc); }
-.chart-axis  { stroke: var(--border); stroke-width: 1; }
-.chart-zero  { stroke: var(--txt-3); stroke-width: 1; stroke-dasharray: 2 4; }
-.chart-line  { fill: none; stroke: var(--acc); stroke-width: 2; stroke-linejoin: round;
-               filter: drop-shadow(0 0 5px var(--acc-soft)); }
-.chart-cross { stroke: var(--txt-3); stroke-width: 1; stroke-dasharray: 3 3; }
-.chart-dot   { fill: var(--acc); stroke: var(--bg); stroke-width: 1.5; }
-.chart-label { font-family: var(--font-mono); font-size: 9px; fill: var(--txt-3); }
-.chart-tip {
-  position: absolute;
-  pointer-events: none;
-  background: var(--panel-2);
-  border: 1px solid var(--border-2);
-  padding: 6px 10px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.6;
-  white-space: nowrap;
-  color: var(--txt-2);
-  display: none;
-  z-index: 5;
-  border-radius: 8px;
-  box-shadow: var(--shadow);
+.card {
+  padding: 24px 32px 24px 0;
+  border-right: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  min-height: 0;
 }
-.chart-tip b { color: var(--txt); font-weight: 600; }
-.chart-empty {
-  height: 100%;
+.card:nth-child(2n) { padding-right: 0; padding-left: 32px; border-right: none; }
+@media (max-width: 900px) {
+  .card { padding: 20px 0; border-right: none; }
+  .card:nth-child(2n) { padding-left: 0; }
+}
+.card-head {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--txt-3);
-  font-size: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.card-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  font-variation-settings: 'opsz' 144;
+}
+.card-title .accent { color: var(--accent); }
+.card-meta {
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
-/* ─── AI battle ──────────────────────────────────────────── */
-.tug {
-  height: 6px;
-  border-radius: 3px;
-  background: linear-gradient(90deg, var(--grok-soft), var(--grok));
-  overflow: hidden;
-  margin-bottom: 10px;
-  flex-shrink: 0;
-}
-.tug .tug-fill {
-  height: 100%;
-  width: 50%;
-  background: linear-gradient(90deg, var(--claude), var(--claude-soft));
-  border-right: 2px solid var(--bg);
-  transition: width 0.6s cubic-bezier(0.2, 0.7, 0.3, 1);
-}
+/* ─── AI Battle ──────────────────────────────────────────── */
 .battle {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 14px;
-  flex: 1;
-  min-height: 0;
+  gap: 24px;
 }
-.fighter {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 10px 13px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-.fighter.claude { border-top: 2px solid var(--claude); }
-.fighter.grok   { border-top: 2px solid var(--grok); }
 .fighter-name {
   font-family: var(--font-display);
   font-weight: 600;
-  font-size: 13px;
+  font-size: 15px;
+  margin-bottom: 4px;
 }
-.fighter.claude .fighter-name { color: var(--claude); }
-.fighter.grok   .fighter-name { color: var(--grok); }
 .fighter-name .role {
-  margin-left: 5px;
+  display: inline-block;
+  margin-left: 6px;
   font-family: var(--font-body);
-  font-size: 8px;
-  letter-spacing: 0.13em;
+  font-size: 9px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--txt-3);
-  font-weight: 500;
+  color: var(--ink-4);
+  font-weight: 400;
 }
 .fighter-pnl {
   font-family: var(--font-display);
-  font-size: 25px;
-  font-weight: 600;
+  font-size: 36px;
+  font-weight: 500;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
-  line-height: 1.1;
-  margin: 4px 0 6px;
+  line-height: 1;
+  margin: 6px 0 10px;
 }
-.fighter-spark { height: 26px; margin-bottom: 6px; }
-.fighter-spark svg { display: block; width: 100%; height: 26px; }
-.spark-line { fill: none; stroke-width: 1.5; }
-.spark-claude { stroke: var(--claude); }
-.spark-grok   { stroke: var(--grok); }
-.wl-bar {
-  display: flex;
-  height: 5px;
-  border-radius: 3px;
-  overflow: hidden;
-  background: var(--border);
-  margin-bottom: 8px;
-  flex-shrink: 0;
-}
-.wl-bar .w { background: var(--good); }
-.wl-bar .l { background: var(--bad); opacity: 0.5; }
 .fighter-stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2px 10px;
-  font-size: 10px;
-  color: var(--txt-3);
-  font-variant-numeric: tabular-nums;
-  border-top: 1px solid var(--border);
-  padding-top: 7px;
-}
-.fighter-stats b { color: var(--txt); font-weight: 600; font-family: var(--font-mono); font-size: 10px; }
-.leader-tag {
-  font-size: 8px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--acc);
-  border: 1px solid var(--acc);
-  background: var(--acc-soft);
-  padding: 2px 7px;
-  display: inline-block;
-  margin-top: 7px;
-  border-radius: 999px;
-  font-weight: 600;
-}
-
-/* ─── Positions panel (tabs) ─────────────────────────────── */
-.tabs { display: inline-flex; gap: 2px; background: var(--panel-2); border-radius: 8px; padding: 2px; }
-.tab {
-  background: transparent;
-  border: none;
-  color: var(--txt-3);
-  font-family: var(--font-body);
-  font-size: 10px;
-  font-weight: 600;
-  padding: 3px 11px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s;
-}
-.tab:hover { color: var(--txt); }
-.tab.on { color: var(--acc); background: var(--acc-soft); }
-.tab b { font-family: var(--font-mono); font-weight: 600; }
-.pane { display: none; }
-.pane.on { display: block; }
-.pane-meta {
-  font-size: 9px;
-  color: var(--txt-3);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding-bottom: 5px;
-}
-.wallet-line {
-  flex-shrink: 0;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--border);
-  font-size: 10px;
-  color: var(--txt-3);
-  font-variant-numeric: tabular-nums;
-}
-
-/* ─── Tables ─────────────────────────────────────────────── */
-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-th {
-  font-size: 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--txt-3);
-  font-weight: 600;
-  text-align: left;
-  padding: 4px 10px 5px 0;
-  border-bottom: 1px solid var(--border-2);
-  user-select: none;
-  position: sticky;
-  top: 0;
-  background: var(--panel-2);
-  z-index: 1;
-}
-th.r { text-align: right; padding-right: 0; }
-th.sortable { cursor: pointer; }
-th.sortable:hover { color: var(--txt); }
-th.sortable .arrow { display: inline-block; width: 9px; color: var(--acc); }
-td {
-  padding: 6px 10px 6px 0;
-  font-size: 11px;
-  border-bottom: 1px solid var(--border);
-  color: var(--txt-2);
-}
-td.r { text-align: right; padding-right: 0; font-family: var(--font-mono); font-size: 10.5px; }
-tbody tr { transition: background 0.12s; }
-tbody tr:hover { background: var(--panel-top); }
-tbody tr:last-child td { border-bottom: none; }
-.sym { font-weight: 600; color: var(--txt); font-family: var(--font-display); font-size: 11px; }
-.ownr {
-  display: inline-block;
-  font-size: 8px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  margin-left: 5px;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: var(--panel-2);
-  color: var(--txt-3);
-}
-.ownr.claude { color: var(--claude); background: var(--claude-soft); }
-.ownr.grok   { color: var(--grok);   background: var(--grok-soft); }
-.act { font-size: 9px; color: var(--txt-3); letter-spacing: 0.04em; }
-.empty { color: var(--txt-3); font-style: italic; padding: 14px 0; font-size: 11px; }
-
-/* ─── Closes panel ───────────────────────────────────────── */
-.closes-controls { display: flex; gap: 4px; align-items: center; flex-wrap: nowrap; overflow: hidden; }
-.chip {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--txt-3);
-  font-family: var(--font-body);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  padding: 2px 8px;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-}
-.chip:hover { border-color: var(--txt-3); color: var(--txt); }
-.chip.on { border-color: var(--acc); color: var(--acc); background: var(--acc-soft); }
-.chip-sep { width: 1px; height: 12px; background: var(--border-2); margin: 0 3px; flex-shrink: 0; }
-.closes-foot {
-  flex-shrink: 0;
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  padding-top: 7px;
-  font-size: 9px;
-  color: var(--txt-3);
-  letter-spacing: 0.05em;
-}
-.closes-foot a { color: var(--txt-3); cursor: pointer; text-decoration: none; border-bottom: 1px dotted var(--border-2); }
-.closes-foot a:hover { color: var(--acc); border-color: var(--acc); }
-
-/* ─── Side panel: allocation + performance + strategy ────── */
-.side-sec { padding: 8px 0 10px; border-bottom: 1px solid var(--border); }
-.side-sec:first-child { padding-top: 0; }
-.side-sec:last-child { border-bottom: none; padding-bottom: 0; }
-.side-label {
-  font-size: 9px;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
-  color: var(--txt-3);
-  font-weight: 600;
-  margin-bottom: 7px;
-}
-.donut-row { display: flex; align-items: center; gap: 12px; }
-.donut { width: 104px; height: 104px; flex-shrink: 0; }
-.donut svg { display: block; width: 100%; height: 100%; }
-.donut circle.seg { fill: none; stroke-width: 13; cursor: pointer; transition: stroke-width 0.15s, opacity 0.15s; }
-.donut circle.seg:hover { stroke-width: 17; }
-.donut .c-val { font-family: var(--font-display); font-size: 14px; font-weight: 600; fill: var(--txt); text-anchor: middle; }
-.donut .c-lab { font-family: var(--font-body); font-size: 7.5px; letter-spacing: 0.1em; fill: var(--txt-3); text-anchor: middle; text-transform: uppercase; }
-.legend { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
-.leg-row { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--txt-2); font-variant-numeric: tabular-nums; }
-.leg-row .swatch { width: 8px; height: 8px; border-radius: 3px; flex-shrink: 0; }
-.leg-row .lv { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; color: var(--txt); }
-.leg-row .lp { font-size: 9px; color: var(--txt-3); width: 32px; text-align: right; }
-
-.perf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 12px; }
-.perf-stat .p-label { font-size: 8px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--txt-3); font-weight: 600; }
-.perf-stat .p-val {
-  font-family: var(--font-display);
-  font-size: 16px;
-  font-weight: 600;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--ink-3);
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
+  border-top: 1px solid var(--rule-soft);
+  padding-top: 10px;
 }
-.perf-best { margin-top: 8px; font-size: 10px; color: var(--txt-3); font-variant-numeric: tabular-nums; line-height: 1.7; }
-.perf-best b { color: var(--txt); font-weight: 600; font-family: var(--font-mono); font-size: 10px; }
+.fighter-stats b {
+  color: var(--ink);
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.leader-tag {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  padding: 2px 6px;
+  display: inline-block;
+  margin-top: 8px;
+  border-radius: 1px;
+  font-weight: 600;
+}
 
+/* ─── Strategy / Turtle ──────────────────────────────────── */
 .strat-status {
   display: flex;
   align-items: baseline;
-  gap: 7px;
+  gap: 8px;
   font-family: var(--font-display);
-  font-size: 15px;
+  font-size: 22px;
   font-weight: 600;
-  margin-bottom: 2px;
+  margin-bottom: 4px;
+  font-variation-settings: 'opsz' 144;
 }
-.strat-status .turtle { font-size: 17px; }
+.strat-status .turtle { font-size: 26px; }
 .strat-status.active { color: var(--good); }
-.strat-status.classic { color: var(--txt-2); }
-.strat-detail { font-size: 10px; color: var(--txt-3); line-height: 1.5; }
+.strat-status.classic { color: var(--ink-2); }
+.strat-detail { font-size: 12px; color: var(--ink-3); margin-bottom: 16px; }
+.gate-log { font-family: var(--font-mono); font-size: 11px; line-height: 1.7; color: var(--ink-2); }
+.gate-row { padding: 3px 0; border-bottom: 1px dotted var(--rule-soft); }
+.gate-row:last-child { border-bottom: none; }
+.gate-pass { color: var(--good); margin-right: 6px; }
+.gate-reject { color: var(--bad); margin-right: 6px; }
+
+/* ─── Positions table ────────────────────────────────────── */
+.pos-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+.pos-table th {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-3);
+  font-weight: 500;
+  text-align: left;
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--ink-2);
+}
+.pos-table th.r { text-align: right; padding-right: 0; }
+.pos-table td {
+  padding: 9px 8px 9px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.pos-table td.r { text-align: right; padding-right: 0; font-family: var(--font-mono); }
+.pos-table tr:last-child td { border-bottom: none; }
+.pos-table .sym {
+  font-weight: 600;
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 14;
+}
+.pos-table .ownr {
+  display: inline-block;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  margin-left: 6px;
+}
+.empty {
+  color: var(--ink-4);
+  font-style: italic;
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 14;
+  padding: 18px 0;
+  font-size: 13px;
+}
+.wallet-line {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dotted var(--rule);
+  font-size: 11px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Closes table (full width) ──────────────────────────── */
+.full {
+  padding: 28px 0 8px;
+  border-bottom: 1px solid var(--rule);
+}
+.closes-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+.closes-table th {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-3);
+  font-weight: 500;
+  text-align: left;
+  padding: 6px 12px 6px 0;
+  border-bottom: 1px solid var(--ink-2);
+}
+.closes-table th.r { text-align: right; padding-right: 0; }
+.closes-table td {
+  padding: 10px 12px 10px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink-2);
+}
+.closes-table td.r { text-align: right; padding-right: 0; font-family: var(--font-mono); }
+.closes-table .sym {
+  font-weight: 600;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 14;
+}
+.closes-table .act {
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.05em;
+}
 
 .good { color: var(--good); }
 .bad  { color: var(--bad); }
 
-/* ─── Small screens: cockpit unrolls into a scrollable column ── */
-@media (max-width: 1120px), (max-height: 540px) {
-  body { overflow: auto; }
-  .app { height: auto; }
-  .kpis { grid-template-columns: repeat(3, 1fr); }
-  .main { display: flex; flex-direction: column; }
-  .panel { min-height: 260px; }
-  .p-chart { min-height: 320px; }
-  .topbar { flex-wrap: wrap; }
-  .health { margin-left: 0; }
-  .pill { max-width: none; }
+/* ─── Footer ─────────────────────────────────────────────── */
+.foot {
+  padding: 28px 0 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 10px;
+  color: var(--ink-4);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
-@media (max-width: 640px) {
-  .kpis { grid-template-columns: 1fr 1fr; }
-  .battle { grid-template-columns: 1fr; }
-  .url-input { width: 130px; }
+.foot a { color: var(--ink-3); text-decoration: none; border-bottom: 1px dotted var(--rule); }
+.foot a:hover { color: var(--ink); border-color: var(--ink); }
+
+/* ─── Bot URL input ─────────────────────────────────────── */
+.url-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 6px;
+  width: 220px;
+  outline: none;
 }
+.url-input:focus { border-color: var(--accent); }
+@media (max-width: 700px) { .url-input { width: 130px; } }
+
+/* ─── Pull-on-load animation ────────────────────────────── */
+.fade-in {
+  animation: fade-up 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Stagger child reveals */
+.hero .h-cell:nth-child(1) { animation-delay: 0.00s; }
+.hero .h-cell:nth-child(2) { animation-delay: 0.05s; }
+.hero .h-cell:nth-child(3) { animation-delay: 0.10s; }
+.hero .h-cell:nth-child(4) { animation-delay: 0.15s; }
+.hero .h-cell:nth-child(5) { animation-delay: 0.20s; }
+
+/* Theme toggle icon */
+.theme-btn {
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--ink-2);
+  width: 28px; height: 28px;
+  border-radius: 14px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s, color 0.15s;
+}
+.theme-btn:hover { border-color: var(--ink-2); color: var(--ink); }
 </style>
 </head>
-<body data-theme="dark">
+<body data-theme="light">
 
-<div class="app">
+<div class="page">
 
-  <!-- ── Topbar ───────────────────────────────────────────── -->
-  <header class="topbar">
-    <div class="brand">Nova<span class="tick">Trade</span></div>
-    <div class="pill" id="banner">loading…</div>
-
-    <div class="health">
-      <span class="h-item" id="h-bot" title="Flask API reachable"><span class="dot"></span>bot</span>
-      <span class="h-item" id="h-turtle" title="Are both AI playbooks running the Turtle system?"><span class="dot"></span>turtle</span>
-      <span class="h-item" id="h-claude" title="Claude API health (credits + connectivity)"><span class="dot"></span>claude</span>
-      <span class="h-item" id="h-grok" title="Grok API health (credits + connectivity)"><span class="dot"></span>grok</span>
-      <span class="h-item" id="h-fees" title="Binance round-trip fee rate · BNB discount status"><span class="dot"></span>fees</span>
-      <span class="h-item" id="h-data" title="Did all API endpoints respond?"><span class="dot"></span>data</span>
-      <a href="#" id="health-link" title="open /health">api ↗</a>
-    </div>
-
-    <div class="top-right">
+  <!-- ── Masthead ─────────────────────────────────────────── -->
+  <header class="masthead">
+    <div class="mast-title">NovaTrade<span class="dot">.</span></div>
+    <div class="mast-meta">
       <input class="url-input" id="bot-url" type="text" placeholder="bot url"/>
       <span class="live" id="status-live"><span id="status-text">connecting…</span></span>
       <span id="last-update">—</span>
-      <button class="btn" onclick="fetchAll()" title="refresh now (R) — auto every 30s">
-        <svg width="13" height="13" viewBox="0 0 14 14">
-          <circle class="ring-track" cx="7" cy="7" r="5.5" fill="none" stroke-width="2"/>
-          <circle class="ring-fill" id="ring-fill" cx="7" cy="7" r="5.5" fill="none" stroke-width="2"
-                  stroke-dasharray="34.56" stroke-dashoffset="0" transform="rotate(-90 7 7)"/>
-        </svg>
-        refresh
-      </button>
-      <button class="btn theme-btn" id="theme-toggle" title="toggle theme (T)">◐</button>
+    </div>
+    <div class="mast-actions">
+      <button class="btn" onclick="fetchAll()">refresh</button>
+      <button class="theme-btn" id="theme-toggle" title="toggle theme">◐</button>
     </div>
   </header>
 
-  <!-- ── KPI strip ────────────────────────────────────────── -->
-  <section class="kpis">
-    <div class="kpi main">
-      <div class="k-label">Combined Equity</div>
-      <div class="k-val" id="hero-equity">—</div>
-      <div class="k-sub" id="hero-equity-sub">stocks + crypto</div>
+  <!-- ── Hero numbers ─────────────────────────────────────── -->
+  <section class="hero">
+    <div class="h-cell hero-main fade-in">
+      <div class="h-label">Combined Equity</div>
+      <div class="h-val" id="hero-equity">—</div>
+      <div class="h-sub" id="hero-equity-sub">stocks + crypto</div>
     </div>
-    <div class="kpi">
-      <div class="k-label">Day P&amp;L</div>
-      <div class="k-val" id="hero-day">—</div>
-      <div class="k-sub" id="hero-day-pct">—</div>
+    <div class="h-cell fade-in">
+      <div class="h-label">Day P&amp;L</div>
+      <div class="h-val" id="hero-day">—</div>
+      <div class="h-sub" id="hero-day-pct">—</div>
     </div>
-    <div class="kpi">
-      <div class="k-label">Total Realized</div>
-      <div class="k-val" id="pf-total">—</div>
-      <div class="k-sub" id="pf-total-sub">all closes</div>
+    <div class="h-cell fade-in">
+      <div class="h-label">Closed Trades</div>
+      <div class="h-val" id="hero-closed">—</div>
+      <div class="h-sub" id="hero-closed-sub">deduped</div>
     </div>
-    <div class="kpi">
-      <div class="k-label">Win Rate</div>
-      <div class="k-val" id="hero-wr">—</div>
-      <div class="k-sub" id="hero-wr-sub">—</div>
+    <div class="h-cell fade-in">
+      <div class="h-label">Win Rate</div>
+      <div class="h-val" id="hero-wr">—</div>
+      <div class="h-sub" id="hero-wr-sub">—</div>
     </div>
-    <div class="kpi">
-      <div class="k-label">Closed Trades</div>
-      <div class="k-val" id="hero-closed">—</div>
-      <div class="k-sub" id="hero-closed-sub">realized exits</div>
-    </div>
-    <div class="kpi">
-      <div class="k-label">Open Positions</div>
-      <div class="k-val" id="hero-pos">—</div>
-      <div class="k-sub" id="hero-pos-sub">—</div>
+    <div class="h-cell fade-in">
+      <div class="h-label">Open Positions</div>
+      <div class="h-val" id="hero-pos">—</div>
+      <div class="h-sub" id="hero-pos-sub">—</div>
     </div>
   </section>
 
-  <!-- ── Main cockpit grid ────────────────────────────────── -->
-  <main class="main">
+  <!-- ── Health strip ─────────────────────────────────────── -->
+  <section class="health">
+    <span class="h-item" id="h-bot"><span class="dot"></span><span class="h-key">bot</span><span class="h-val">—</span></span>
+    <span class="h-item" id="h-turtle"><span class="dot"></span><span class="h-key">turtle</span><span class="h-val">—</span></span>
+    <span class="h-item" id="h-claude"><span class="dot"></span><span class="h-key">claude</span><span class="h-val">—</span></span>
+    <span class="h-item" id="h-grok"><span class="dot"></span><span class="h-key">grok</span><span class="h-val">—</span></span>
+    <span class="h-item" id="h-fees"><span class="dot"></span><span class="h-key">fees</span><span class="h-val">—</span></span>
+    <span class="h-item" id="h-data"><span class="dot"></span><span class="h-key">data</span><span class="h-val">—</span></span>
+  </section>
 
-    <!-- Equity curve -->
-    <section class="panel p-chart">
-      <div class="panel-head">
-        <span class="panel-title">Realized <span class="accent">P&amp;L</span></span>
-        <span class="range-tabs" id="range-tabs">
-          <button class="range-tab" data-range="7">7d</button>
-          <button class="range-tab" data-range="30">30d</button>
-          <button class="range-tab on" data-range="all">all</button>
-        </span>
-      </div>
-      <div class="panel-body chart-body">
-        <div class="chart-wrap" id="chart-wrap">
-          <div class="chart-empty">not enough closed trades to chart yet</div>
-        </div>
-      </div>
-    </section>
+  <!-- ── State banner ─────────────────────────────────────── -->
+  <div class="banner" id="banner">loading…</div>
 
-    <!-- AI battle -->
-    <section class="panel p-battle">
-      <div class="panel-head">
-        <span class="panel-title">AI <span class="accent">Battle</span></span>
-        <span class="panel-meta" id="battle-meta">—</span>
+  <!-- ── Two-column grid ──────────────────────────────────── -->
+  <div class="grid">
+
+    <!-- AI Battle -->
+    <div class="card">
+      <div class="card-head">
+        <h2 class="card-title">AI <span class="accent">Battle</span></h2>
+        <span class="card-meta" id="battle-meta">—</span>
       </div>
-      <div class="tug" title="P&L tug of war — orange Claude vs violet Grok"><div class="tug-fill" id="tug-fill"></div></div>
       <div class="battle">
-        <div class="fighter claude">
+        <div>
           <div class="fighter-name">Claude <span class="role" id="claude-role">tactician</span></div>
           <div class="fighter-pnl" id="claude-pnl">—</div>
-          <div class="fighter-spark" id="claude-spark"></div>
-          <div class="wl-bar" id="claude-wl" title="wins vs losses"></div>
           <div class="fighter-stats">
             <span><b id="claude-trades">0</b> trades</span>
             <span><b id="claude-wr">—</b> win rate</span>
@@ -786,11 +600,9 @@ tbody tr:last-child td { border-bottom: none; }
           </div>
           <div id="claude-leader-tag"></div>
         </div>
-        <div class="fighter grok">
+        <div>
           <div class="fighter-name">Grok <span class="role" id="grok-role">tactician</span></div>
           <div class="fighter-pnl" id="grok-pnl">—</div>
-          <div class="fighter-spark" id="grok-spark"></div>
-          <div class="wl-bar" id="grok-wl" title="wins vs losses"></div>
           <div class="fighter-stats">
             <span><b id="grok-trades">0</b> trades</span>
             <span><b id="grok-wr">—</b> win rate</span>
@@ -800,116 +612,82 @@ tbody tr:last-child td { border-bottom: none; }
           <div id="grok-leader-tag"></div>
         </div>
       </div>
-    </section>
+    </div>
 
-    <!-- Positions: stocks / crypto tabs -->
-    <section class="panel p-pos">
-      <div class="panel-head">
-        <span class="panel-title">Positions</span>
-        <span class="tabs" id="pos-tabs">
-          <button class="tab on" data-tab="stocks">Stocks <b id="tab-stocks-n">0</b></button>
-          <button class="tab" data-tab="crypto">Crypto <b id="tab-crypto-n">0</b></button>
-        </span>
+    <!-- Strategy / Turtle -->
+    <div class="card">
+      <div class="card-head">
+        <h2 class="card-title">Strategy</h2>
+        <span class="card-meta" id="strat-meta">—</span>
       </div>
-      <div class="panel-body">
-        <div class="pane on" id="pane-stocks">
-          <div class="pane-meta" id="stock-meta">—</div>
-          <table>
-            <thead><tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th></tr></thead>
-            <tbody id="stock-rows"><tr><td colspan="3" class="empty">no open stock positions</td></tr></tbody>
-          </table>
-        </div>
-        <div class="pane" id="pane-crypto">
-          <div class="pane-meta" id="crypto-meta">—</div>
-          <table>
-            <thead><tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th></tr></thead>
-            <tbody id="crypto-rows"><tr><td colspan="3" class="empty">no open crypto positions</td></tr></tbody>
-          </table>
-        </div>
+      <div class="strat-status" id="strat-status"><span class="turtle">—</span></div>
+      <div class="strat-detail" id="strat-detail">loading…</div>
+      <div class="gate-log" id="gate-log">
+        <div class="empty">no recent gate activity</div>
       </div>
+    </div>
+
+    <!-- Stock positions -->
+    <div class="card">
+      <div class="card-head">
+        <h2 class="card-title">Stocks</h2>
+        <span class="card-meta" id="stock-meta">—</span>
+      </div>
+      <table class="pos-table" id="stock-table">
+        <thead>
+          <tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th></tr>
+        </thead>
+        <tbody id="stock-rows">
+          <tr><td colspan="3" class="empty">no open stock positions</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Crypto positions -->
+    <div class="card">
+      <div class="card-head">
+        <h2 class="card-title">Crypto</h2>
+        <span class="card-meta" id="crypto-meta">—</span>
+      </div>
+      <table class="pos-table" id="crypto-table">
+        <thead>
+          <tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th></tr>
+        </thead>
+        <tbody id="crypto-rows">
+          <tr><td colspan="3" class="empty">no open crypto positions</td></tr>
+        </tbody>
+      </table>
       <div class="wallet-line" id="wallet-line">—</div>
-    </section>
+    </div>
+  </div>
 
-    <!-- Recent closes -->
-    <section class="panel p-closes">
-      <div class="panel-head">
-        <span class="panel-title">Recent <span class="accent">closes</span></span>
-        <span class="closes-controls" id="closes-filters">
-          <button class="chip on" data-f="all">all</button>
-          <button class="chip" data-f="claude">claude</button>
-          <button class="chip" data-f="grok">grok</button>
-          <span class="chip-sep"></span>
-          <button class="chip" data-f="stocks">stk</button>
-          <button class="chip" data-f="crypto">cry</button>
-          <span class="chip-sep"></span>
-          <button class="chip on" data-n="20">20</button>
-          <button class="chip" data-n="50">50</button>
-          <button class="chip" data-n="100">100</button>
-        </span>
-      </div>
-      <div class="panel-body">
-        <table id="closes-table">
-          <thead>
-            <tr>
-              <th class="sortable" data-k="time">Time<span class="arrow" id="ar-time"> ↓</span></th>
-              <th class="sortable" data-k="symbol">Symbol<span class="arrow" id="ar-symbol"></span></th>
-              <th class="sortable" data-k="action">Action<span class="arrow" id="ar-action"></span></th>
-              <th class="sortable" data-k="owner">Owner<span class="arrow" id="ar-owner"></span></th>
-              <th class="r sortable" data-k="pnl_pct">P&amp;L %<span class="arrow" id="ar-pnl_pct"></span></th>
-              <th class="r sortable" data-k="pnl_usd">P&amp;L $<span class="arrow" id="ar-pnl_usd"></span></th>
-            </tr>
-          </thead>
-          <tbody id="closes-rows">
-            <tr><td colspan="6" class="empty">no closes recorded</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="closes-foot">
-        <span id="closes-count">—</span>
-        <a id="csv-export">export csv ↓</a>
-      </div>
-    </section>
+  <!-- ── Recent closes (full width) ───────────────────────── -->
+  <section class="full">
+    <div class="card-head" style="border:none;">
+      <h2 class="card-title">Recent <span class="accent">closes</span></h2>
+      <span class="card-meta">deduplicated · last 20</span>
+    </div>
+    <table class="closes-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Symbol</th>
+          <th>Action</th>
+          <th>Owner</th>
+          <th class="r">P&amp;L %</th>
+          <th class="r">P&amp;L $</th>
+        </tr>
+      </thead>
+      <tbody id="closes-rows">
+        <tr><td colspan="6" class="empty">no closes recorded</td></tr>
+      </tbody>
+    </table>
+  </section>
 
-    <!-- Side: allocation + performance + strategy -->
-    <section class="panel p-side">
-      <div class="panel-body">
-        <div class="side-sec">
-          <div class="side-label">Allocation</div>
-          <div class="donut-row">
-            <div class="donut" id="alloc-donut"><div class="chart-empty" style="font-size:10px">—</div></div>
-            <div class="legend" id="alloc-legend"></div>
-          </div>
-        </div>
-        <div class="side-sec">
-          <div class="side-label">Performance <span id="perf-meta" style="text-transform:none;letter-spacing:0;font-weight:400">—</span></div>
-          <div class="perf-grid">
-            <div class="perf-stat">
-              <div class="p-label">Profit Factor</div>
-              <div class="p-val" id="pf-factor">—</div>
-            </div>
-            <div class="perf-stat">
-              <div class="p-label">Expectancy</div>
-              <div class="p-val" id="pf-expect">—</div>
-            </div>
-            <div class="perf-stat">
-              <div class="p-label">Avg Win</div>
-              <div class="p-val" id="pf-avgwin">—</div>
-            </div>
-            <div class="perf-stat">
-              <div class="p-label">Avg Loss</div>
-              <div class="p-val" id="pf-avgloss">—</div>
-            </div>
-          </div>
-          <div class="perf-best" id="pf-best">—</div>
-        </div>
-        <div class="side-sec">
-          <div class="side-label">Strategy <span id="strat-meta" style="text-transform:none;letter-spacing:0;font-weight:400"></span></div>
-          <div class="strat-status" id="strat-status"><span class="turtle">—</span></div>
-          <div class="strat-detail" id="strat-detail">loading…</div>
-        </div>
-      </div>
-    </section>
-  </main>
+  <footer class="foot">
+    <span>NovaTrade · private terminal</span>
+    <span><a href="#" id="health-link">/health</a></span>
+  </footer>
 </div>
 
 <script>
@@ -929,29 +707,14 @@ async function apiFetch(path) {
   return r.json();
 }
 
-// Last successful payloads — lets sort/filter re-render without refetching
-const D = { stats: null, crypto: null, perf: null, closes: [], leaderboard: null, strategist: null };
-
-// UI state
-const UI = {
-  range: 'all',                          // chart range: 7 | 30 | all
-  filter: { owner: 'all', asset: 'all' },// closes filters
-  limit: 20,                             // closes row count
-  sort: { key: 'time', dir: -1 },        // closes sort (-1 desc)
-  posTab: 'stocks',
-  lastFetch: null,
-};
-
 // ════════════════════════════════════════════════════════════
 // FORMATTERS
 // ════════════════════════════════════════════════════════════
 const fmt$ = v => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmt$0 = v => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-const fmtSigned = v => (v >= 0 ? '+' : '−') + fmt$(Math.abs(v));
+const fmtSigned = v => (v >= 0 ? '+' : '') + fmt$(Math.abs(v));
 const fmtPct = v => (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
 const cls = v => v > 0 ? 'good' : v < 0 ? 'bad' : '';
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const setT = (id, txt, klass) => {
   const e = document.getElementById(id);
   if (!e) return;
@@ -961,255 +724,39 @@ const setT = (id, txt, klass) => {
     if (klass) e.classList.add(klass);
   }
 };
-const parseTs = ts => {
-  if (!ts) return null;
-  try { return new Date(ts.endsWith('Z') ? ts : ts + 'Z'); } catch { return null; }
-};
+const setHTML = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
 const tsToLocal = ts => {
-  const d = parseTs(ts);
-  return d ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts.endsWith('Z') ? ts : ts + 'Z');
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch { return '—'; }
 };
-const ownrTag = (owner) => {
-  const o = String(owner || 'bot');
-  const k = o === 'claude' ? ' claude' : o === 'grok' ? ' grok' : '';
-  return `<span class="ownr${k}">${esc(o)}</span>`;
-};
-
-// Animate a $-value change in place (count-up tween + flash)
-const prevVals = {};
-function setMoney(id, value, klass) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  const prev = prevVals[id];
-  prevVals[id] = value;
-  el.classList.remove('good', 'bad', 'warn', 'flash-up', 'flash-down');
-  if (klass) el.classList.add(klass);
-  if (prev === undefined || prev === value || !isFinite(prev)) {
-    el.textContent = fmt$(value);
-    return;
-  }
-  el.classList.add(value > prev ? 'flash-up' : 'flash-down');
-  const t0 = performance.now(), dur = 500;
-  (function tween(t) {
-    const k = Math.min((t - t0) / dur, 1);
-    const eased = 1 - Math.pow(1 - k, 3);
-    el.textContent = fmt$(prev + (value - prev) * eased);
-    if (k < 1) requestAnimationFrame(tween);
-  })(t0);
-}
-
-// ════════════════════════════════════════════════════════════
-// EQUITY CURVE (cumulative realized P&L, hand-rolled SVG)
-// ════════════════════════════════════════════════════════════
-function chartPoints() {
-  // closes are newest-first from /history → oldest-first cumulative curve
-  let pts = [];
-  let cum = 0;
-  const cutoff = UI.range === 'all' ? null : Date.now() - UI.range * 86400000;
-  const ordered = [...D.closes].reverse();
-  for (const t of ordered) {
-    cum += parseFloat(t.pnl_usd || 0);
-    const d = parseTs(t.time);
-    if (!d) continue;
-    pts.push({ t: d.getTime(), v: cum, sym: t.symbol, pnl: parseFloat(t.pnl_usd || 0) });
-  }
-  if (cutoff) pts = pts.filter(p => p.t >= cutoff);
-  return pts;
-}
-
-function renderChart() {
-  const wrap = document.getElementById('chart-wrap');
-  const pts = chartPoints();
-  if (pts.length < 2) {
-    wrap.innerHTML = '<div class="chart-empty">not enough closed trades to chart yet</div>';
-    return;
-  }
-  const W = 880, H = 300, PL = 8, PR = 56, PT = 14, PB = 22;
-  const iw = W - PL - PR, ih = H - PT - PB;
-  const tMin = pts[0].t, tMax = pts[pts.length - 1].t;
-  let vMin = Math.min(0, ...pts.map(p => p.v));
-  let vMax = Math.max(0, ...pts.map(p => p.v));
-  if (vMax === vMin) { vMax += 1; vMin -= 1; }
-  const pad = (vMax - vMin) * 0.08;
-  vMin -= pad; vMax += pad;
-  const X = t => PL + (tMax === tMin ? iw / 2 : (t - tMin) / (tMax - tMin) * iw);
-  const Y = v => PT + (1 - (v - vMin) / (vMax - vMin)) * ih;
-
-  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join('');
-  const baseY = Y(Math.max(vMin, Math.min(0, vMax)));
-  const area = line + `L${X(tMax).toFixed(1)},${baseY.toFixed(1)}L${X(tMin).toFixed(1)},${baseY.toFixed(1)}Z`;
-
-  // y-axis: 3 gridlines (min, mid, max)
-  const yTicks = [vMin + pad, (vMin + vMax) / 2, vMax - pad];
-  let grid = '';
-  for (const v of yTicks) {
-    grid += `<line class="chart-axis" x1="${PL}" y1="${Y(v).toFixed(1)}" x2="${W - PR}" y2="${Y(v).toFixed(1)}"/>` +
-            `<text class="chart-label" x="${W - PR + 6}" y="${(Y(v) + 3).toFixed(1)}">${v >= 0 ? '+' : '−'}$${Math.abs(v).toFixed(2)}</text>`;
-  }
-  // zero line if it's inside the view
-  if (vMin < 0 && vMax > 0) {
-    grid += `<line class="chart-zero" x1="${PL}" y1="${Y(0).toFixed(1)}" x2="${W - PR}" y2="${Y(0).toFixed(1)}"/>`;
-  }
-  // x labels: first + last
-  const xl = d => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  grid += `<text class="chart-label" x="${PL}" y="${H - 6}">${xl(tMin)}</text>` +
-          `<text class="chart-label" x="${W - PR}" y="${H - 6}" text-anchor="end">${xl(tMax)}</text>`;
-
-  // gradient under the line — currentColor follows the CSS accent var
-  wrap.innerHTML =
-    `<svg viewBox="0 0 ${W} ${H}" id="chart-svg" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="eq-grad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="currentColor" stop-opacity="0.22"/>
-          <stop offset="1" stop-color="currentColor" stop-opacity="0"/>
-        </linearGradient>
-      </defs>
-      ${grid}
-      <path fill="url(#eq-grad)" d="${area}"/>
-      <path class="chart-line" d="${line}"/>
-      <line class="chart-cross" id="chart-cross" x1="0" y1="${PT}" x2="0" y2="${H - PB}" style="display:none"/>
-      <circle class="chart-dot" id="chart-dot" r="3.5" style="display:none"/>
-    </svg>
-    <div class="chart-tip" id="chart-tip"></div>`;
-
-  // hover crosshair + tooltip
-  const svg = document.getElementById('chart-svg');
-  const cross = document.getElementById('chart-cross');
-  const dot = document.getElementById('chart-dot');
-  const tip = document.getElementById('chart-tip');
-  svg.addEventListener('mousemove', ev => {
-    const r = svg.getBoundingClientRect();
-    const mx = (ev.clientX - r.left) / r.width * W;
-    let best = pts[0], bd = Infinity;
-    for (const p of pts) { const d = Math.abs(X(p.t) - mx); if (d < bd) { bd = d; best = p; } }
-    const px = X(best.t), py = Y(best.v);
-    cross.setAttribute('x1', px); cross.setAttribute('x2', px);
-    cross.style.display = '';
-    dot.setAttribute('cx', px); dot.setAttribute('cy', py);
-    dot.style.display = '';
-    tip.style.display = 'block';
-    tip.innerHTML =
-      `<b>${esc(best.sym || '—')}</b> ${best.pnl >= 0 ? '+' : '−'}$${Math.abs(best.pnl).toFixed(2)}<br>` +
-      `cum <b class="${best.v >= 0 ? 'good' : 'bad'}">${best.v >= 0 ? '+' : '−'}$${Math.abs(best.v).toFixed(2)}</b><br>` +
-      `${new Date(best.t).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
-    const tx = px / W * r.width, flip = tx > r.width * 0.65;
-    tip.style.left = flip ? '' : (tx + 14) + 'px';
-    tip.style.right = flip ? (r.width - tx + 14) + 'px' : '';
-    tip.style.top = Math.max(py / H * r.height - 24, 4) + 'px';
-  });
-  svg.addEventListener('mouseleave', () => {
-    cross.style.display = 'none'; dot.style.display = 'none'; tip.style.display = 'none';
-  });
-}
-
-// ════════════════════════════════════════════════════════════
-// SPARKLINES + W/L BARS (per-AI, from closes)
-// ════════════════════════════════════════════════════════════
-function renderSpark(elId, owner, colorCls) {
-  const el = document.getElementById(elId);
-  if (!el) return;
-  let cum = 0;
-  const vals = [...D.closes].reverse()
-    .filter(t => t.owner === owner)
-    .map(t => (cum += parseFloat(t.pnl_usd || 0)));
-  if (vals.length < 2) { el.innerHTML = ''; return; }
-  const W = 160, H = 26, n = vals.length;
-  let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
-  if (hi === lo) { hi += 1; lo -= 1; }
-  const px = i => (i / (n - 1) * (W - 4) + 2);
-  const py = v => (H - 3 - (v - lo) / (hi - lo) * (H - 6));
-  const pth = vals.map((v, i) => `${i ? 'L' : 'M'}${px(i).toFixed(1)},${py(v).toFixed(1)}`).join('');
-  const last = vals[vals.length - 1];
-  el.innerHTML =
-    `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-      <path class="spark-line ${colorCls}" d="${pth}"/>
-      <circle cx="${px(n - 1).toFixed(1)}" cy="${py(last).toFixed(1)}" r="2.4"
-              fill="${last >= 0 ? 'var(--good)' : 'var(--bad)'}"/>
-    </svg>`;
-}
-
-function renderWlBar(elId, wins, trades) {
-  const el = document.getElementById(elId);
-  if (!el) return;
-  if (!trades) { el.innerHTML = ''; return; }
-  const wpct = wins / trades * 100;
-  el.innerHTML = `<span class="w" style="width:${wpct.toFixed(1)}%"></span><span class="l" style="width:${(100 - wpct).toFixed(1)}%"></span>`;
-  el.title = `${wins} wins / ${trades - wins} losses`;
-}
-
-// ════════════════════════════════════════════════════════════
-// ALLOCATION DONUT (stocks / crypto positions / USDT cash)
-// ════════════════════════════════════════════════════════════
-function renderAlloc(stats, crypto) {
-  const donut = document.getElementById('alloc-donut');
-  const legend = document.getElementById('alloc-legend');
-  const stockEq = parseFloat(stats?.equity || 0);
-  const wallet = parseFloat(crypto?.wallet?.total_value || 0);
-  const usdt = parseFloat(crypto?.wallet?.usdt_free || 0);
-  const cryptoVal = Math.max(wallet - usdt, 0);
-  const segs = [
-    { label: 'stocks', v: stockEq,   color: 'var(--acc)' },
-    { label: 'crypto', v: cryptoVal, color: 'var(--grok)' },
-    { label: 'cash',   v: usdt,      color: 'var(--cash)' },
-  ].filter(s => s.v > 0);
-  const total = segs.reduce((a, s) => a + s.v, 0);
-  if (!total) {
-    donut.innerHTML = '<div class="chart-empty" style="font-size:10px">no balances</div>';
-    legend.innerHTML = '';
-    return;
-  }
-  const R = 42, C = 2 * Math.PI * R;
-  let off = 0, circles = '';
-  for (let i = 0; i < segs.length; i++) {
-    const frac = segs[i].v / total;
-    const len = Math.max(frac * C - 1.5, 0.5);
-    circles += `<circle class="seg" data-i="${i}" cx="52" cy="52" r="${R}"
-      stroke="${segs[i].color}" stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}"
-      stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 52 52)" stroke-linecap="butt"/>`;
-    off += frac * C;
-  }
-  donut.innerHTML =
-    `<svg viewBox="0 0 104 104">
-      ${circles}
-      <text class="c-val" id="alloc-cv" x="52" y="51">${fmt$0(total)}</text>
-      <text class="c-lab" id="alloc-cl" x="52" y="63">total</text>
-    </svg>`;
-  legend.innerHTML = segs.map((s, i) =>
-    `<div class="leg-row" data-i="${i}">
-      <span class="swatch" style="background:${s.color}"></span>${s.label}
-      <span class="lv">${fmt$0(s.v)}</span><span class="lp">${(s.v / total * 100).toFixed(0)}%</span>
-    </div>`).join('');
-  // hover a segment → center shows that slice
-  const cv = document.getElementById('alloc-cv'), cl = document.getElementById('alloc-cl');
-  donut.querySelectorAll('.seg').forEach(c => {
-    const s = segs[+c.dataset.i];
-    c.addEventListener('mouseenter', () => { cv.textContent = fmt$0(s.v); cl.textContent = s.label; });
-    c.addEventListener('mouseleave', () => { cv.textContent = fmt$0(total); cl.textContent = 'total'; });
-  });
-}
 
 // ════════════════════════════════════════════════════════════
 // RENDERERS
 // ════════════════════════════════════════════════════════════
-function renderHero(stats, crypto, perf) {
+function renderHero(stats, crypto, perf, leaderboard) {
   const stockEq = parseFloat(stats?.equity || 0);
   const cryptoEq = parseFloat(crypto?.wallet?.total_value || 0);
   const combined = stockEq + cryptoEq;
-  setMoney('hero-equity', combined);
+  setT('hero-equity', fmt$(combined));
   setT('hero-equity-sub', `stocks ${fmt$0(stockEq)} · crypto ${fmt$0(cryptoEq)}`);
 
   // Day P&L: stock daily (claude+grok). Crypto day P&L not exposed by
   // /crypto_status, so we label this as "stocks" to be honest.
-  const day = parseFloat(stats?.claude_daily_pnl || 0) + parseFloat(stats?.grok_daily_pnl || 0);
+  const stockDay = parseFloat(stats?.claude_daily_pnl || 0) + parseFloat(stats?.grok_daily_pnl || 0);
+  const day = stockDay;
   setT('hero-day', fmtSigned(day), day > 0 ? 'good' : day < 0 ? 'bad' : '');
   const dayPct = stockEq ? (day / (stockEq - day)) * 100 : 0;
   setT('hero-day-pct', `stocks · ${isFinite(dayPct) ? fmtPct(dayPct) : '—'}`);
 
+  // Closed trades (from perf, which reads persistent trade_history only — no dupes)
   const totalClosed = perf?.summary?.total_closed_trades || 0;
   setT('hero-closed', totalClosed);
   const wr = parseFloat(perf?.summary?.win_rate_pct || 0);
   setT('hero-wr', totalClosed > 0 ? wr.toFixed(0) + '%' : '—', totalClosed > 0 ? (wr >= 50 ? 'good' : 'bad') : '');
-  const wins = Object.values(perf?.by_ai || {}).reduce((a, s) => a + (s.wins || 0), 0);
+  const wins = (perf?.by_ai?.claude?.wins || 0) + (perf?.by_ai?.grok?.wins || 0);
   setT('hero-wr-sub', totalClosed > 0 ? `${wins} wins · ${totalClosed - wins} losses` : 'no closes yet');
 
   const stockPos = (stats?.positions || []).length;
@@ -1218,153 +765,124 @@ function renderHero(stats, crypto, perf) {
   setT('hero-pos-sub', `${stockPos} stock · ${cryptoPos} crypto`);
 }
 
-function renderPerf(perf) {
-  const s = perf?.summary;
-  if (!s) return;
-  const total = parseFloat(s.total_pnl || 0);
-  setT('pf-total', fmtSigned(total), cls(total));
-  setT('pf-total-sub', `${s.total_closed_trades || 0} closes · ${s.total_buys || 0} buys`);
-  setT('hero-closed-sub', `${s.total_buys || 0} buys recorded`);
-  setT('pf-factor', s.profit_factor != null ? s.profit_factor.toFixed(2) : '—',
-       s.profit_factor != null ? (s.profit_factor >= 1 ? 'good' : 'bad') : '');
-  // expectancy = mean P&L per closed trade
-  const n = s.total_closed_trades || 0;
-  const exp = n ? total / n : null;
-  setT('pf-expect', exp != null ? fmtSigned(exp) : '—', exp != null ? cls(exp) : '');
-  setT('pf-avgwin', s.avg_win ? fmtSigned(s.avg_win) : '—', 'good');
-  setT('pf-avgloss', s.avg_loss ? fmtSigned(s.avg_loss) : '—', s.avg_loss ? 'bad' : '');
-  setT('perf-meta', `· ${s.total_closed_trades || 0} closes`);
+function renderHealth(stats, crypto, strategist, perf) {
+  // bot
+  const botEl = document.getElementById('h-bot');
+  botEl.querySelector('.h-val').textContent = stats?.error ? 'error' : 'online';
+  botEl.className = 'h-item ' + (stats?.error ? 'bad' : '');
 
-  const b = perf.best_trade, w = perf.worst_trade;
-  const el = document.getElementById('pf-best');
-  if (b || w) {
-    el.innerHTML =
-      (b ? `best <b>${esc(b.symbol)}</b> <span class="good">+$${Math.abs(b.pnl_usd).toFixed(2)}</span>` : '') +
-      (b && w ? '<br>' : '') +
-      (w ? `worst <b>${esc(w.symbol)}</b> <span class="bad">−$${Math.abs(w.pnl_usd).toFixed(2)}</span>` : '');
-  } else {
-    el.textContent = 'no closed trades yet';
-  }
-}
-
-// Health dots in the topbar — status text lives in the tooltip
-function setDot(id, stateCls, valText) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.className = 'h-item ' + (stateCls || '');
-  const base = el.getAttribute('data-tip') || el.title.split(' — ')[0];
-  el.setAttribute('data-tip', base);
-  el.title = `${base} — ${valText}`;
-}
-
-function renderHealth(stats, crypto, strategist) {
-  setDot('h-bot', stats?.error ? 'bad' : '', stats?.error ? 'error' : 'online');
-
+  // turtle: are both AIs using Turtle?
   const claudeS = strategist?.ais?.claude?.current_strategy;
   const grokS = strategist?.ais?.grok?.current_strategy;
   const claudeTurtle = claudeS?.strategy_type === 'turtle';
   const grokTurtle = grokS?.strategy_type === 'turtle';
+  const turtleEl = document.getElementById('h-turtle');
   let tStat, tCls;
   if (claudeTurtle && grokTurtle) { tStat = 'both'; tCls = ''; }
   else if (claudeTurtle || grokTurtle) { tStat = claudeTurtle ? 'claude only' : 'grok only'; tCls = 'warn'; }
   else { tStat = 'classic'; tCls = 'off'; }
-  setDot('h-turtle', tCls, tStat);
+  turtleEl.querySelector('.h-val').textContent = tStat;
+  turtleEl.className = 'h-item ' + tCls;
 
+  // claude credits / health
   const cHealthy = stats?.claude_healthy && stats?.claude_credits_ok;
-  setDot('h-claude', cHealthy ? '' : 'bad', cHealthy ? 'ok' : (stats?.claude_fail_reason || 'unknown'));
+  const cEl = document.getElementById('h-claude');
+  cEl.querySelector('.h-val').textContent = cHealthy ? 'ok' : (stats?.claude_fail_reason || 'unknown');
+  cEl.className = 'h-item ' + (cHealthy ? '' : 'bad');
 
+  // grok credits / health
   const gHealthy = stats?.grok_healthy && stats?.grok_credits_ok;
-  setDot('h-grok', gHealthy ? '' : 'bad', gHealthy ? 'ok' : (stats?.grok_fail_reason || 'unknown'));
+  const gEl = document.getElementById('h-grok');
+  gEl.querySelector('.h-val').textContent = gHealthy ? 'ok' : (stats?.grok_fail_reason || 'unknown');
+  gEl.className = 'h-item ' + (gHealthy ? '' : 'bad');
 
-  const f = crypto?.fees;
-  if (f) {
-    const rtPct = (f.round_trip * 100).toFixed(3);
-    setDot('h-fees', f.bnb_active ? '' : 'warn', `${rtPct}% rt · ${f.bnb_active ? 'BNB on' : 'no BNB'}`);
-  } else {
-    setDot('h-fees', 'off', 'unknown');
+  // fees — show effective round-trip rate + BNB discount status
+  const feesEl = document.getElementById('h-fees');
+  if (feesEl) {
+    const f = crypto?.fees;
+    if (f) {
+      const rtPct = (f.round_trip * 100).toFixed(3);
+      const bnb = f.bnb_active ? '🔶 BNB on' : 'no BNB';
+      feesEl.querySelector('.h-val').textContent = `${rtPct}% rt · ${bnb}`;
+      feesEl.className = 'h-item ' + (f.bnb_active ? '' : 'warn');
+    } else {
+      feesEl.querySelector('.h-val').textContent = 'unknown';
+      feesEl.className = 'h-item off';
+    }
   }
 
+  // data quality — flag if leaderboard trades > perf trades (the duplicate bug)
+  const dataEl = document.getElementById('h-data');
+  const perfTrades = perf?.summary?.total_closed_trades || 0;
+  // Note: leaderboard counts CRYPTO ONLY, perf counts ALL. Hard to dedup cleanly here.
+  // Use a simpler signal: data is "ok" unless an endpoint errored.
   const dataOk = !stats?.error && !crypto?.error;
-  setDot('h-data', dataOk ? '' : 'warn', dataOk ? 'ok' : 'partial');
+  dataEl.querySelector('.h-val').textContent = dataOk ? 'ok' : 'partial';
+  dataEl.className = 'h-item ' + (dataOk ? '' : 'warn');
 }
 
 function renderBanner(stats) {
   const el = document.getElementById('banner');
   if (!stats || stats.error) {
     el.textContent = stats?.error || 'no data';
-    el.className = 'pill bad';
+    el.className = 'banner bad';
     return;
   }
   if (stats.ai_sleeping) {
     el.textContent = `sleeping — ${stats.sleep_reason || 'no reason given'}`;
-    el.className = 'pill sleep';
+    el.className = 'banner sleep';
   } else {
     el.textContent = stats.wake_reason ? `active — ${stats.wake_reason}` : 'active';
-    el.className = 'pill active';
+    el.className = 'banner active';
   }
 }
 
-function renderBattle(lb) {
+function renderBattle(lb, crypto) {
   if (!lb || lb.error) {
     setT('battle-meta', 'leaderboard unavailable');
     return;
   }
   setT('battle-meta', `${lb.total_closed || 0} crypto closes · pool ${(lb.pool_split?.claude_pct * 100 || 50).toFixed(0)}/${(lb.pool_split?.grok_pct * 100 || 50).toFixed(0)}`);
 
-  // tug of war: Claude's share of the bar grows as its P&L outpaces Grok's
-  const cP = parseFloat(lb.claude?.total_pnl || 0);
-  const gP = parseFloat(lb.grok?.total_pnl || 0);
-  const m = Math.max(Math.abs(cP), Math.abs(gP)) || 1;
-  document.getElementById('tug-fill').style.width = (50 + (cP - gP) / (2 * m) * 50).toFixed(1) + '%';
-
   for (const [ai, side] of [['claude', lb.claude || {}], ['grok', lb.grok || {}]]) {
     const pnl = parseFloat(side.total_pnl || 0);
     setT(`${ai}-pnl`, side.trades ? fmtSigned(pnl) : '—', pnl > 0 ? 'good' : pnl < 0 ? 'bad' : '');
     setT(`${ai}-trades`, side.trades || 0);
+    // win_rate is already 0–100 from /leaderboard (single multiplication)
     setT(`${ai}-wr`, side.trades ? (side.win_rate || 0).toFixed(0) + '%' : '—');
     setT(`${ai}-wins`, side.wins || 0);
     setT(`${ai}-open`, side.open_positions || 0);
-    renderSpark(`${ai}-spark`, ai, `spark-${ai}`);
-    renderWlBar(`${ai}-wl`, side.wins || 0, side.trades || 0);
     const lt = document.getElementById(`${ai}-leader-tag`);
-    lt.innerHTML = lb.leader === ai
-      ? `<span class="leader-tag">leading by ${fmt$(lb.margin_usd || 0)}</span>` : '';
-  }
-}
-
-// Evolution tier badges on the battle panel's role labels — hover for
-// the recent proposal/revert audit trail (Pass B)
-function renderEvolution(evo) {
-  if (!evo || evo.error || !evo.ai_states) return;  // keep static "tactician" label
-  for (const ai of ['claude', 'grok']) {
-    const st = evo.ai_states[ai];
-    const el = document.getElementById(`${ai}-role`);
-    if (!st || !el) continue;
-    const tierName = (st.current_tier_name || '').toLowerCase();
-    el.textContent = `T${st.current_tier ?? 0} ${tierName}` +
-                     (st.prompt_version ? ` · prompt v${st.prompt_version}` : '');
-    const hist = (st.evolution_history || []).slice(-4).reverse()
-      .map(e => `${(e.ts || '').slice(0, 10)} ${e.type}: ${e.message}`)
-      .join('\n');
-    el.title = hist || 'no evolution events yet — tier-ups, prompt proposals and reverts appear here';
+    if (lb.leader === ai) {
+      lt.innerHTML = `<span class="leader-tag">leading by ${fmt$(lb.margin_usd || 0)}</span>`;
+    } else {
+      lt.innerHTML = '';
+    }
   }
 }
 
 function renderStrategy(strategist) {
-  // 1. Real error → red "error" · 2. enabled === false (Phase A) → playbook +
-  // "dormant" tag · 3. enabled === true → full info. Whenever we have a
-  // payload, render the playbook — it's active even when the strategist is dormant.
+  // Three states we care about:
+  //   1. Real error (endpoint failed, module missing)  → red "error"
+  //   2. enabled === false (Phase A by design)         → show playbook + "dormant" tag
+  //   3. enabled === true                              → full strategist info
+  // In ALL cases where we have a payload, render the current playbook —
+  // because the playbook is active even when the strategist (the thing
+  // that rewrites the playbook) is dormant.
+
   const statusEl = document.getElementById('strat-status');
 
   if (!strategist || strategist.error) {
+    // Genuine error fetching /strategy
     setT('strat-status', '—');
     setT('strat-detail', strategist?.error
       ? `endpoint error: ${strategist.error}`
       : 'strategist unreachable');
-    setT('strat-meta', '· error');
+    setT('strat-meta', 'error');
     return;
   }
 
+  // Module unloaded? Show that clearly — different from "disabled by design"
   if (strategist.reason === "module not loaded") {
     statusEl.innerHTML = '<span>—</span> Not loaded';
     statusEl.className = 'strat-status classic';
@@ -1373,29 +891,31 @@ function renderStrategy(strategist) {
     return;
   }
 
+  // We have a payload. Read the current playbook (active even if strategist is dormant).
   const cs = strategist?.ais?.claude?.current_strategy || {};
   const gs = strategist?.ais?.grok?.current_strategy || {};
   const cT = cs.strategy_type === 'turtle';
   const gT = gs.strategy_type === 'turtle';
   const isDormant = strategist.enabled === false;
-  const phaseTag  = isDormant ? ` · <span style="color:var(--txt-3);font-size:10px;font-family:var(--font-body);font-weight:400;">dormant (Phase A)</span>` : '';
+  const phaseTag  = isDormant ? ` · <span style="color:var(--ink-3);font-size:11px;font-family:var(--font-body);font-weight:400;">dormant (Phase A)</span>` : '';
 
   if (cT && gT) {
     statusEl.innerHTML = `<span class="turtle">🐢</span> Turtle${phaseTag}`;
     statusEl.className = 'strat-status active';
     setT('strat-detail', `System 1 · ${cs.rules?.entry_donchian_period || 20}d entry · ${cs.rules?.exit_donchian_period || 10}d exit · 2N stop · 1% risk`);
-    setT('strat-meta', isDormant ? `· playbook frozen · v${cs.version || 1}` : `· v${cs.version || 1}`);
+    setT('strat-meta', isDormant ? `playbook frozen · v${cs.version || 1}` : `v${cs.version || 1}`);
   } else if (cT || gT) {
     statusEl.innerHTML = `<span class="turtle">🐢</span> Turtle (partial)${phaseTag}`;
     statusEl.className = 'strat-status active';
     setT('strat-detail', `Only ${cT ? 'Claude' : 'Grok'} on Turtle. Other still on classic.`);
-    setT('strat-meta', isDormant ? '· playbook frozen · partial' : '· partial');
+    setT('strat-meta', isDormant ? 'playbook frozen · partial' : 'partial');
   } else if (cs.name || gs.name) {
     statusEl.innerHTML = `<span>—</span> Classic${phaseTag}`;
     statusEl.className = 'strat-status classic';
     setT('strat-detail', cs.name || gs.name || 'Default playbook · % stops · fixed TP');
-    setT('strat-meta', isDormant ? `· playbook frozen · v${cs.version || 0}` : `· v${cs.version || 0}`);
+    setT('strat-meta', isDormant ? `playbook frozen · v${cs.version || 0}` : `v${cs.version || 0}`);
   } else {
+    // Phase A but state files haven't been initialized yet
     statusEl.innerHTML = `<span>—</span> No playbook yet${phaseTag}`;
     statusEl.className = 'strat-status classic';
     setT('strat-detail', isDormant
@@ -1408,10 +928,9 @@ function renderStrategy(strategist) {
 function renderStocks(stats) {
   const positions = stats?.positions || [];
   const tbody = document.getElementById('stock-rows');
-  setT('tab-stocks-n', positions.length);
   if (!positions.length) {
     tbody.innerHTML = '<tr><td colspan="3" class="empty">no open stock positions</td></tr>';
-    setT('stock-meta', '—');
+    setT('stock-meta', '');
     return;
   }
   let totalPnl = 0;
@@ -1420,25 +939,25 @@ function renderStocks(stats) {
     const pnlPct = parseFloat(p.pnl_pct || 0);
     const pnl = parseFloat(p.pnl || 0);
     totalPnl += pnl;
-    const own = (p.owner === 'claude' || p.owner === 'grok') ? ownrTag(p.owner) : '';
+    const own = p.owner === 'claude' ? '<span class="ownr">claude</span>' :
+                p.owner === 'grok'   ? '<span class="ownr">grok</span>'   : '';
     rows += `<tr>
-      <td><span class="sym">${esc(p.symbol)}</span>${own}</td>
-      <td class="r ${cls(pnlPct)}">${fmtPct(pnlPct)}</td>
-      <td class="r ${cls(pnl)}">${fmtSigned(pnl)}</td>
+      <td><span class="sym">${p.symbol}</span>${own}</td>
+      <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
+      <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
     </tr>`;
   }
   tbody.innerHTML = rows;
-  setT('stock-meta', `${positions.length} open · total ${fmtSigned(totalPnl)}`);
+  setT('stock-meta', `${positions.length} · total ${fmtSigned(totalPnl)}`);
 }
 
 function renderCrypto(crypto) {
   const positions = crypto?.bot_positions || {};
   const symbols = Object.keys(positions);
   const tbody = document.getElementById('crypto-rows');
-  setT('tab-crypto-n', symbols.length);
   if (!symbols.length) {
     tbody.innerHTML = '<tr><td colspan="3" class="empty">no open crypto positions</td></tr>';
-    setT('crypto-meta', '—');
+    setT('crypto-meta', '');
   } else {
     let totalPnl = 0;
     let rows = '';
@@ -1448,143 +967,89 @@ function renderCrypto(crypto) {
       const pnl = parseFloat(p.pnl_usd || 0);
       totalPnl += pnl;
       const isTurtle = p.strategy_type === 'turtle';
-      const own = (p.owner === 'claude' || p.owner === 'grok') ? ownrTag(p.owner) : '';
-      const turtleTag = isTurtle ? '<span class="ownr" style="color:var(--acc)">🐢</span>' : '';
+      const own = p.owner === 'claude' ? '<span class="ownr">claude</span>' :
+                  p.owner === 'grok'   ? '<span class="ownr">grok</span>'   : '';
+      const turtleTag = isTurtle ? '<span class="ownr" style="color:var(--accent)">🐢</span>' : '';
       rows += `<tr>
-        <td><span class="sym">${esc(sym)}</span>${own}${turtleTag}</td>
-        <td class="r ${cls(pnlPct)}">${fmtPct(pnlPct)}</td>
-        <td class="r ${cls(pnl)}">${fmtSigned(pnl)}</td>
+        <td><span class="sym">${sym}</span>${own}${turtleTag}</td>
+        <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
+        <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
       </tr>`;
     }
     tbody.innerHTML = rows;
-    setT('crypto-meta', `${symbols.length} open · total ${fmtSigned(totalPnl)}`);
+    setT('crypto-meta', `${symbols.length} · total ${fmtSigned(totalPnl)}`);
   }
+  // Wallet line always shown
   const usdt = parseFloat(crypto?.wallet?.usdt_free || 0);
   const total = parseFloat(crypto?.wallet?.total_value || 0);
   setT('wallet-line', `${fmt$(total)} wallet · ${fmt$(usdt)} USDT free`);
 }
 
-// ── Closes: filter → sort → slice → render ────────────────
-const isCryptoTrade = t => /USDT$|USDC$|BTC$|ETH$/.test(t.symbol || '');
-function filteredCloses() {
-  let rows = D.closes;
-  const f = UI.filter;
-  if (f.owner !== 'all') rows = rows.filter(t => t.owner === f.owner);
-  if (f.asset === 'crypto') rows = rows.filter(isCryptoTrade);
-  if (f.asset === 'stocks') rows = rows.filter(t => !isCryptoTrade(t));
-  const { key, dir } = UI.sort;
-  rows = [...rows].sort((a, b) => {
-    let va = a[key], vb = b[key];
-    if (key === 'time') { va = parseTs(va)?.getTime() || 0; vb = parseTs(vb)?.getTime() || 0; }
-    else if (key === 'pnl_usd' || key === 'pnl_pct') { va = parseFloat(va || 0); vb = parseFloat(vb || 0); }
-    else { va = String(va || ''); vb = String(vb || ''); return va.localeCompare(vb) * dir; }
-    return (va - vb) * dir;
-  });
-  return rows;
-}
-
-function renderCloses() {
-  const all = filteredCloses();
-  const rowsData = all.slice(0, UI.limit);
+function renderCloses(history) {
+  const trades = (history || []).filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined);
   const tbody = document.getElementById('closes-rows');
-
-  // sort arrows
-  document.querySelectorAll('#closes-table .arrow').forEach(a => a.textContent = '');
-  const ar = document.getElementById('ar-' + UI.sort.key);
-  if (ar) ar.textContent = UI.sort.dir === -1 ? ' ↓' : ' ↑';
-
-  if (!rowsData.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">no closes match this filter</td></tr>';
-    setT('closes-count', `0 of ${D.closes.length} closes`);
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">no closes recorded</td></tr>';
     return;
   }
+  // /history returns newest first already; just take top 20
+  const recent = trades.slice(0, 20);
   let rows = '';
-  for (const t of rowsData) {
+  for (const t of recent) {
     const pnl = parseFloat(t.pnl_usd || 0);
     const pnlPct = parseFloat(t.pnl_pct || 0);
+    const own = t.owner === 'claude' ? '<span class="ownr">claude</span>' :
+                t.owner === 'grok'   ? '<span class="ownr">grok</span>'   :
+                t.owner === 'shared' ? '<span class="ownr">shared</span>' :
+                                       `<span class="ownr">${t.owner || 'bot'}</span>`;
     rows += `<tr>
       <td>${tsToLocal(t.time)}</td>
-      <td><span class="sym">${esc(t.symbol || '—')}</span></td>
-      <td><span class="act">${esc(t.action || '—')}</span></td>
-      <td>${ownrTag(t.owner)}</td>
-      <td class="r ${cls(pnlPct)}">${fmtPct(pnlPct)}</td>
-      <td class="r ${cls(pnl)}">${fmtSigned(pnl)}</td>
+      <td><span class="sym">${t.symbol || '—'}</span></td>
+      <td><span class="act">${t.action || '—'}</span></td>
+      <td>${own}</td>
+      <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
+      <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
     </tr>`;
   }
   tbody.innerHTML = rows;
-  setT('closes-count', `${rowsData.length} of ${all.length} shown · ${D.closes.length} total closes`);
-}
-
-function exportCsv() {
-  const rows = filteredCloses();
-  const head = 'time,symbol,action,owner,pnl_pct,pnl_usd\n';
-  const body = rows.map(t =>
-    [t.time, t.symbol, t.action, t.owner, t.pnl_pct, t.pnl_usd]
-      .map(v => `"${String(v ?? '').split('"').join('""')}"`).join(',')).join('\n');
-  const blob = new Blob([head + body], { type: 'text/csv' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `novatrade-closes-${new Date().toISOString().slice(0, 10)}.csv`;
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
 
 // ════════════════════════════════════════════════════════════
 // MAIN FETCH LOOP
 // ════════════════════════════════════════════════════════════
-const REFRESH_S = 30;
 async function fetchAll() {
   const statusText = document.getElementById('status-text');
   const statusLive = document.getElementById('status-live');
   statusText.textContent = 'syncing…';
   statusLive.className = 'live warn';
   try {
-    const [stats, crypto, perf, hist, leaderboard, strategist, evolution] = await Promise.all([
+    const [stats, crypto, perf, hist, leaderboard, strategist] = await Promise.all([
       apiFetch('/stats').catch(e => ({ error: e.message })),
       apiFetch('/crypto_status').catch(e => ({ error: e.message })),
       apiFetch('/performance').catch(e => ({ error: e.message })),
-      apiFetch('/history?limit=500').catch(e => ({ error: e.message })),
+      apiFetch('/history?limit=30').catch(e => ({ error: e.message })),
       apiFetch('/leaderboard').catch(e => ({ error: e.message })),
       apiFetch('/strategy').catch(e => ({ error: e.message })),
-      apiFetch('/evolution').catch(e => ({ error: e.message })),
     ]);
 
-    D.stats = stats; D.crypto = crypto; D.perf = perf;
-    D.leaderboard = leaderboard; D.strategist = strategist;
-    D.closes = (hist?.trades || []).filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined);
-
-    renderHero(stats, crypto, perf);
-    renderPerf(perf);
-    renderHealth(stats, crypto, strategist);
+    renderHero(stats, crypto, perf, leaderboard);
+    renderHealth(stats, crypto, strategist, perf);
     renderBanner(stats);
-    renderBattle(leaderboard);
-    renderEvolution(evolution);
+    renderBattle(leaderboard, crypto);
     renderStrategy(strategist);
     renderStocks(stats);
     renderCrypto(crypto);
-    renderAlloc(stats, crypto);
-    renderCloses();
-    renderChart();
+    renderCloses(hist?.trades || []);
 
     statusLive.className = 'live';
     statusText.textContent = 'live';
-    UI.lastFetch = Date.now();
+    document.getElementById('last-update').textContent =
+      'updated ' + new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   } catch (e) {
     statusLive.className = 'live offline';
     statusText.textContent = 'offline';
     document.getElementById('last-update').textContent = 'error: ' + e.message;
   }
-}
-
-// 1-second ticker: relative "updated Xs ago" + countdown ring
-function tick() {
-  if (!UI.lastFetch) return;
-  const el = Math.floor((Date.now() - UI.lastFetch) / 1000);
-  document.getElementById('last-update').textContent =
-    el < 2 ? 'updated just now' : `updated ${el}s ago`;
-  const C = 34.56; // 2π · 5.5
-  const frac = Math.min(el / REFRESH_S, 1);
-  document.getElementById('ring-fill').style.strokeDashoffset = (C * frac).toFixed(2);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1599,90 +1064,19 @@ function tick() {
     fetchAll();
   });
 
-  const savedTheme = localStorage.getItem('nt-theme') || 'dark';
+  const savedTheme = localStorage.getItem('nt-theme') || 'light';
   document.body.setAttribute('data-theme', savedTheme);
-  const toggleTheme = () => {
-    const next = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  document.getElementById('theme-toggle').addEventListener('click', () => {
+    const cur = document.body.getAttribute('data-theme');
+    const next = cur === 'light' ? 'dark' : 'light';
     document.body.setAttribute('data-theme', next);
     localStorage.setItem('nt-theme', next);
-  };
-  document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
-
-  // Chart range tabs
-  document.getElementById('range-tabs').addEventListener('click', e => {
-    const b = e.target.closest('.range-tab');
-    if (!b) return;
-    UI.range = b.dataset.range === 'all' ? 'all' : parseInt(b.dataset.range);
-    document.querySelectorAll('.range-tab').forEach(t => t.classList.toggle('on', t === b));
-    renderChart();
-  });
-
-  // Positions tabs
-  document.getElementById('pos-tabs').addEventListener('click', e => {
-    const b = e.target.closest('.tab');
-    if (!b) return;
-    UI.posTab = b.dataset.tab;
-    document.querySelectorAll('#pos-tabs .tab').forEach(t => t.classList.toggle('on', t === b));
-    document.getElementById('pane-stocks').classList.toggle('on', UI.posTab === 'stocks');
-    document.getElementById('pane-crypto').classList.toggle('on', UI.posTab === 'crypto');
-  });
-
-  // Closes filters + limit chips
-  document.getElementById('closes-filters').addEventListener('click', e => {
-    const b = e.target.closest('.chip');
-    if (!b) return;
-    if (b.dataset.n) {
-      UI.limit = parseInt(b.dataset.n);
-      document.querySelectorAll('#closes-filters .chip[data-n]').forEach(c => c.classList.toggle('on', c === b));
-    } else {
-      const f = b.dataset.f;
-      if (f === 'all') { UI.filter = { owner: 'all', asset: 'all' }; }
-      else if (f === 'claude' || f === 'grok') {
-        UI.filter.owner = UI.filter.owner === f ? 'all' : f;
-      } else {
-        UI.filter.asset = UI.filter.asset === f ? 'all' : f;
-      }
-      document.querySelectorAll('#closes-filters .chip[data-f]').forEach(c => {
-        const v = c.dataset.f;
-        c.classList.toggle('on',
-          v === 'all' ? (UI.filter.owner === 'all' && UI.filter.asset === 'all')
-                      : (UI.filter.owner === v || UI.filter.asset === v));
-      });
-    }
-    renderCloses();
-  });
-
-  // Sortable closes headers
-  document.querySelectorAll('#closes-table th.sortable').forEach(th => {
-    th.addEventListener('click', () => {
-      const k = th.dataset.k;
-      if (UI.sort.key === k) UI.sort.dir *= -1;
-      else UI.sort = { key: k, dir: k === 'time' || k.startsWith('pnl') ? -1 : 1 };
-      renderCloses();
-    });
-  });
-
-  // CSV export
-  document.getElementById('csv-export').addEventListener('click', exportCsv);
-
-  // Keyboard shortcuts (skip when typing in the URL box)
-  document.addEventListener('keydown', e => {
-    if (e.target.tagName === 'INPUT' || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.key === 'r' || e.key === 'R') fetchAll();
-    if (e.key === 't' || e.key === 'T') toggleTheme();
   });
 
   document.getElementById('health-link').href = getUrl() + '/health';
 
-  // Auto-refresh — paused while the tab is hidden
-  let timer = setInterval(fetchAll, REFRESH_S * 1000);
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { clearInterval(timer); timer = null; }
-    else if (!timer) { fetchAll(); timer = setInterval(fetchAll, REFRESH_S * 1000); }
-  });
-  setInterval(tick, 1000);
-
   fetchAll();
+  setInterval(fetchAll, 30000);
 })();
 </script>
 </body>

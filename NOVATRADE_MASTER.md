@@ -501,7 +501,7 @@ Below the $1,000 Core Reserve activation threshold. Phase 1.5 module loaded but 
 - [ ] **Deploy v3.1.3 to Railway** (6 files: `strategic_brain.py`, `bot_with_proxy.py`, `binance_crypto.py`, `prompt_builder.py`, `sleep_manager.py`, `risk_gate.py`, `dashboard.html`)
 - [ ] **Monitor first strategist activation** in Railway logs — verify both Claude and Grok strategists respond cleanly at 9am ET pre-market call
 - [ ] **Verify `/coin_performance` endpoint** is being polled by new dashboard (Coin Health panel)
-- [x] **Wire sentiment data into shared_state** — DONE (sentiment pipeline). Grok crypto intel cycle now publishes `market_sentiment` + news/social/whale summaries via `_publish_intel_sentiment()`; sleep brief publishes `market_sentiment`/`sentiment_notes`; `get_1h_changes()` tracks `btc_change_1h`/`spy_change_1h`; fear/greed cached in `shared_state["fear_greed"]`. All flow into the strategist prompt via `_strategist_market_context()`.
+- [ ] **Wire sentiment data into shared_state** — currently the strategist reads default values; full sentiment context activates once Grok intel populates `shared_state["market_sentiment"]`, `["latest_news_summary"]`, `["latest_social_summary"]`, `["latest_whale_summary"]`, `["btc_change_1h"]`, `["spy_change_1h"]`
 - [ ] Watch TSLA if it returns — bot cannot sell due to Alpaca 403, must close manually
 - [ ] Claim FET staking rewards on Binance.US (~small USDT amount)
 - [ ] Add funding to Binance.US to unlock Tier 2 when ready
@@ -524,34 +524,28 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 6. **v3.1** — Modularization complete. AI Competition mode (separate Claude/Grok pools + leaderboard). Wallet-scaling reserve rule unified across stocks + crypto. Persistent AI memory with Binance backfill. Core Reserve long-term compounder (BTC/SPY/Cash) with rule-based contingency watcher. Sleep manager + JSON parser bug fixes. Dust cleanup throughout. New `/leaderboard`, `/memory`, `/core_reserve` endpoints + dashboard panels.
 7. **v3.1.1** — Equal capability for both AIs (no more specialty roles). AI Evolution tier system (Pass A foundation): both AIs at Tier 0 with identical neutral prompts and rivalry context. Grok upgraded to reasoning variant at same price. SPY 404 spam fixed (Alpaca data domain). Grok JSON parse failures fixed via autowrap parser + neutral prompts. New `/evolution` endpoint + tier-aware dashboard labels.
 8. **v3.1.2** — Strategic Brain foundation (Phase A). New `strategic_brain.py` module with wallet-tiered model registry (Sonnet 4.6 → Opus 4.7 at $5K wallet), twice-daily activation schedule, five hard wake triggers, three-phase rollout plan. Phase A ships plumbing only — strategists are wired but DORMANT. New `/strategy` and `/strategy/<ai>` endpoints. New "🧭 Strategic Brain" dashboard panel. Foundation for Phase B activation in next session.
-9. **v3.1.3** — **Strategic Brain Phase B ACTIVE — Living Playbook system.** Strategists now write comprehensive standing orders the bot follows autonomously. Conditional rules executor with zero AI cost. Stop-loss gate integrated with playbook on both crypto and stock paths. Sentiment-aware strategist prompts. Self-defined wake conditions (playbook decides when to recall the strategist). R/R ≥ 1:1 enforced at validator. `consecutive_losses`/`wins` tracking added to shared_state. 3× daily scheduled activations live (9am, 4:30pm, 9pm ET). Cooldown raised to 2 hours. Risk gate now blocks entries based on playbook directives.
-10. **v3.2** — **Sentiment pipeline live + Strategic Brain Phase C — Core Reserve handover.** Grok intel/brief cycles now populate `shared_state` sentiment keys (news/social/whale summaries, aggregate sentiment, BTC/SPY 1h change, fear/greed) feeding the strategist prompt. Core Reserve target allocation handed to the strategists: weekly collaborative reviews (both must agree within 10pp; status quo on split), hard allocation bounds, catastrophic BTC −50%/30d auto-trim floor, and reserve-specific wake triggers (BTC −10%/24h, reserve −20% from peak, drift ≥25pp). New `phase_c` block in `/core_reserve`. Dormant until $1,000 activation.
-11. **v3.3** — *(current)* **AI Evolution Pass B ACTIVE — tactician self-modification.** Hourly evolution cycle per AI: earned tier-ups, self-proposed prompt additions (≥10 closes, 72h proposal cooldown, validated against tier token budgets + banned phrases), auto-revert below 40% WR on a prompt version, 3 strikes → Tier 0 demotion with 7-day lock. `/evolution` stats now sourced from owner-tagged `trade_history` (same as leaderboard + the cycle itself). Dashboard battle panel shows live tier badges with audit-trail tooltips.
+9. **v3.1.3** — *(current)* **Strategic Brain Phase B ACTIVE — Living Playbook system.** Strategists now write comprehensive standing orders the bot follows autonomously. Conditional rules executor with zero AI cost. Stop-loss gate integrated with playbook on both crypto and stock paths. Sentiment-aware strategist prompts. Self-defined wake conditions (playbook decides when to recall the strategist). R/R ≥ 1:1 enforced at validator. `consecutive_losses`/`wins` tracking added to shared_state. 3× daily scheduled activations live (9am, 4:30pm, 9pm ET). Cooldown raised to 2 hours. Risk gate now blocks entries based on playbook directives.
 
 ---
 
 ## Roadmap (Upcoming)
 
-### Phase C — Core Reserve Handover — ✅ SHIPPED
-- Strategists now own the reserve's target allocation via collaborative weekly reviews (`core_reserve.run_strategist_review`) — a change applies only when BOTH proposals agree within 10pp per slice (midpoint taken); on a split or a failed/unparseable response, status quo wins
-- Hard bounds strategists cannot exceed: BTC 20–70%, SPY 10–60%, Cash 10–50% (bound-aware clamping redistributes only into slices with headroom)
-- All four rule-based contingencies stay untouched, plus new catastrophic floor: BTC −50% from entry sustained 30+ days → auto-trim 50% (`_check_catastrophic_trim`, 30d refire cooldown, countdown resets on recovery)
-- Reserve-specific wake triggers fire off-schedule reviews: BTC −10% in 24h, reserve −20% from peak, allocation drift ≥25pp (48h review cooldown)
-- Agreed allocation immediately drives deposits + drift rebalance (30d rebalance cooldown waived on agreement); audit trail in `state["review_log"]`, surfaced as `phase_c` in `/core_reserve`
-- Dormant until Core Reserve activates at $1,000 combined wallet — no AI cost before then
+### Phase C — Core Reserve Handover (next priority)
+- Strategists take over Core Reserve allocation decisions (collaborative — both must agree)
+- Hard-rule floors STAY in place as catastrophic protection
+- Weekly scheduled reviews + reserve-specific wake triggers
+- BTC -50% from entry over 30+ days = automatic 50% trim regardless of strategist input
 
-### Phase B' — AI Evolution Pass B — ✅ SHIPPED
-- Tactician self-modification loop live: `ai_evolution.run_evolution_cycle()` runs hourly per AI from the main loop — tier-ups and revert checks are rule-based (free); the proposal AI-call is cooldown-gated to once per 72h per AI and activates at ≥10 closed trades
-- Validation layer enforces tier token budgets (tier cap − 800 base) + `ALWAYS_BANNED_PHRASES`; rejected proposals are audited
-- Auto-revert live: win rate <40% over the trades made under a prompt version (min 5) → soft revert to the previous version; 3 consecutive bad changes → hard revert to Tier 0 with a 7-day re-promotion lock; a version surviving 10+ trades clears the streak
-- Dashboard battle panel role labels now show live tier + prompt version (via `/evolution`), with the recent proposal/revert audit trail in the hover tooltip; `/evolution` exposes a `pass_b` block and `trades_on_version`
-- Earned prompts already flow into the crypto system prompts via `prompt_builder._build_neutral_system` → `get_custom_prompt_addition` (wired since Pass A)
+### Phase B' — AI Evolution Pass B (parallel track, when ~10-15 trades exist)
+- Tactician self-modification loop (the original Pass B from v3.1.1)
+- Validation layer enforces tier token caps + banned phrases
+- Auto-revert on win-rate drop
+- Dashboard tier panel with proposal/revert audit trail
 
-### Sentiment Pipeline Enrichment — ✅ SHIPPED
-- Grok's news/social/whale intel now populates `shared_state["market_sentiment"]`, `["latest_news_summary"]`, `["latest_social_summary"]`, `["latest_whale_summary"]` every crypto AI cycle (`CryptoTrader._publish_intel_sentiment` in `binance_crypto.py`); the stock sleep brief also publishes its `market_sentiment`/`sentiment_notes`
-- Fear/greed index (alternative.me, already fetched daily) is now cached in `shared_state["fear_greed"]` and refetched live at each strategist activation
-- BTC/SPY 1h change tracking via `market_data.get_1h_changes()` (5-min cache) → `shared_state["btc_change_1h"]` / `["spy_change_1h"]`
-- All of the above is appended to the strategist prompt through `_strategist_market_context()` in `bot_with_proxy.py`
+### Sentiment Pipeline Enrichment
+- Wire Grok's news/social/whale fetch into `shared_state["market_sentiment"]`, `["latest_news_summary"]`, `["latest_social_summary"]`, `["latest_whale_summary"]` so the strategist receives real-time sentiment context (currently the keys exist as defaults but aren't populated by Grok intel cycle)
+- Add fear/greed index lookup (alternative.me or similar)
+- Wire BTC/SPY 1h change tracking into shared_state for `btc_change_1h` / `spy_change_1h`
 
 ### Phase 1.6 — Smaller wins
 - **Dust convert** — integrate Binance.US `/sapi/v1/asset/dust` to sweep <$10 holdings into USDT/BTC. Frees up otherwise stuck capital.
