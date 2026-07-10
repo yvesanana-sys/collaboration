@@ -3752,8 +3752,7 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             try:
                 import strategic_brain as _sb_gate
                 _ai_for_gate = owner if owner in ("claude", "grok") else "claude"
-                _ps_gate     = _sb_gate.load_strategy(_ai_for_gate)
-                _cs_gate     = _ps_gate.get("current_strategy", {}) or {}
+                _cs_gate     = _sb_gate.load_strategy_for(_ai_for_gate, "crypto") or {}
                 _playbook_is_turtle = (_cs_gate.get("strategy_type") == "turtle")
             except Exception as _pb_err:
                 # Can't load playbook → fail OPEN (don't block trading on
@@ -4243,8 +4242,7 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             try:
                 import strategic_brain as _sb_gate2
                 _ai_for_gate2 = owner2 if owner2 in ("claude", "grok") else "claude"
-                _ps_gate2     = _sb_gate2.load_strategy(_ai_for_gate2)
-                _cs_gate_2    = _ps_gate2.get("current_strategy", {}) or {}
+                _cs_gate_2    = _sb_gate2.load_strategy_for(_ai_for_gate2, "crypto") or {}
                 _playbook_is_turtle_2 = (_cs_gate_2.get("strategy_type") == "turtle")
             except Exception as _pb2_err:
                 self._log(f"   ⚠️ Turtle gate (path 2): couldn't load playbook for {sym2_pre}: {_pb2_err} — fail-open")
