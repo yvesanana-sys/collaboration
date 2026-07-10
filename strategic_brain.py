@@ -287,6 +287,38 @@ def _default_strategy_turtle(ai_name: str, asset_class: str = "crypto") -> dict:
     }
 
 
+def _default_strategy_mean_reversion(ai_name: str, asset_class: str = "crypto") -> dict:
+    """
+    Mean-reversion playbook: buy oversold dips near support, sell the
+    bounce. strategy_type is NOT 'turtle', so the Donchian breakout
+    gates in binance_crypto/bot_with_proxy stay OFF — the AIs' dip
+    picks execute instead of being rejected.
+    Targets mirror CRYPTO_RULES (8% stop / 8% TP / 24h / conf 60).
+    """
+    return {
+        "id":              f"S-{ai_name}-meanrev-{asset_class}",
+        "name":            f"Mean Reversion {asset_class.title()} v1",
+        "version":         1,
+        "strategy_type":   "mean_reversion",
+        "active_since":    datetime.now(timezone.utc).isoformat(),
+        "rules": {
+            "entry_logic":             "Buy oversold dips (RSI <= 35) near support with reversal confirmation. Sell the bounce. NO breakout chasing.",
+            "rsi_oversold_max":        35,
+            "max_position_pct_of_pool": 60,
+            "stop_loss_pct":           8,
+            "take_profit_pct":         8,
+            "max_hold_hours":          24,
+            "min_confidence":          60,
+            "max_concurrent_positions": 3,
+            "preferred_indicators":    ["RSI", "support_resistance", "volume_ratio", "bollinger"],
+        },
+        "rationale":           "Turtle's breakout-only gate rejected every dip pick in ranging crypto — mean reversion matches how the AIs actually select entries.",
+        "predicted_win_rate":  55,
+        "predicted_avg_pnl_pct": 1.0,
+        "predicted_until":     (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+    }
+
+
 def _default_strategy_state(ai_name: str) -> dict:
     """Initial state file for a new AI."""
     return {
@@ -373,6 +405,49 @@ def load_strategy(ai_name: str) -> dict:
             for k in default:
                 if k not in state:
                     state[k] = default[k]
+
+            # ── ONE-SHOT MEAN-REVERSION RESTORE ─────────────────
+            # The Turtle migration gated crypto entries to Donchian
+            # breakouts, which rejects the AIs' dip picks — crypto
+            # stopped opening positions entirely. Flip Turtle playbooks
+            # back to mean reversion ONCE (archiving the old one), then
+            # mark applied so strategists are free to evolve from there.
+            # Also marks the Turtle migration as applied so the env-var
+            # driven block below can never re-flip us back to Turtle.
+            try:
+                if not state.get("meanrev_migration_applied"):
+                    current = state.get("current_strategy", {}) or {}
+                    if current.get("strategy_type") == "turtle":
+                        history = state.setdefault("strategy_history", [])
+                        history.append({
+                            "archived_at":       datetime.now(timezone.utc).isoformat(),
+                            "archived_reason":   "meanrev_restore",
+                            "previous_strategy": current,
+                        })
+                        if len(history) > 50:
+                            state["strategy_history"] = history[-50:]
+                        state["current_strategy"] = _default_strategy_mean_reversion(ai_name, asset_class="crypto")
+                        state["last_activation"]  = datetime.now(timezone.utc).isoformat()
+                        state["current_performance"] = {
+                            "trades_under_this_strategy": 0,
+                            "wins":                        0,
+                            "losses":                      0,
+                            "actual_win_rate":             0,
+                            "actual_avg_pnl_pct":          0,
+                            "started_at":                  datetime.now(timezone.utc).isoformat(),
+                        }
+                        log(f"🔄 MIGRATION: {ai_name} playbook flipped to Mean Reversion (Turtle archived)")
+                    state["meanrev_migration_applied"] = True
+                    state["turtle_migration_applied"]  = True
+                    _state_cache[ai_name] = state
+                    try:
+                        with open(path, "w") as _wf:
+                            json.dump(state, _wf, default=str, indent=2)
+                    except Exception as _we:
+                        log(f"⚠️ Mean-reversion migration save failed for {ai_name}: {_we}")
+                    return state
+            except Exception as _mr_e:
+                log(f"⚠️ Mean-reversion migration failed for {ai_name}: {_mr_e}")
 
             # ── ONE-SHOT TURTLE MIGRATION ───────────────────────
             # Pre-existing state files persisted with classic/default
