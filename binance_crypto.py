@@ -156,7 +156,10 @@ CRYPTO_RULES = {
     # ── Position sizing (tier-based) ─────────────────────────
     # More aggressive at small equity — needed to compound to goal
     "max_positions":        3,       # Aggressive — 3 concurrent crypto positions (was 2)
-    "min_trade_usdt":       8.0,     # Binance.US minimum
+    "min_trade_usdt":       10.0,    # Binance.US minimum notional ($10)
+    # Order floor: min notional + buffer so fees/price ticks between
+    # sizing and fill never push an order under the exchange minimum.
+    "min_order_usdt":       10.50,
     # ── Entry filters ─────────────────────────────────────────
     "min_confidence":       60,      # Aggressive — lowered to 60 (was 65)
     "vol_spike_multiplier": 1.5,     # Volume must be 1.5x average to confirm breakout
@@ -3558,8 +3561,26 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             # AI pools are split AFTER reserve is removed
             claude_pool = round(tradeable_usdt * CLAUDE_POOL_PCT, 2)
             grok_pool   = round(tradeable_usdt * GROK_POOL_PCT,   2)
-            self._log(f"   🥊 Pool split: Claude=${claude_pool:.2f} | "
-                      f"Grok=${grok_pool:.2f} (of ${tradeable_usdt:.2f} tradeable USDT)")
+            # ── Availability-aware split ─────────────────────────
+            # On a small wallet a 50/50 split can leave BOTH slices
+            # below the order floor — then neither AI can trade at
+            # all. Give the full pool to one AI instead, alternating
+            # each cycle so neither is permanently favored.
+            _floor = CRYPTO_RULES["min_order_usdt"]
+            if (claude_pool < _floor and grok_pool < _floor
+                    and tradeable_usdt >= _floor):
+                turn = getattr(self, "_pool_turn", "claude")
+                if turn == "claude":
+                    claude_pool, grok_pool = round(tradeable_usdt, 2), 0.0
+                    self._pool_turn = "grok"
+                else:
+                    claude_pool, grok_pool = 0.0, round(tradeable_usdt, 2)
+                    self._pool_turn = "claude"
+                self._log(f"   🥊 Split would starve both AIs (< ${_floor:.2f} each) — "
+                          f"full pool ${tradeable_usdt:.2f} to {turn.title()} this cycle")
+            else:
+                self._log(f"   🥊 Pool split: Claude=${claude_pool:.2f} | "
+                          f"Grok=${grok_pool:.2f} (of ${tradeable_usdt:.2f} tradeable USDT)")
         else:
             claude_pool = tradeable_usdt
             grok_pool   = tradeable_usdt
@@ -3648,7 +3669,10 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
 
                 proposals.append({
                     "symbol":    sym,
-                    "notional":  min(notional, max(pool_for_sizing, total_sellable) * 0.6),
+                    # Floor at min_order_usdt so pool-fraction sizing can
+                    # never produce a sub-minimum order the exchange rejects.
+                    "notional":  max(CRYPTO_RULES["min_order_usdt"],
+                                     min(notional, max(pool_for_sizing, total_sellable) * 0.6)),
                     "entry":     entry_px,
                     "tp":        tp_px,
                     "stop":      stop_px,
@@ -3700,9 +3724,9 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             # try its picks instead.
             if ENABLE_AI_COMPETITION and owner in ("claude", "grok"):
                 ai_pool_avail = claude_pool if owner == "claude" else grok_pool
-                if ai_pool_avail < CRYPTO_RULES["min_trade_usdt"]:
+                if ai_pool_avail < CRYPTO_RULES["min_order_usdt"]:
                     self._log(f"   🥊 {owner.title()} pool exhausted "
-                              f"(${ai_pool_avail:.2f} < ${CRYPTO_RULES['min_trade_usdt']}) "
+                              f"(${ai_pool_avail:.2f} < ${CRYPTO_RULES['min_order_usdt']}) "
                               f"— skipping {sym}, giving slot to other AI")
                     continue
                 # Cap notional to AI's own pool — never overspend
@@ -3710,6 +3734,12 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                     notional = round(ai_pool_avail * 0.95, 2)  # 95% leaves room for fees
                     self._log(f"   🥊 {owner.title()} sizing {sym} to ${notional:.2f} "
                               f"(pool cap)")
+                # Re-floor after the cap: a 95% haircut on a small pool can
+                # dip under the exchange minimum even though the pool covers it.
+                if notional < CRYPTO_RULES["min_order_usdt"] <= ai_pool_avail:
+                    notional = CRYPTO_RULES["min_order_usdt"]
+                    self._log(f"   🥊 {owner.title()} sizing {sym} floored to "
+                              f"${notional:.2f} (min order)")
 
             # ── TURTLE ENTRY GATE (crypto) ──────────────────────
             # If THIS AI's playbook is Turtle, the only valid entry is a
@@ -3722,8 +3752,7 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             try:
                 import strategic_brain as _sb_gate
                 _ai_for_gate = owner if owner in ("claude", "grok") else "claude"
-                _ps_gate     = _sb_gate.load_strategy(_ai_for_gate)
-                _cs_gate     = _ps_gate.get("current_strategy", {}) or {}
+                _cs_gate     = _sb_gate.load_strategy_for(_ai_for_gate, "crypto") or {}
                 _playbook_is_turtle = (_cs_gate.get("strategy_type") == "turtle")
             except Exception as _pb_err:
                 # Can't load playbook → fail OPEN (don't block trading on
@@ -4176,7 +4205,9 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                     continue
                 proposals.append({
                     "symbol":    sym,
-                    "notional":  min(notional, crypto_pool * 0.6),
+                    # Same floor as the main path — never size under the minimum
+                    "notional":  max(CRYPTO_RULES["min_order_usdt"],
+                                     min(notional, crypto_pool * 0.6)),
                     "entry":     entry or proj["proj_low"],
                     "tp":        tp    or proj["proj_high"],
                     "conf":      conf,
@@ -4211,8 +4242,7 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             try:
                 import strategic_brain as _sb_gate2
                 _ai_for_gate2 = owner2 if owner2 in ("claude", "grok") else "claude"
-                _ps_gate2     = _sb_gate2.load_strategy(_ai_for_gate2)
-                _cs_gate_2    = _ps_gate2.get("current_strategy", {}) or {}
+                _cs_gate_2    = _sb_gate2.load_strategy_for(_ai_for_gate2, "crypto") or {}
                 _playbook_is_turtle_2 = (_cs_gate_2.get("strategy_type") == "turtle")
             except Exception as _pb2_err:
                 self._log(f"   ⚠️ Turtle gate (path 2): couldn't load playbook for {sym2_pre}: {_pb2_err} — fail-open")
