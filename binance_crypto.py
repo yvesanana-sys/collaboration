@@ -2286,6 +2286,11 @@ class CryptoTrader:
                 if status != "NEW" or filled_qty > 0:
                     continue
 
+                # Protective STOP_LOSS orders rest at the broker by design
+                # (survive bot outages) — never auto-cancel them as stale.
+                if "STOP" in order.get("type", ""):
+                    continue
+
                 age_mins = (time.time() * 1000 - order_time) / 60000
                 threshold = 30 if side == "BUY" else 60
                 if age_mins < threshold:
@@ -3870,6 +3875,17 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                             self._log(f"   🐢 TURTLE armed: 2N stop=${pos_kwargs['stop_price_override']:.6f} (ATR=${_atr_val:.4f})")
                     pos = CryptoPosition(**pos_kwargs)
                     self.positions[sym] = pos
+                    # ── Broker-side protective stop (survives bot outages) ──
+                    # Failure is non-fatal: software stop monitor still active.
+                    try:
+                        _stopres = place_crypto_stop_market(sym, pos.qty, pos.stop_price)
+                        if isinstance(_stopres, dict) and _stopres.get("orderId"):
+                            pos.exit_order_id = _stopres["orderId"]
+                            self._log(f"   [STOP] Broker stop resting @ ${pos.stop_price:.6f} (order {_stopres['orderId']})")
+                        else:
+                            self._log(f"   [STOP] NOT placed for {sym}: {_stopres} -- software stop still active")
+                    except Exception as _se:
+                        self._log(f"   [STOP] error for {sym}: {_se} -- software stop still active")
                     crypto_pool -= notional
                     # In competition mode, also debit the owner's slice
                     # so subsequent proposals from the same AI see the
@@ -4246,6 +4262,17 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                             self._log(f"   🐢 TURTLE armed (path 2): 2N stop=${pos_kwargs2['stop_price_override']:.6f}")
                     pos = CryptoPosition(**pos_kwargs2)
                     self.positions[sym] = pos
+                    # ── Broker-side protective stop (survives bot outages) ──
+                    # Failure is non-fatal: software stop monitor still active.
+                    try:
+                        _stopres = place_crypto_stop_market(sym, pos.qty, pos.stop_price)
+                        if isinstance(_stopres, dict) and _stopres.get("orderId"):
+                            pos.exit_order_id = _stopres["orderId"]
+                            self._log(f"   [STOP] Broker stop resting @ ${pos.stop_price:.6f} (order {_stopres['orderId']})")
+                        else:
+                            self._log(f"   [STOP] NOT placed for {sym}: {_stopres} -- software stop still active")
+                    except Exception as _se:
+                        self._log(f"   [STOP] error for {sym}: {_se} -- software stop still active")
                     crypto_pool -= prop["notional"]
                     new_positions += 1
                     self._log(f"   ✅ Crypto order {result['orderId']} | "
