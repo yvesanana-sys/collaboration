@@ -1555,6 +1555,158 @@ def decide_exit_strategy_solo(symbol, trade_data, bars, ind):
 # [check_pdt_hold_plans → pdt_manager.py]
 # [get_pdt_decision → pdt_manager.py]
 # [get_pdt_status → pdt_manager.py]
+
+# ══════════════════════════════════════════════════════════════
+# BROKER-SIDE PROTECTIVE STOPS (P0b)
+# Every long stock position gets a real resting STOP order at
+# Alpaca so downside protection survives bot restarts/outages.
+# A resting stop HOLDS the shares — every sell/close path must
+# cancel it first (see cancel_stock_orders calls in exit paths).
+# ══════════════════════════════════════════════════════════════
+
+def _is_option_symbol(symbol):
+    """OCC option symbols end in C/P + 8-digit strike (e.g. AAPL240119C00190000)."""
+    return len(symbol) > 12 and symbol[-9] in ("C", "P") and symbol[-8:].isdigit()
+
+def get_open_stock_orders(symbol=None):
+    """List open Alpaca orders, optionally filtered to one symbol."""
+    try:
+        path = "/v2/orders?status=open&limit=500"
+        if symbol:
+            path += f"&symbols={symbol}"
+        return alpaca("GET", path) or []
+    except Exception as e:
+        log(f"⚠️ [STOP] open-orders fetch failed ({symbol or 'all'}): {e}")
+        return []
+
+def cancel_stock_orders(symbol, why=""):
+    """Cancel ALL open orders for a symbol. Returns count cancelled.
+    Never raises — safe to call unconditionally before any sell/close."""
+    n = 0
+    for o in get_open_stock_orders(symbol):
+        try:
+            alpaca("DELETE", f"/v2/orders/{o['id']}")
+            log(f"   [STOP] Cancelled {o.get('type','?')} {o.get('side','?')} "
+                f"order for {symbol} (id={str(o.get('id',''))[:8]}...) {why}")
+            n += 1
+        except Exception as ce:
+            log(f"   ⚠️ [STOP] Cancel failed {symbol} {str(o.get('id',''))[:8]}: {ce}")
+    return n
+
+def compute_protective_stop_price(symbol, entry_price):
+    """Stop level mirroring the software exit logic: Turtle 2N stop if
+    assigned in position_exits, else the universal hard stop."""
+    cfg = shared_state.get("position_exits", {}).get(symbol, {})
+    sp = cfg.get("stop_price")
+    if sp and sp > 0:
+        return sp
+    return entry_price * (1 - RULES["exit_A_stop_loss"])
+
+def place_stock_protective_stop(symbol, qty, stop_price):
+    """Submit a resting STOP sell at Alpaca. Tries GTC first, falls back
+    to DAY (fractional GTC support varies). Non-fatal on failure — the
+    software stop monitor stays active either way. Returns order or None."""
+    if _is_option_symbol(symbol):
+        log(f"   [STOP] {symbol} looks like an option — software-managed only")
+        return None
+    # Alpaca price increments: $0.01 at/above $1, $0.0001 below
+    stop_price = round(stop_price, 2) if stop_price >= 1 else round(stop_price, 4)
+    if stop_price <= 0 or qty <= 0:
+        log(f"   [STOP] invalid stop for {symbol} (qty={qty}, stop={stop_price}) — skipped")
+        return None
+    for tif in ("gtc", "day"):
+        try:
+            order = alpaca("POST", "/v2/orders", {
+                "symbol": symbol, "qty": str(qty),
+                "side": "sell", "type": "stop",
+                "stop_price": str(stop_price),
+                "time_in_force": tif,
+            })
+            log(f"   [STOP] Broker stop resting for {symbol}: {qty} @ ${stop_price} "
+                f"({tif.upper()}, order {str(order.get('id',''))[:8]}...)")
+            return order
+        except Exception as se:
+            log(f"   [STOP] {tif.upper()} stop rejected for {symbol}: {str(se)[:120]}")
+    log(f"   [STOP] NOT placed for {symbol} -- software stop still active")
+    return None
+
+def _arm_stop_after_buy(order, symbol, fallback_entry=0):
+    """After a BUY submits, wait briefly for the fill and place the broker
+    stop. Unfilled orders are picked up by ensure_protective_stops later."""
+    try:
+        time.sleep(2)
+        od = alpaca("GET", f"/v2/orders/{order['id']}")
+        filled_qty = float(od.get("filled_qty") or 0)
+        if od.get("status") == "filled" and filled_qty > 0:
+            entry = float(od.get("filled_avg_price") or 0) or fallback_entry
+            if entry > 0:
+                place_stock_protective_stop(
+                    symbol, filled_qty,
+                    compute_protective_stop_price(symbol, entry))
+                return
+        log(f"   [STOP] {symbol} buy not filled yet ({od.get('status','?')}) — "
+            f"stop deferred to reconciler")
+    except Exception as e:
+        log(f"   [STOP] arm-after-buy error {symbol}: {e} — reconciler will cover")
+
+def ensure_protective_stops(positions):
+    """Reconciler — runs every cycle. (1) Cancels DANGLING stop orders
+    (symbol no longer held) so a triggered stray stop can never sell
+    shares we don't have. (2) Places a missing stop for any long stock
+    position without one (catches late limit fills, restarts, manual
+    cancels). (3) Cleans tracker state for positions that vanished —
+    stop filled at the broker while the bot was down."""
+    try:
+        open_orders = get_open_stock_orders()
+        held = {p["symbol"]: p for p in positions}
+
+        # 1. Dangling stop sells → cancel
+        for o in open_orders:
+            if "stop" in (o.get("type") or "") and o.get("side") == "sell" \
+                    and o.get("symbol") not in held:
+                try:
+                    alpaca("DELETE", f"/v2/orders/{o['id']}")
+                    log(f"   [STOP] Cancelled DANGLING stop for {o.get('symbol')} "
+                        f"(no position — exit/stop already filled)")
+                except Exception as ce:
+                    log(f"   ⚠️ [STOP] Dangling cancel failed {o.get('symbol')}: {ce}")
+
+        # 2. Unprotected longs → place stop
+        stop_syms = {o.get("symbol") for o in open_orders
+                     if "stop" in (o.get("type") or "") and o.get("side") == "sell"}
+        sell_syms = {o.get("symbol") for o in open_orders if o.get("side") == "sell"}
+        for sym, p in held.items():
+            if _is_option_symbol(sym):
+                continue
+            qty = float(p.get("qty", 0) or 0)
+            if qty <= 0:
+                continue  # shorts stay software-managed for now
+            if sym in stop_syms:
+                continue  # already protected
+            if sym in sell_syms:
+                continue  # an exit sell is already working — never double-sell
+            qty_avail = float(p.get("qty_available", qty) or 0)
+            if qty_avail <= 0:
+                log(f"   [STOP] {sym}: no available qty (held by other orders) — skipped")
+                continue
+            entry = float(p.get("avg_entry_price", 0) or 0)
+            if entry <= 0:
+                continue
+            place_stock_protective_stop(sym, qty_avail,
+                                        compute_protective_stop_price(sym, entry))
+
+        # 3. Vanished positions → clean trackers
+        open_syms = {o.get("symbol") for o in open_orders}
+        for sym in list(shared_state.get("position_exits", {}).keys()):
+            if sym not in held and sym not in open_syms:
+                log(f"   [STOP] {sym} tracked but no position/orders — "
+                    f"broker stop likely filled; cleaning trackers")
+                shared_state["position_exits"].pop(sym, None)
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != sym]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != sym]
+    except Exception as e:
+        log(f"⚠️ ensure_protective_stops error: {e}")
+
 def smart_sell(symbol, reason, pos):
     """Execute a smart limit sell, fall back to market order.
     Checks PDT rule + uses projections to decide hold-overnight vs sell."""
@@ -1614,6 +1766,10 @@ def smart_sell(symbol, reason, pos):
 
     except Exception as e:
         log(f"⚠️ PDT check error: {e} — proceeding with sell")
+
+    # ── Cancel any resting broker stop first — it HOLDS the shares and
+    # would block every sell method below (and could double-sell later).
+    cancel_stock_orders(symbol, "(before exit sell)")
 
     last_err = None
     # Method 1: Limit sell at mid-price
@@ -2486,6 +2642,12 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                     log(f"⚠️ Exit strategy assign failed: {ex} — defaulting to A")
                     assign_exit_strategy(symbol, "A", notional/10, 80, "default")
 
+                # ── Broker-side protective stop (survives bot outages).
+                # Runs after exit-strategy assignment so Turtle positions
+                # get their 2N stop. Unfilled buys are covered later by
+                # ensure_protective_stops.
+                _arm_stop_after_buy(order, symbol, limit_price or 0)
+
             except Exception as e: log(f"❌ Buy {symbol}: {e}")
 
         elif action == "short":
@@ -2568,6 +2730,7 @@ def run_autopilot(positions, pos_symbols, cash, equity):
         if pnl_pct >= RULES["take_profit_pct"]:
             log(f"🎯 AUTOPILOT take-profit: {symbol} +{pnl_pct*100:.1f}%")
             try:
+                cancel_stock_orders(symbol, "(before autopilot TP close)")
                 alpaca("DELETE", f"/v2/positions/{symbol}")
                 record_trade("take_profit", symbol, pos.get("qty"), float(pos.get("current_price",0)),
                              float(pos.get("market_value",0)), "bot",
@@ -2581,6 +2744,7 @@ def run_autopilot(positions, pos_symbols, cash, equity):
         elif pnl_pct <= -RULES["stop_loss_pct"]:
             log(f"🛑 AUTOPILOT stop-loss: {symbol} {pnl_pct*100:.1f}%")
             try:
+                cancel_stock_orders(symbol, "(before autopilot SL close)")
                 alpaca("DELETE", f"/v2/positions/{symbol}")
                 record_trade("stop_loss", symbol, pos.get("qty"), float(pos.get("current_price",0)),
                              float(pos.get("market_value",0)), "bot",
@@ -2785,6 +2949,7 @@ Respond ONLY with JSON:
         if p["pnl_pct"] >= RULES["take_profit_pct"] * 100:
             log(f"🎯 [{p['owner']}] Auto take-profit: {p['symbol']} at +{p['pnl_pct']:.1f}%")
             try:
+                cancel_stock_orders(p["symbol"], "(before low-cash TP close)")
                 alpaca("DELETE", f"/v2/positions/{p['symbol']}")
                 record_trade("take_profit", p["symbol"], None, p["price"], p["value"],
                              p["owner"].lower(), reason="low-cash auto take-profit",
@@ -2799,6 +2964,7 @@ Respond ONLY with JSON:
         elif p["pnl_pct"] <= -RULES["stop_loss_pct"] * 100:
             log(f"🛑 [{p['owner']}] Auto stop-loss: {p['symbol']} at {p['pnl_pct']:.1f}%")
             try:
+                cancel_stock_orders(p["symbol"], "(before low-cash SL close)")
                 alpaca("DELETE", f"/v2/positions/{p['symbol']}")
                 record_trade("stop_loss", p["symbol"], None, p["price"], p["value"],
                              p["owner"].lower(), reason="low-cash auto stop-loss",
@@ -2816,6 +2982,7 @@ Respond ONLY with JSON:
         log(f"   Claude reason: {(claude_decision or {}).get('sell_reason','')}")
         log(f"   Grok reason:   {(grok_decision   or {}).get('sell_reason','')}")
         try:
+            cancel_stock_orders(c_sell, "(before low-cash agreed sell)")
             alpaca("DELETE", f"/v2/positions/{c_sell}")
             sold_pos = next((p for p in pos_details if p["symbol"] == c_sell), {})
             record_trade("sell", c_sell, None, sold_pos.get("price"), sold_pos.get("value"),
@@ -3283,6 +3450,11 @@ def run_cycle():
     positions   = alpaca("GET", "/v2/positions")
     pos_symbols = [p["symbol"] for p in positions]
     open_count  = len(positions)
+
+    # ── Broker-side stop reconciliation ──────────────────────
+    # Every long position gets a resting stop at Alpaca; dangling
+    # stops (position gone) are cancelled. Runs every cycle.
+    ensure_protective_stops(positions)
 
     # ── AI HEALTH CHECK ─────────────────────────────────────
     c_ok, g_ok, failover_mode = check_ai_health()
@@ -4140,6 +4312,9 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
 
     stops_fired = 0
     log(f"🤖 BOT AUTONOMOUS — {len(positions)} positions | Both AIs sleeping | 0 API calls")
+
+    # ── Broker-side stop reconciliation (also while AIs sleep) ──
+    ensure_protective_stops(positions)
 
     # ── Check PDT hold plans every tick ──────────────────────
     check_pdt_hold_plans()
