@@ -2697,6 +2697,17 @@ class CryptoTrader:
         trade_budget  = round(total_available * risk_pct, 2)
         CRYPTO_RULES["max_positions"] = tier_max_pos
 
+        # ── Floor the suggested budget at the exchange minimum ──
+        # A raw risk_pct slice of a small wallet can round below what
+        # Binance.US will actually accept (e.g. 30% of $19.64 = $5.89
+        # vs. a $10 minimum). If the wallet can afford the floor, ask
+        # the AI for a legal order size instead of one it can't place.
+        if (trade_budget < CRYPTO_RULES["min_order_usdt"]
+                and total_available >= CRYPTO_RULES["min_order_usdt"]):
+            self._log(f"   📐 Budget floored ${trade_budget:.2f} → "
+                      f"${CRYPTO_RULES['min_order_usdt']:.2f} (wallet can afford the exchange minimum)")
+            trade_budget = CRYPTO_RULES["min_order_usdt"]
+
         self._log(f"   📊 {tier['note']}")
         self._log(f"   💰 Risk per trade: {risk_pct*100:.0f}% = ${trade_budget:.2f} USDT")
 
@@ -3610,11 +3621,24 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                         continue
                     self._log(f"   🌟 {sym} discovered via market scan — new opportunity!")
                 if conf < CRYPTO_RULES["min_confidence"]:
+                    self._log(f"   ⛔ {sym} REJECT: confidence {conf} < {CRYPTO_RULES['min_confidence']}")
                     continue
                 if sym in self.positions:
+                    self._log(f"   ⛔ {sym} REJECT: already held")
                     continue
                 if notional < CRYPTO_RULES["min_trade_usdt"]:
-                    continue
+                    # Floor-or-explain: if this AI's slice of the wallet can
+                    # cover the exchange minimum, size up instead of silently
+                    # dropping a proposal the AI was never told was too small.
+                    _ai_pool = (claude_pool if ai_name == "claude" else grok_pool) if ENABLE_AI_COMPETITION else crypto_pool
+                    if _ai_pool >= CRYPTO_RULES["min_order_usdt"]:
+                        self._log(f"   📐 {sym} notional ${notional:.2f} floored → "
+                                  f"${CRYPTO_RULES['min_order_usdt']:.2f} (below ${CRYPTO_RULES['min_trade_usdt']:.2f} min, wallet can cover it)")
+                        notional = CRYPTO_RULES["min_order_usdt"]
+                    else:
+                        self._log(f"   ⛔ {sym} REJECT: notional ${notional:.2f} < ${CRYPTO_RULES['min_trade_usdt']:.2f} min "
+                                  f"and pool ${_ai_pool:.2f} can't cover the exchange floor")
+                        continue
 
                 # Validate against projection
                 proj = self._projections.get(sym, {})
@@ -4194,11 +4218,23 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                 if sym not in CRYPTO_UNIVERSE:
                     continue
                 if conf < CRYPTO_RULES["min_confidence"]:
+                    self._log(f"   ⛔ {sym} REJECT (R1): confidence {conf} < {CRYPTO_RULES['min_confidence']}")
                     continue
                 if sym in self.positions:
+                    self._log(f"   ⛔ {sym} REJECT (R1): already held")
                     continue
                 if notional < CRYPTO_RULES["min_trade_usdt"]:
-                    continue
+                    # Same floor-or-explain as run_crypto_cycle — this path
+                    # runs on every stock-loop R1 cycle, more often than the
+                    # hourly cycle, so a silent drop here is easy to miss.
+                    if crypto_pool >= CRYPTO_RULES["min_order_usdt"]:
+                        self._log(f"   📐 {sym} notional ${notional:.2f} floored (R1) → "
+                                  f"${CRYPTO_RULES['min_order_usdt']:.2f} (below ${CRYPTO_RULES['min_trade_usdt']:.2f} min, wallet can cover it)")
+                        notional = CRYPTO_RULES["min_order_usdt"]
+                    else:
+                        self._log(f"   ⛔ {sym} REJECT (R1): notional ${notional:.2f} < ${CRYPTO_RULES['min_trade_usdt']:.2f} min "
+                                  f"and pool ${crypto_pool:.2f} can't cover the exchange floor")
+                        continue
                 proj = self._projections.get(sym, {})
                 if proj.get("error") or not proj.get("viable"):
                     self._log(f"   🪙 {sym} proj not viable — skip")
