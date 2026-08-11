@@ -21,14 +21,20 @@ GROK_KEY         = os.environ.get("GROK_KEY", "")
 # ── Shared references (injected by bot) ──────────────────────
 log          = print
 shared_state = {}
+# bot_with_proxy.py's _set_context call for this module doesn't pass a
+# rules dict (unlike market_data.py / intelligence.py), so this local
+# default stands in. Value matches portfolio_manager.py RULES["failover_max_retries"].
+RULES        = {"failover_max_retries": 3}
 
 
-def _set_context(log_fn, shared_state_ref=None):
-    """Called by bot to inject log and shared_state."""
-    global log, shared_state, ANTHROPIC_KEY, GROK_KEY
+def _set_context(log_fn, shared_state_ref=None, rules_ref=None):
+    """Called by bot to inject log, shared_state, and (optionally) rules."""
+    global log, shared_state, RULES, ANTHROPIC_KEY, GROK_KEY
     log = log_fn
     if shared_state_ref is not None:
         shared_state = shared_state_ref
+    if rules_ref is not None:
+        RULES = rules_ref
     # Re-read keys at runtime (Railway env vars)
     ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
     GROK_KEY      = os.environ.get("GROK_KEY", "")
