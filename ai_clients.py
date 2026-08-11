@@ -263,7 +263,10 @@ def safe_ask_claude(prompt, system, retries=3):
             shared_state["claude_fail_count"] = 0
             shared_state["claude_fail_reason"] = None
         else:
-            shared_state["claude_fail_count"] += 1
+            # get(..., 0) — this key isn't pre-seeded in shared_state's
+            # initial dict, so a plain += raises KeyError on the first
+            # failure since boot.
+            shared_state["claude_fail_count"] = shared_state.get("claude_fail_count", 0) + 1
             if shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
                 shared_state["claude_healthy"]   = False
                 shared_state["last_claude_fail"] = datetime.now().isoformat()
@@ -271,7 +274,7 @@ def safe_ask_claude(prompt, system, retries=3):
         return result
     except Exception as e:
         error_type = classify_ai_error(str(e))
-        shared_state["claude_fail_count"]  += 1
+        shared_state["claude_fail_count"] = shared_state.get("claude_fail_count", 0) + 1
         shared_state["claude_fail_reason"]  = error_type
 
         if error_type == "credits_exhausted":
@@ -306,7 +309,7 @@ def safe_ask_grok(prompt, system, retries=3):
             shared_state["grok_fail_count"] = 0
             shared_state["grok_fail_reason"] = None
         else:
-            shared_state["grok_fail_count"] += 1
+            shared_state["grok_fail_count"] = shared_state.get("grok_fail_count", 0) + 1
             if shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
                 shared_state["grok_healthy"]   = False
                 shared_state["last_grok_fail"] = datetime.now().isoformat()
@@ -314,7 +317,7 @@ def safe_ask_grok(prompt, system, retries=3):
         return result
     except Exception as e:
         error_type = classify_ai_error(str(e))
-        shared_state["grok_fail_count"]  += 1
+        shared_state["grok_fail_count"] = shared_state.get("grok_fail_count", 0) + 1
         shared_state["grok_fail_reason"]  = error_type
 
         if error_type == "credits_exhausted":
