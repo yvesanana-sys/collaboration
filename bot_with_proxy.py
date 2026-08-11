@@ -1447,16 +1447,17 @@ def stock_turtle_check_exit(symbol: str, entry_price: float, atr_at_entry: float
 
 def is_turtle_active_for_stocks() -> bool:
     """
-    Returns True iff EITHER AI's current playbook has strategy_type='turtle'.
+    Returns True iff EITHER AI's STOCK playbook has strategy_type='turtle'.
     Stocks are shared between Claude and Grok, so we activate Turtle on
-    stocks whenever either AI's playbook says so.
+    stocks whenever either AI's stock playbook says so. Reads the
+    per-asset-class playbook — the crypto playbook (mean-reversion)
+    must never influence how stocks pick trades.
     """
     try:
         import strategic_brain as _sb
         for ai_name in ("claude", "grok"):
             try:
-                state = _sb.load_strategy(ai_name)
-                cs = state.get("current_strategy", {}) or {}
+                cs = _sb.load_strategy_for(ai_name, "stock") or {}
                 if cs.get("strategy_type") == "turtle":
                     return True
             except Exception:
