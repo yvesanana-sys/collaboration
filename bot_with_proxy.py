@@ -176,6 +176,27 @@ from ai_clients import (
 )
 import ai_clients as _ai_clients
 
+# ── Health-gated wrappers ─────────────────────────────────────
+# A number of call sites below need the raw text/JSON response from
+# Claude/Grok (not ask_with_retry's health-tracked wrapper), but were
+# calling ask_claude/ask_grok directly with no health check at all.
+# That meant a known-dead AI (e.g. Claude marked credits_exhausted)
+# kept getting hit every cycle — Round 2 review, low-cash decisions,
+# PDT hold council, crypto cycles, staking review each threw their own
+# "credit balance too low" error on every tick instead of backing off.
+# These wrappers raise immediately when unhealthy so the existing
+# try/except around each call site logs one line and moves on, same as
+# any other failure, without spending an API call.
+def ask_claude_guarded(*args, **kwargs):
+    if not shared_state.get("claude_healthy", True):
+        raise Exception(f"Claude unhealthy ({shared_state.get('claude_fail_reason','unknown')}) — call skipped")
+    return ask_claude(*args, **kwargs)
+
+def ask_grok_guarded(*args, **kwargs):
+    if not shared_state.get("grok_healthy", True):
+        raise Exception(f"Grok unhealthy ({shared_state.get('grok_fail_reason','unknown')}) — call skipped")
+    return ask_grok(*args, **kwargs)
+
 from sleep_manager import (
     ai_sleep, ai_wake, check_wake_conditions, check_ai_wake_instructions,
 )
@@ -1226,7 +1247,7 @@ _github_deploy._set_context(log)
 _ai_clients._set_context(log, shared_state_ref=shared_state)
 # Intelligence needs ask_grok + parse_json (now from ai_clients)
 _intelligence._set_context(RULES, log,
-                            ask_grok_fn   = ask_grok,
+                            ask_grok_fn   = ask_grok_guarded,
                             parse_json_fn = parse_json)
 # PDT manager needs log, shared_state, RULES + all trading functions
 # NOTE: smart_sell, record_trade, get_cash_thresholds defined later — see late injection below
@@ -2327,10 +2348,15 @@ Your budget: ${pool['grok']:.2f}. Confirm your best 1-2 trades (owner=grok).
 Use Twitter sentiment. No overlap with Claude. Min $8. Confidence 80%+.
 JSON: {{"refined_trades":[{{"action":"buy|sell","symbol":"NVDA","notional_usd":15.0,"confidence":85,"f":"flags","r":"<8w>","owner":"grok"}}]}}"""
 
-    claude_r2 = ask_with_retry(ask_claude, c_review_prompt,
+    # Re-check health here (not the c_ok/g_ok from before Round 1) — a
+    # credits_exhausted failure in Round 1 flips claude_healthy to False
+    # immediately, and we don't want Round 2 to hit the same dead API.
+    claude_r2 = (ask_with_retry(ask_claude_guarded, c_review_prompt,
         "You are Claude confirming your autonomous trades. ONLY valid JSON under 500 chars.")
-    grok_r2   = ask_with_retry(ask_grok, g_review_prompt,
+        if shared_state.get("claude_healthy", True) else None)
+    grok_r2   = (ask_with_retry(ask_grok_guarded, g_review_prompt,
         "You are Grok confirming your autonomous trades. ONLY valid JSON under 500 chars.")
+        if shared_state.get("grok_healthy", True) else None)
 
     if claude_r2: log(f"🔵 Claude autonomous: {len(claude_r2.get('refined_trades',[]))} trades confirmed")
     if grok_r2:   log(f"🔴 Grok autonomous:   {len(grok_r2.get('refined_trades',[]))} trades confirmed")
@@ -2922,7 +2948,7 @@ Respond ONLY with JSON:
     grok_decision   = None
 
     try:
-        claude_decision = ask_with_retry(ask_claude, low_cash_prompt,
+        claude_decision = ask_with_retry(ask_claude_guarded, low_cash_prompt,
             "You are Claude managing low cash situation. ONLY valid JSON under 500 chars.")
         if claude_decision:
             log(f"🔵 Claude low-cash: action={claude_decision.get('action')} sell={claude_decision.get('sell_recommendation')} next={claude_decision.get('next_buy_target')}")
@@ -2930,7 +2956,7 @@ Respond ONLY with JSON:
         log(f"❌ Claude low-cash: {e}")
 
     try:
-        grok_decision = ask_with_retry(ask_grok, low_cash_prompt,
+        grok_decision = ask_with_retry(ask_grok_guarded, low_cash_prompt,
             "You are Grok managing low cash situation. ONLY valid JSON under 500 chars.")
         if grok_decision:
             log(f"🔴 Grok low-cash: action={grok_decision.get('action')} sell={grok_decision.get('sell_recommendation')} next={grok_decision.get('next_buy_target')}")
@@ -3117,8 +3143,8 @@ _pdt_manager._set_context(
     shared_state_ref      = shared_state,
     rules                 = RULES,
     alpaca_fn             = alpaca,
-    ask_claude_fn         = ask_claude,
-    ask_grok_fn           = ask_grok,
+    ask_claude_fn         = ask_claude_guarded,
+    ask_grok_fn           = ask_grok_guarded,
     parse_json_fn         = parse_json,
     smart_sell_fn         = smart_sell,
     record_trade_fn       = record_trade,
@@ -3377,7 +3403,7 @@ def run_cycle():
         pos = council.get("pos", {})
         log(f"📊 Running PDT hold council for {sym} (queued from earlier)...")
         try:
-            plan = run_pdt_hold_council(sym, pos, ask_claude, ask_grok)
+            plan = run_pdt_hold_council(sym, pos, ask_claude_guarded, ask_grok_guarded)
             if plan:
                 log(f"   ✅ Council complete: hold {plan.get('hold_days')}d "
                     f"exit=${plan.get('exit_target')} stop=${plan.get('stop_price')}")
@@ -3394,7 +3420,7 @@ def run_cycle():
         try:
             positions = {p["symbol"]: p for p in alpaca("GET", "/v2/positions")}
             if sym in positions:
-                new_plan = run_pdt_hold_council(sym, positions[sym], ask_claude, ask_grok)
+                new_plan = run_pdt_hold_council(sym, positions[sym], ask_claude_guarded, ask_grok_guarded)
                 if new_plan:
                     log(f"   ✅ Updated plan: hold {new_plan.get('hold_days')}d "
                         f"exit=${new_plan.get('exit_target')}")
@@ -3681,14 +3707,14 @@ def run_premarket():
     )
 
     try:
-        c_research = ask_claude(research_prompt,
+        c_research = ask_claude_guarded(research_prompt,
             "You are Claude doing pre-market research. Plain text response.", max_tokens=400)
         log(f"🔵 Claude research:\n{c_research[:400]}")
     except Exception as e:
         log(f"❌ Claude research: {e}")
 
     try:
-        g_research = ask_grok(research_prompt,
+        g_research = ask_grok_guarded(research_prompt,
             "You are Grok doing pre-market research with Twitter access. Plain text.", max_tokens=400)
         log(f"🔴 Grok research:\n{g_research[:400]}")
     except Exception as e:
@@ -3794,14 +3820,14 @@ def run_afterhours():
         grok_ah   = ""
 
         try:
-            claude_ah = ask_claude(claude_ah_prompt,
+            claude_ah = ask_claude_guarded(claude_ah_prompt,
                 "You are Claude doing after-hours smart money review. Plain text.", max_tokens=500)
             log(f"🔵 Claude after-hours review:\n{claude_ah[:500]}")
         except Exception as e:
             log(f"❌ Claude after-hours: {e}")
 
         try:
-            grok_ah = ask_grok(grok_ah_prompt,
+            grok_ah = ask_grok_guarded(grok_ah_prompt,
                 "You are Grok doing after-hours momentum review. Plain text.", max_tokens=500)
             log(f"🔴 Grok after-hours review:\n{grok_ah[:500]}")
         except Exception as e:
@@ -3833,7 +3859,7 @@ JOINT PLAN FOR TOMORROW:
 Both AIs agree on this plan. Plain text 200 words."""
 
         try:
-            tomorrow_plan = ask_claude(tomorrow_prompt,
+            tomorrow_plan = ask_claude_guarded(tomorrow_prompt,
                 "You are creating tomorrow's agreed trading plan. Plain text.", max_tokens=500)
             log(f"\n{'='*50}")
             log(f"✅ TOMORROW'S JOINT PLAN (AGREED):")
@@ -3854,8 +3880,8 @@ Both AIs agree on this plan. Plain text 200 words."""
                 log("=" * 50)
                 crypto_trader.staking.run_staking_cycle(
                     projections   = crypto_trader._projections or {},
-                    ask_claude_fn = ask_claude,
-                    ask_grok_fn   = ask_grok,
+                    ask_claude_fn = ask_claude_guarded,
+                    ask_grok_fn   = ask_grok_guarded,
                 )
             except Exception as se:
                 log(f"⚠️ Staking review error: {se}")
@@ -4733,8 +4759,8 @@ def trading_loop():
                         log("🪙 Crypto: running hourly cycle")
                     crypto_trader.run_crypto_cycle(
                         total_equity      = 0,
-                        ask_claude_fn     = ask_claude,
-                        ask_grok_fn       = ask_grok,
+                        ask_claude_fn     = ask_claude_guarded,
+                        ask_grok_fn       = ask_grok_guarded,
                         spy_trend         = spy_now,
                         prompt_builder    = prompt_builder,
                         record_trade_fn   = record_trade,
