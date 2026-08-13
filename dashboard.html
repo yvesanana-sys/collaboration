@@ -454,6 +454,94 @@ html, body {
   color: var(--ink-3);
   letter-spacing: 0.05em;
 }
+.closes-table tbody tr.trade-row {
+  cursor: pointer;
+}
+.closes-table tbody tr.trade-row:hover td {
+  background: var(--paper-2);
+}
+.closes-table tr.detail-row td {
+  padding: 4px 12px 14px 0;
+  border-bottom: 1px solid var(--rule-soft);
+  font-size: 11px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  background: var(--paper-2);
+}
+.closes-table tr.detail-row .detail-empty {
+  font-family: var(--font-body);
+  font-style: italic;
+  color: var(--ink-4);
+}
+
+/* ─── History toolbar (search + filter chips) ───────────────── */
+.hist-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  padding: 4px 0 16px;
+}
+.hist-search {
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 2px;
+  width: 140px;
+}
+.hist-search:focus { outline: none; border-color: var(--accent); }
+.hist-search::placeholder { color: var(--ink-4); }
+.chip-group {
+  display: flex;
+  gap: 4px;
+}
+.chip {
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--ink-3);
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  padding: 4px 9px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.chip:hover { color: var(--ink); border-color: var(--ink-3); }
+.chip.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.last-trade-line {
+  font-size: 11px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.last-trade-line .sym { color: var(--ink-2); font-weight: 600; }
+.load-more-row td {
+  text-align: center;
+  padding: 14px 0 4px !important;
+  border-bottom: none !important;
+  background: transparent !important;
+}
+.load-more-btn {
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--ink-2);
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 6px 16px;
+  border-radius: 2px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.load-more-btn:hover { border-color: var(--ink-2); color: var(--ink); }
 
 .good { color: var(--good); }
 .bad  { color: var(--bad); }
@@ -651,21 +739,35 @@ html, body {
       </div>
       <table class="pos-table" id="crypto-table">
         <thead>
-          <tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th></tr>
+          <tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th><th class="r">Held</th><th class="r">Stop / TP</th></tr>
         </thead>
         <tbody id="crypto-rows">
-          <tr><td colspan="3" class="empty">no open crypto positions</td></tr>
+          <tr><td colspan="5" class="empty">no open crypto positions</td></tr>
         </tbody>
       </table>
       <div class="wallet-line" id="wallet-line">—</div>
     </div>
   </div>
 
-  <!-- ── Recent closes (full width) ───────────────────────── -->
+  <!-- ── Trade history (full width) ──────────────────────────── -->
   <section class="full">
     <div class="card-head" style="border:none;">
-      <h2 class="card-title">Recent <span class="accent">closes</span></h2>
-      <span class="card-meta">deduplicated · last 20</span>
+      <h2 class="card-title">Trade <span class="accent">history</span></h2>
+      <span class="last-trade-line" id="last-trade-line">—</span>
+    </div>
+    <div class="hist-toolbar">
+      <input class="hist-search" id="hist-search" type="text" placeholder="filter symbol…"/>
+      <div class="chip-group" id="hist-view-chips">
+        <button class="chip active" data-view="closes">closes</button>
+        <button class="chip" data-view="all">all activity</button>
+      </div>
+      <div class="chip-group" id="hist-owner-chips">
+        <button class="chip active" data-owner="">all</button>
+        <button class="chip" data-owner="claude">claude</button>
+        <button class="chip" data-owner="grok">grok</button>
+        <button class="chip" data-owner="other">other</button>
+      </div>
+      <span class="card-meta" id="hist-count">—</span>
     </div>
     <table class="closes-table">
       <thead>
@@ -679,7 +781,7 @@ html, body {
         </tr>
       </thead>
       <tbody id="closes-rows">
-        <tr><td colspan="6" class="empty">no closes recorded</td></tr>
+        <tr><td colspan="6" class="empty">no trades recorded</td></tr>
       </tbody>
     </table>
   </section>
@@ -730,6 +832,20 @@ const tsToLocal = ts => {
   try {
     const d = new Date(ts.endsWith('Z') ? ts : ts + 'Z');
     return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch { return '—'; }
+};
+const timeAgo = ts => {
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts.endsWith('Z') ? ts : ts + 'Z');
+    const secs = Math.max(0, (Date.now() - d.getTime()) / 1000);
+    if (secs < 60) return 'just now';
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
   } catch { return '—'; }
 };
 
@@ -956,7 +1072,7 @@ function renderCrypto(crypto) {
   const symbols = Object.keys(positions);
   const tbody = document.getElementById('crypto-rows');
   if (!symbols.length) {
-    tbody.innerHTML = '<tr><td colspan="3" class="empty">no open crypto positions</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">no open crypto positions</td></tr>';
     setT('crypto-meta', '');
   } else {
     let totalPnl = 0;
@@ -970,10 +1086,15 @@ function renderCrypto(crypto) {
       const own = p.owner === 'claude' ? '<span class="ownr">claude</span>' :
                   p.owner === 'grok'   ? '<span class="ownr">grok</span>'   : '';
       const turtleTag = isTurtle ? '<span class="ownr" style="color:var(--accent)">🐢</span>' : '';
+      const held = (p.hours_held !== undefined && p.hours_held !== null) ? `${p.hours_held}h` : '—';
+      const stop = p.stop_price ? fmt$(p.stop_price) : '—';
+      const tp   = p.tp_price   ? fmt$(p.tp_price)   : '—';
       rows += `<tr>
         <td><span class="sym">${sym}</span>${own}${turtleTag}</td>
         <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
         <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
+        <td class="r">${held}</td>
+        <td class="r">${stop} / ${tp}</td>
       </tr>`;
     }
     tbody.innerHTML = rows;
@@ -985,33 +1106,111 @@ function renderCrypto(crypto) {
   setT('wallet-line', `${fmt$(total)} wallet · ${fmt$(usdt)} USDT free`);
 }
 
-function renderCloses(history) {
-  const trades = (history || []).filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined);
+// ── Trade history state (all client-side — no refetch on filter) ──
+let ALL_TRADES  = [];       // full /history payload, newest first
+let histView    = 'closes'; // 'closes' | 'all'
+let histOwner   = '';       // '' | 'claude' | 'grok' | 'other'
+let histSearch  = '';
+let histVisible = 25;
+const HIST_PAGE = 25;
+
+function ownerTag(owner) {
+  return owner === 'claude' ? '<span class="ownr">claude</span>' :
+         owner === 'grok'   ? '<span class="ownr">grok</span>'   :
+         owner === 'shared' ? '<span class="ownr">shared</span>' :
+                               `<span class="ownr">${owner || 'bot'}</span>`;
+}
+
+function filteredTrades() {
+  let trades = ALL_TRADES;
+  if (histView === 'closes') {
+    trades = trades.filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined);
+  }
+  if (histOwner === 'claude' || histOwner === 'grok') {
+    trades = trades.filter(t => t.owner === histOwner);
+  } else if (histOwner === 'other') {
+    trades = trades.filter(t => t.owner !== 'claude' && t.owner !== 'grok');
+  }
+  if (histSearch) {
+    const q = histSearch.toUpperCase();
+    trades = trades.filter(t => (t.symbol || '').toUpperCase().includes(q));
+  }
+  return trades;
+}
+
+function tradeDetailHTML(t) {
+  const parts = [];
+  if (t.reason)                       parts.push(`reason: ${t.reason}`);
+  if (t.confidence !== null && t.confidence !== undefined) parts.push(`confidence: ${t.confidence}%`);
+  if (t.strategy)                     parts.push(`strategy: ${t.strategy}`);
+  if (t.entry_price)                  parts.push(`entry: ${fmt$(t.entry_price)}`);
+  if (t.price)                        parts.push(`fill: ${fmt$(t.price)}`);
+  if (t.notional)                     parts.push(`notional: ${fmt$(t.notional)}`);
+  if (t.qty)                          parts.push(`qty: ${t.qty}`);
+  if (t.spy_trend)                    parts.push(`spy trend: ${t.spy_trend}`);
+  if (t.time_et)                      parts.push(t.time_et);
+  return parts.length
+    ? parts.join('  ·  ')
+    : '<span class="detail-empty">no extra detail recorded for this trade</span>';
+}
+
+function renderCloses() {
   const tbody = document.getElementById('closes-rows');
+  const trades = filteredTrades();
+
+  // Last trade line — always based on the unfiltered, most recent entry
+  const last = ALL_TRADES[0];
+  if (last) {
+    const act = (last.action || '—').toUpperCase();
+    setHTML('last-trade-line', `last trade: ${timeAgo(last.time)} · ${act} <span class="sym">${last.symbol || '—'}</span> (${last.owner || 'bot'})`);
+  } else {
+    setT('last-trade-line', 'no trades recorded yet');
+  }
+
+  setT('hist-count', trades.length ? `${Math.min(histVisible, trades.length)} of ${trades.length}` : '0');
+
   if (!trades.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">no closes recorded</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">no trades match this filter</td></tr>';
     return;
   }
-  // /history returns newest first already; just take top 20
-  const recent = trades.slice(0, 20);
+
+  const visible = trades.slice(0, histVisible);
   let rows = '';
-  for (const t of recent) {
+  visible.forEach((t, i) => {
     const pnl = parseFloat(t.pnl_usd || 0);
     const pnlPct = parseFloat(t.pnl_pct || 0);
-    const own = t.owner === 'claude' ? '<span class="ownr">claude</span>' :
-                t.owner === 'grok'   ? '<span class="ownr">grok</span>'   :
-                t.owner === 'shared' ? '<span class="ownr">shared</span>' :
-                                       `<span class="ownr">${t.owner || 'bot'}</span>`;
-    rows += `<tr>
+    const hasPnl = t.pnl_usd !== null && t.pnl_usd !== undefined;
+    rows += `<tr class="trade-row" data-idx="${i}">
       <td>${tsToLocal(t.time)}</td>
       <td><span class="sym">${t.symbol || '—'}</span></td>
       <td><span class="act">${t.action || '—'}</span></td>
-      <td>${own}</td>
-      <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
-      <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
+      <td>${ownerTag(t.owner)}</td>
+      <td class="r ${hasPnl ? (pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : '') : ''}">${hasPnl ? fmtPct(pnlPct) : '—'}</td>
+      <td class="r ${hasPnl ? (pnl > 0 ? 'good' : pnl < 0 ? 'bad' : '') : ''}">${hasPnl ? fmtSigned(pnl) : '—'}</td>
+    </tr>
+    <tr class="detail-row" data-detail-for="${i}" style="display:none;">
+      <td colspan="6">${tradeDetailHTML(t)}</td>
     </tr>`;
+  });
+  if (trades.length > histVisible) {
+    rows += `<tr class="load-more-row"><td colspan="6"><button class="load-more-btn" id="hist-load-more">show more (${trades.length - histVisible} left)</button></td></tr>`;
   }
   tbody.innerHTML = rows;
+
+  tbody.querySelectorAll('tr.trade-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const idx = row.getAttribute('data-idx');
+      const detail = tbody.querySelector(`tr[data-detail-for="${idx}"]`);
+      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
+    });
+  });
+  const loadMoreBtn = document.getElementById('hist-load-more');
+  if (loadMoreBtn) {
+    loadMoreBtn.addEventListener('click', () => {
+      histVisible += HIST_PAGE;
+      renderCloses();
+    });
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1027,7 +1226,7 @@ async function fetchAll() {
       apiFetch('/stats').catch(e => ({ error: e.message })),
       apiFetch('/crypto_status').catch(e => ({ error: e.message })),
       apiFetch('/performance').catch(e => ({ error: e.message })),
-      apiFetch('/history?limit=30').catch(e => ({ error: e.message })),
+      apiFetch('/history?limit=500').catch(e => ({ error: e.message })),
       apiFetch('/leaderboard').catch(e => ({ error: e.message })),
       apiFetch('/strategy').catch(e => ({ error: e.message })),
     ]);
@@ -1039,7 +1238,8 @@ async function fetchAll() {
     renderStrategy(strategist);
     renderStocks(stats);
     renderCrypto(crypto);
-    renderCloses(hist?.trades || []);
+    ALL_TRADES = hist?.trades || [];
+    renderCloses();
 
     statusLive.className = 'live';
     statusText.textContent = 'live';
@@ -1074,6 +1274,32 @@ async function fetchAll() {
   });
 
   document.getElementById('health-link').href = getUrl() + '/health';
+
+  // Trade history toolbar — all filtering is client-side against the
+  // already-fetched ALL_TRADES, so switching filters never re-hits the API.
+  document.getElementById('hist-search').addEventListener('input', e => {
+    histSearch = e.target.value.trim();
+    histVisible = HIST_PAGE;
+    renderCloses();
+  });
+  document.getElementById('hist-view-chips').addEventListener('click', e => {
+    const btn = e.target.closest('.chip');
+    if (!btn) return;
+    document.querySelectorAll('#hist-view-chips .chip').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    histView = btn.getAttribute('data-view');
+    histVisible = HIST_PAGE;
+    renderCloses();
+  });
+  document.getElementById('hist-owner-chips').addEventListener('click', e => {
+    const btn = e.target.closest('.chip');
+    if (!btn) return;
+    document.querySelectorAll('#hist-owner-chips .chip').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    histOwner = btn.getAttribute('data-owner');
+    histVisible = HIST_PAGE;
+    renderCloses();
+  });
 
   fetchAll();
   setInterval(fetchAll, 30000);
