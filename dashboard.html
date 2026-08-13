@@ -4,59 +4,55 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NovaTrade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 /* ============================================================
    NovaTrade — live trading terminal
-   Dark-first modern theme · validated categorical/status palette
-   System sans throughout · tabular figures reserved for columns
+   OKLCH dark-first theme · amber(Claude) / blue(Grok) accents
+   IBM Plex Sans/Mono · single viewport, no page scroll
 ============================================================ */
 :root {
-  --page:        #f9f9f7;
-  --surface:     #fcfcfb;
-  --surface-2:   #f4f2ec;
-  --ink:         #0b0b0b;
-  --ink-2:       #52514e;
-  --ink-3:       #898781;
-  --rule:        #e1e0d9;
-  --rule-strong: #c3c2b7;
-  --ring:        rgba(11,11,11,0.10);
-  --accent:      #2a78d6;   /* categorical slot 1 — brand / Claude */
-  --accent-2:    #eb6834;   /* categorical slot 2 — Grok */
-  --accent-3:    #4a3aa7;   /* categorical slot 7 — strategy/turtle accent */
-  --good:        #006300;
-  --good-fill:   #0ca30c;
-  --bad:         #d03b3b;
-  --warn:        #fab219;
-  --accent-soft: rgba(42,120,214,0.10);
-  --good-soft:   rgba(12,163,12,0.12);
-  --bad-soft:    rgba(208,59,59,0.12);
+  --page:        oklch(0.97 0.006 262);
+  --surface:     oklch(0.995 0.003 262);
+  --surface-2:   oklch(0.95 0.007 262);
+  --surface-hov: oklch(0.925 0.008 262);
+  --ink:         oklch(0.18 0.012 262);
+  --ink-2:       oklch(0.42 0.012 262);
+  --ink-3:       oklch(0.52 0.012 262);
+  --ink-4:       oklch(0.6 0.01 262);
+  --rule:        oklch(0.85 0.008 262);
+  --rule-soft:   oklch(0.9 0.007 262);
+  --good:        oklch(0.5 0.15 155);
+  --bad:         oklch(0.52 0.18 25);
+  --claude:      oklch(0.55 0.14 85);
+  --grok:        oklch(0.5 0.13 265);
+  --violet:      oklch(0.5 0.14 300);
+  --off:         oklch(0.62 0.01 262);
 
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "IBM Plex Mono", "Cascadia Code", monospace;
+  --font: 'IBM Plex Sans', system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, "SF Mono", "Cascadia Code", monospace;
 }
 /* JS always sets an explicit data-theme on <body> (defaulting to
-   "dark") — this bare attribute selector matches that element, no
-   :root/:not() indirection needed. */
+   "dark") — this bare attribute selector matches that element. */
 [data-theme="dark"] {
-  --page:        #0a0a0a;
-  --surface:     #151513;
-  --surface-2:   #1c1c19;
-  --ink:         #ffffff;
-  --ink-2:       #c3c2b7;
-  --ink-3:       #8f8d86;
-  --rule:        #2c2c2a;
-  --rule-strong: #3d3d3a;
-  --ring:        rgba(255,255,255,0.10);
-  --accent:      #3987e5;
-  --accent-2:    #d95926;
-  --accent-3:    #9085e9;
-  --good:        #16c116;
-  --good-fill:   #0ca30c;
-  --bad:         #e66767;
-  --warn:        #fab219;
-  --accent-soft: rgba(57,135,229,0.14);
-  --good-soft:   rgba(22,193,22,0.13);
-  --bad-soft:    rgba(230,103,103,0.14);
+  --page:        oklch(0.165 0.008 262);
+  --surface:     oklch(0.195 0.008 262);
+  --surface-2:   oklch(0.185 0.008 262);
+  --surface-hov: oklch(0.225 0.009 262);
+  --ink:         oklch(0.93 0.005 262);
+  --ink-2:       oklch(0.65 0.008 262);
+  --ink-3:       oklch(0.58 0.008 262);
+  --ink-4:       oklch(0.52 0.008 262);
+  --rule:        oklch(0.27 0.01 262);
+  --rule-soft:   oklch(0.23 0.01 262);
+  --good:        oklch(0.78 0.15 155);
+  --bad:         oklch(0.72 0.16 25);
+  --claude:      oklch(0.8 0.14 85);
+  --grok:        oklch(0.68 0.13 265);
+  --violet:      oklch(0.72 0.13 300);
+  --off:         oklch(0.5 0.008 262);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -77,12 +73,10 @@ html, body {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 14px 20px 12px;
-  gap: 10px;
+  padding: 12px 18px 10px;
+  gap: 8px;
 }
-@media (max-height: 680px), (max-width: 860px) {
-  /* Below this, a real trading terminal doesn't fit without scroll —
-     fall back to a scrollable page rather than crushing everything. */
+@media (max-height: 720px), (max-width: 900px) {
   html, body { overflow: auto; }
   .page { height: auto; min-height: 100vh; }
 }
@@ -106,7 +100,7 @@ html, body {
 .brand .mark {
   width: 9px; height: 9px;
   border-radius: 2px;
-  background: var(--accent);
+  background: var(--claude);
   display: inline-block;
   transform: rotate(45deg);
 }
@@ -139,22 +133,17 @@ html, body {
   content: '';
   width: 7px; height: 7px;
   border-radius: 50%;
-  background: var(--good-fill);
-  box-shadow: 0 0 0 0 var(--good-fill);
+  background: var(--good);
   animation: pulse 2.2s ease-out infinite;
 }
 .live-pill.offline::before { background: var(--bad); animation: none; }
-.live-pill.warn::before    { background: var(--warn); animation: none; }
+.live-pill.warn::before    { background: var(--claude); animation: none; }
 @keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(12,163,12,0.45); }
-  70%  { box-shadow: 0 0 0 7px rgba(12,163,12,0); }
-  100% { box-shadow: 0 0 0 0 rgba(12,163,12,0); }
+  0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--good) 55%, transparent); }
+  70%  { box-shadow: 0 0 0 7px color-mix(in oklab, var(--good) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--good) 0%, transparent); }
 }
-.banner-line {
-  font-size: 11px;
-  color: var(--ink-3);
-  font-style: normal;
-}
+.banner-line { font-size: 11px; color: var(--ink-3); }
 .banner-line.active { color: var(--good); }
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
 .url-input {
@@ -168,7 +157,7 @@ html, body {
   border-radius: 4px;
   outline: none;
 }
-.url-input:focus { border-color: var(--accent); }
+.url-input:focus { border-color: var(--claude); }
 .icon-btn {
   background: var(--surface-2);
   border: 1px solid var(--rule);
@@ -182,93 +171,50 @@ html, body {
   font-size: 12px;
   transition: border-color 0.15s, color 0.15s;
 }
-.icon-btn:hover { border-color: var(--accent); color: var(--ink); }
+.icon-btn:hover { border-color: var(--claude); color: var(--ink); }
 
-/* ─── Health strip ───────────────────────────────────────────── */
-.health-strip {
+/* ─── Ticker tape ─────────────────────────────────────────────── */
+.ticker {
   flex: 0 0 auto;
+  height: 24px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.h-chip {
-  display: inline-flex;
   align-items: center;
+}
+.ticker-track {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  white-space: nowrap;
+  padding-left: 14px;
+  animation: ticker-scroll 34s linear infinite;
+  width: max-content;
+}
+.ticker:hover .ticker-track { animation-play-state: paused; }
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+.ticker-item {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  display: inline-flex;
   gap: 6px;
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: 20px;
-  padding: 3px 10px 3px 8px;
-  font-size: 10px;
-  color: var(--ink-3);
-  white-space: nowrap;
+  align-items: center;
 }
-.h-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--good-fill); flex-shrink: 0; }
-.h-chip.bad  .dot { background: var(--bad); }
-.h-chip.warn .dot { background: var(--warn); }
-.h-chip.off  .dot { background: var(--ink-3); }
-.h-chip .h-key { color: var(--ink-3); }
-.h-chip .h-val { color: var(--ink); font-weight: 600; margin-left: 2px; }
+.ticker-item b { color: var(--ink); font-weight: 600; }
+.ticker-sep { color: var(--rule); font-size: 10px; }
 
-/* ─── Stat strip ─────────────────────────────────────────────── */
-.stat-strip {
-  flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: 1.5fr 1fr 1fr 1fr 1.1fr;
-  gap: 10px;
-}
-.stat-tile {
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: 10px;
-  padding: 10px 14px;
-  min-width: 0;
-}
-.stat-label {
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-.stat-value {
-  font-size: 24px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  line-height: 1.1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.stat-tile.main .stat-value { font-size: 30px; }
-.stat-value.small { font-size: 16px; }
-.stat-sub, .stat-delta {
-  font-size: 10px;
-  color: var(--ink-3);
-  margin-top: 3px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.stat-delta.good { color: var(--good); }
-.stat-delta.bad  { color: var(--bad); }
-.spark { margin-top: 4px; height: 20px; width: 100%; display: block; }
-
-/* ─── Main content grid ──────────────────────────────────────── */
-.main-grid {
-  flex: 1 1 46%;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 1.6fr 1fr 1fr;
-  gap: 10px;
-}
+/* ─── Shared panel chrome ────────────────────────────────────── */
 .panel {
   background: var(--surface);
   border: 1px solid var(--rule);
   border-radius: 10px;
-  padding: 12px 14px;
+  padding: 11px 13px;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -280,12 +226,8 @@ html, body {
   margin-bottom: 8px;
   flex: 0 0 auto;
 }
-.panel-head h2 {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-.panel-head h2 .accent-text { color: var(--accent); }
+.panel-head h2 { font-size: 12.5px; font-weight: 700; letter-spacing: -0.01em; }
+.panel-head h2 .accent-text { color: var(--claude); }
 .panel-meta {
   font-size: 9px;
   color: var(--ink-3);
@@ -293,27 +235,60 @@ html, body {
   text-transform: uppercase;
   font-variant-numeric: tabular-nums;
 }
-
-/* ─── Chart panel ────────────────────────────────────────────── */
-.chart-panel { grid-column: 1; }
-.chart-wrap {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
+.stat-label {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 600;
+  margin-bottom: 4px;
 }
-.chart-wrap svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.stat-value {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stat-sub {
+  font-size: 9.5px;
+  color: var(--ink-3);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stat-delta { font-size: 10px; margin-top: 2px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.stat-delta.good { color: var(--good); }
+.stat-delta.bad  { color: var(--bad); }
+
+/* ─── Row 1 — hero equity + stat quad ───────────────────────── */
+.row1 { flex: 0 0 auto; display: grid; grid-template-columns: 1.15fr 1fr; gap: 8px; }
+.hero-card { justify-content: flex-start; }
+.hero-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex: 0 0 auto; }
+.hero-value { font-size: 32px; }
+.hero-breakdown { display: flex; flex-direction: column; gap: 3px; min-width: 90px; }
+.hb-row {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 10.5px; color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.hb-row span:last-child { color: var(--ink-2); font-weight: 600; font-family: var(--font-mono); }
+.hero-chart-wrap { position: relative; height: 78px; margin-top: 10px; flex: 0 0 auto; }
+.hero-chart-wrap svg { width: 100%; height: 100%; display: block; overflow: visible; }
 .chart-empty {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
-  color: var(--ink-3);
-  font-size: 12px;
-  font-style: italic;
+  color: var(--ink-3); font-size: 11px; font-style: italic;
 }
 .chart-tooltip {
   position: absolute;
   pointer-events: none;
   background: var(--surface-2);
-  border: 1px solid var(--rule-strong);
+  border: 1px solid var(--rule);
   border-radius: 6px;
   padding: 6px 9px;
   font-size: 11px;
@@ -321,212 +296,173 @@ html, body {
   white-space: nowrap;
   opacity: 0;
   transition: opacity 0.1s;
-  transform: translate(-50%, -110%);
+  transform: translate(-50%, -115%);
   z-index: 5;
 }
-.chart-tooltip .tt-value {
-  font-weight: 700;
-  font-size: 13px;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-}
+.chart-tooltip .tt-value { font-weight: 700; font-size: 13px; color: var(--ink); font-variant-numeric: tabular-nums; }
 .chart-tooltip .tt-sub { color: var(--ink-3); margin-top: 2px; }
 
-/* ─── Side panel (battle + strategy) ─────────────────────────── */
-.side-panel { grid-column: 2; gap: 10px; overflow-y: auto; }
-.battle-compact { display: flex; flex-direction: column; gap: 8px; }
-.fighter {
+.stat-quad { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 8px; }
+.stat-quad .stat-tile {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 9px 12px;
+  min-width: 0;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 0;
-  border-bottom: 1px dotted var(--rule);
+  flex-direction: column;
+  justify-content: center;
 }
-.fighter:last-child { border-bottom: none; }
-.fighter-id { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
-.fighter-id .swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
-.fighter-id .swatch.claude { background: var(--accent); }
-.fighter-id .swatch.grok   { background: var(--accent-2); }
-.fighter-stat-block { text-align: right; }
-.fighter-pnl { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.fighter-meta { font-size: 9px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.pool-bar {
-  height: 6px;
-  border-radius: 3px;
-  background: var(--accent-2);
-  overflow: hidden;
-  margin: 2px 0 6px;
-  display: flex;
-}
-.pool-bar .seg-claude { background: var(--accent); height: 100%; }
-.divider { border-top: 1px solid var(--rule); margin: 4px 0; }
-.strategy-line {
-  font-size: 11px;
-  color: var(--ink-2);
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.strategy-line .badge {
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--accent-3);
-  border: 1px solid var(--accent-3);
-  border-radius: 3px;
-  padding: 1px 5px;
-  font-weight: 700;
-}
-.strategy-detail { font-size: 10px; color: var(--ink-3); }
+.mini-bar { margin-top: 5px; height: 6px; width: 100%; display: block; border-radius: 3px; overflow: hidden; }
 
-/* ─── Positions panel ────────────────────────────────────────── */
-.positions-panel { grid-column: 3; gap: 10px; overflow-y: auto; }
-.pos-block { flex: 0 0 auto; }
-.pos-sub-head {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-bottom: 4px;
+/* ─── Row 2 — AI battle + services ──────────────────────────── */
+.row2 { flex: 0 0 auto; display: grid; grid-template-columns: 1.5fr 1fr; gap: 8px; }
+.pool-bar { height: 6px; border-radius: 3px; background: var(--grok); overflow: hidden; margin: 0 0 10px; display: flex; flex: 0 0 auto; }
+.pool-bar .seg-claude { background: var(--claude); height: 100%; }
+.battle-split { display: flex; align-items: stretch; gap: 12px; flex: 1 1 auto; min-height: 0; }
+.fighter-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
+.fighter-divider { width: 1px; background: var(--rule); flex: 0 0 auto; }
+.fighter-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; margin-bottom: 4px; }
+.fighter-head .swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.fighter-head .swatch.claude { background: var(--claude); }
+.fighter-head .swatch.grok   { background: var(--grok); }
+.lead-tag {
+  font-size: 8px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--good); border: 1px solid color-mix(in oklab, var(--good) 45%, var(--rule));
+  border-radius: 3px; padding: 1px 5px; margin-left: 2px;
 }
-.pos-sub-head span.meta { color: var(--ink-3); text-transform: none; letter-spacing: 0; font-weight: 500; }
+.fighter-pnl { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; margin-bottom: 6px; }
+.fighter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 10px; margin-bottom: 8px; }
+.fighter-grid div { display: flex; flex-direction: column; }
+.fighter-grid b { font-size: 12px; font-variant-numeric: tabular-nums; }
+.fighter-grid span { font-size: 8.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.05em; }
+.mini-spark { height: 26px; width: 100%; display: block; margin-top: auto; }
+
+.health-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; flex: 0 0 auto; }
+.h-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 9.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.h-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--good); flex-shrink: 0; }
+.h-chip.bad  .dot { background: var(--bad); }
+.h-chip.warn .dot { background: var(--claude); }
+.h-chip.off  .dot { background: var(--off); }
+.h-chip .h-key { color: var(--ink-3); }
+.h-chip .h-val { color: var(--ink); font-weight: 600; margin-left: 2px; overflow: hidden; text-overflow: ellipsis; }
+.svc-info { flex: 1 1 auto; min-height: 0; }
+.svc-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 10.5px; color: var(--ink-3);
+  padding: 5px 0; border-bottom: 1px dotted var(--rule-soft);
+}
+.svc-row:last-child { border-bottom: none; }
+.svc-row span:last-child { color: var(--ink); font-weight: 600; font-family: var(--font-mono); text-align: right; }
+
+/* ─── Row 3 — stocks / crypto / activity ────────────────────── */
+.row3 { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.row3 .panel { overflow-y: auto; }
 .pos-table { width: 100%; border-collapse: collapse; font-size: 11px; }
 .pos-table td { padding: 4px 0; border-bottom: 1px dotted var(--rule); font-variant-numeric: tabular-nums; }
 .pos-table tr:last-child td { border-bottom: none; }
 .pos-table .sym { font-weight: 700; }
-.pos-table .ownr {
-  font-size: 8px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-left: 4px;
-}
+.pos-table .ownr { font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); margin-left: 4px; }
 .pos-table td.r { text-align: right; font-family: var(--font-mono); }
 .pos-empty { color: var(--ink-3); font-style: italic; font-size: 11px; padding: 6px 0; }
 .wallet-line {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dotted var(--rule);
-  font-size: 10px;
-  color: var(--ink-3);
-  font-variant-numeric: tabular-nums;
+  margin-top: 6px; padding-top: 6px; border-top: 1px dotted var(--rule);
+  font-size: 10px; color: var(--ink-3); font-variant-numeric: tabular-nums; flex: 0 0 auto;
 }
 
-/* ─── History panel ──────────────────────────────────────────── */
-.history-panel { flex: 1 1 34%; min-height: 0; }
+.activity-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.activity-item {
+  display: flex; align-items: baseline; gap: 7px;
+  padding: 5px 0; border-bottom: 1px dotted var(--rule);
+  font-size: 10.5px;
+}
+.activity-item:last-child { border-bottom: none; }
+.a-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; margin-top: 1px; background: var(--off); }
+.a-dot.good { background: var(--good); }
+.a-dot.bad  { background: var(--bad); }
+.a-time { color: var(--ink-3); font-variant-numeric: tabular-nums; width: 46px; flex-shrink: 0; }
+.a-detail { color: var(--ink-2); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.a-sym { font-weight: 700; color: var(--ink); }
+.a-pnl { font-variant-numeric: tabular-nums; font-size: 10px; flex-shrink: 0; }
+.ownr { font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); }
+
+/* ─── Row 4 — trade history ──────────────────────────────────── */
+.row4 { flex: 1 1 0; min-height: 0; }
 .last-trade-line { font-size: 10px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .last-trade-line .sym { color: var(--ink); font-weight: 700; }
-.hist-toolbar {
-  flex: 0 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 8px;
-}
+.hist-toolbar { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px; }
 .hist-search {
-  background: var(--surface-2);
-  border: 1px solid var(--rule);
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  width: 120px;
+  background: var(--surface-2); border: 1px solid var(--rule); color: var(--ink);
+  font-family: var(--font-mono); font-size: 10px; padding: 4px 8px; border-radius: 4px; width: 120px;
 }
-.hist-search:focus { outline: none; border-color: var(--accent); }
+.hist-search:focus { outline: none; border-color: var(--claude); }
 .hist-search::placeholder { color: var(--ink-3); }
 .chip-group { display: flex; gap: 4px; }
 .chip {
-  background: transparent;
-  border: 1px solid var(--rule);
-  color: var(--ink-3);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  padding: 3px 8px;
-  border-radius: 20px;
-  cursor: pointer;
+  background: transparent; border: 1px solid var(--rule); color: var(--ink-3);
+  font-size: 9px; font-weight: 600; letter-spacing: 0.03em;
+  padding: 3px 8px; border-radius: 20px; cursor: pointer;
   transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 .chip:hover { color: var(--ink); border-color: var(--ink-3); }
-.chip.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.chip.active { color: var(--claude); border-color: var(--claude); background: color-mix(in oklab, var(--claude) 14%, transparent); }
 .hist-count { font-size: 9px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; margin-left: auto; }
 .hist-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .closes-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 .closes-table thead th {
-  position: sticky; top: 0;
-  background: var(--surface);
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--ink-3);
-  font-weight: 600;
-  text-align: left;
-  padding: 4px 10px 6px 0;
-  border-bottom: 1px solid var(--rule-strong);
+  position: sticky; top: 0; background: var(--surface);
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); font-weight: 600;
+  text-align: left; padding: 4px 10px 6px 0; border-bottom: 1px solid var(--rule);
 }
 .closes-table th.r { text-align: right; padding-right: 0; }
 .closes-table td { padding: 6px 10px 6px 0; font-size: 11px; border-bottom: 1px dotted var(--rule); color: var(--ink-2); }
 .closes-table td.r { text-align: right; padding-right: 0; font-family: var(--font-mono); }
 .closes-table .sym { font-weight: 700; color: var(--ink); }
 .closes-table .act { font-size: 9px; color: var(--ink-3); letter-spacing: 0.04em; }
-.closes-table .ownr { font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); }
 .closes-table tbody tr.trade-row { cursor: pointer; }
 .closes-table tbody tr.trade-row:hover td { background: var(--surface-2); }
 .closes-table tr.detail-row td {
-  padding: 3px 10px 10px 0;
-  border-bottom: 1px dotted var(--rule);
-  font-size: 10px;
-  color: var(--ink-3);
-  font-family: var(--font-mono);
-  background: var(--surface-2);
+  padding: 3px 10px 10px 0; border-bottom: 1px dotted var(--rule);
+  font-size: 10px; color: var(--ink-3); font-family: var(--font-mono); background: var(--surface-2);
 }
 .detail-empty { font-family: var(--font); font-style: italic; }
 .load-more-row td { text-align: center; padding: 10px 0 4px !important; border-bottom: none !important; background: transparent !important; }
 .load-more-btn {
-  background: transparent;
-  border: 1px solid var(--rule);
-  color: var(--ink-2);
-  font-size: 10px;
-  font-weight: 600;
-  padding: 5px 14px;
-  border-radius: 20px;
-  cursor: pointer;
+  background: transparent; border: 1px solid var(--rule); color: var(--ink-2);
+  font-size: 10px; font-weight: 600; padding: 5px 14px; border-radius: 20px; cursor: pointer;
 }
-.load-more-btn:hover { border-color: var(--accent); color: var(--accent); }
+.load-more-btn:hover { border-color: var(--claude); color: var(--claude); }
 .empty { color: var(--ink-3); font-style: italic; padding: 12px 0; font-size: 11px; }
 
 /* ─── Footer ──────────────────────────────────────────────────── */
 .foot {
-  flex: 0 0 auto;
-  display: flex;
-  justify-content: space-between;
-  font-size: 9px;
-  color: var(--ink-3);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  flex: 0 0 auto; display: flex; justify-content: space-between;
+  font-size: 9px; color: var(--ink-3); letter-spacing: 0.06em; text-transform: uppercase;
 }
 .foot a { color: var(--ink-3); text-decoration: none; border-bottom: 1px dotted var(--rule); }
 .foot a:hover { color: var(--ink); border-color: var(--ink); }
 
 /* ─── Responsive fallback (narrow / short) ───────────────────── */
 @media (max-width: 1180px) {
-  .main-grid { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
-  .chart-panel { grid-column: 1 / -1; min-height: 220px; }
-  .side-panel { grid-column: 1; }
-  .positions-panel { grid-column: 2; }
-  .stat-strip { grid-template-columns: 1fr 1fr 1fr; }
+  .row1 { grid-template-columns: 1fr; }
+  .row2 { grid-template-columns: 1fr; }
+  .row3 { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
 }
 @media (max-width: 700px) {
-  .stat-strip { grid-template-columns: 1fr 1fr; }
-  .main-grid { grid-template-columns: 1fr; }
-  .side-panel, .positions-panel, .chart-panel { grid-column: 1; }
+  .row3 { grid-template-columns: 1fr; }
+  .stat-quad { grid-template-columns: 1fr 1fr; }
 }
 </style>
 </head>
@@ -552,110 +488,131 @@ html, body {
     </div>
   </header>
 
-  <!-- ── Health strip ────────────────────────────────────────── -->
-  <div class="health-strip" id="health-strip">
-    <span class="h-chip" id="h-bot"><span class="dot"></span><span class="h-key">bot</span><span class="h-val">—</span></span>
-    <span class="h-chip" id="h-turtle"><span class="dot"></span><span class="h-key">turtle</span><span class="h-val">—</span></span>
-    <span class="h-chip" id="h-claude"><span class="dot"></span><span class="h-key">claude</span><span class="h-val">—</span></span>
-    <span class="h-chip" id="h-grok"><span class="dot"></span><span class="h-key">grok</span><span class="h-val">—</span></span>
-    <span class="h-chip" id="h-fees"><span class="dot"></span><span class="h-key">fees</span><span class="h-val">—</span></span>
-    <span class="h-chip" id="h-data"><span class="dot"></span><span class="h-key">data</span><span class="h-val">—</span></span>
+  <!-- ── Ticker tape ──────────────────────────────────────────── -->
+  <div class="ticker" id="ticker">
+    <div class="ticker-track" id="ticker-track"><span class="ticker-item">loading…</span></div>
   </div>
 
-  <!-- ── Stat strip ──────────────────────────────────────────── -->
-  <div class="stat-strip">
-    <div class="stat-tile main">
-      <div class="stat-label">Total equity</div>
-      <div class="stat-value" id="hero-equity">—</div>
-      <div class="stat-delta" id="hero-day-delta">—</div>
-      <svg class="spark" id="hero-spark" viewBox="0 0 200 40" preserveAspectRatio="none"></svg>
-    </div>
-    <div class="stat-tile">
-      <div class="stat-label">Realized P&amp;L</div>
-      <div class="stat-value" id="hero-realized">—</div>
-      <div class="stat-sub" id="hero-realized-sub">—</div>
-    </div>
-    <div class="stat-tile">
-      <div class="stat-label">Win rate</div>
-      <div class="stat-value" id="hero-wr">—</div>
-      <div class="stat-sub" id="hero-wr-sub">—</div>
-    </div>
-    <div class="stat-tile">
-      <div class="stat-label">Positions</div>
-      <div class="stat-value" id="hero-pos">—</div>
-      <div class="stat-sub" id="hero-pos-sub">—</div>
-    </div>
-    <div class="stat-tile">
-      <div class="stat-label">Last trade</div>
-      <div class="stat-value small" id="stat-last-trade">—</div>
-      <div class="stat-sub" id="stat-last-trade-sub">—</div>
-    </div>
-  </div>
-
-  <!-- ── Main grid: chart | battle+strategy | positions ─────── -->
-  <div class="main-grid">
-
-    <section class="panel chart-panel">
-      <div class="panel-head">
-        <h2>Cumulative <span class="accent-text">P&amp;L</span></h2>
-        <span class="panel-meta" id="chart-meta">—</span>
+  <!-- ── Row 1: hero equity + stat quad ──────────────────────── -->
+  <div class="row1">
+    <section class="panel hero-card">
+      <div class="hero-top">
+        <div>
+          <div class="stat-label">Total equity</div>
+          <div class="stat-value hero-value" id="hero-equity">—</div>
+          <div class="stat-delta" id="hero-day-delta">—</div>
+        </div>
+        <div class="hero-breakdown">
+          <div class="hb-row"><span>Stocks</span><span id="hb-stocks">—</span></div>
+          <div class="hb-row"><span>Crypto</span><span id="hb-crypto">—</span></div>
+          <div class="hb-row"><span>Cash</span><span id="hb-cash">—</span></div>
+        </div>
       </div>
-      <div class="chart-wrap" id="chart-wrap">
-        <svg id="pnl-svg" viewBox="0 0 600 260" preserveAspectRatio="none"></svg>
+      <div class="hero-chart-wrap" id="hero-chart-wrap">
+        <svg id="hero-bars" viewBox="0 0 480 110" preserveAspectRatio="none"></svg>
         <div class="chart-tooltip" id="chart-tooltip"></div>
       </div>
     </section>
+    <div class="stat-quad">
+      <div class="stat-tile">
+        <div class="stat-label">Realized P&amp;L</div>
+        <div class="stat-value" id="hero-realized">—</div>
+        <div class="stat-sub" id="hero-realized-sub">—</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Win rate</div>
+        <div class="stat-value" id="hero-wr">—</div>
+        <svg class="mini-bar" id="wr-bar" viewBox="0 0 100 6" preserveAspectRatio="none"></svg>
+        <div class="stat-sub" id="hero-wr-sub">—</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Closed trades</div>
+        <div class="stat-value" id="hero-closed">—</div>
+        <div class="stat-sub" id="hero-closed-sub">—</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Open positions</div>
+        <div class="stat-value" id="hero-pos">—</div>
+        <div class="stat-sub" id="hero-pos-sub">—</div>
+      </div>
+    </div>
+  </div>
 
-    <section class="panel side-panel">
+  <!-- ── Row 2: AI battle + services ─────────────────────────── -->
+  <div class="row2">
+    <section class="panel">
       <div class="panel-head">
         <h2>AI <span class="accent-text">battle</span></h2>
         <span class="panel-meta" id="battle-meta">—</span>
       </div>
       <div class="pool-bar" id="pool-bar"><div class="seg-claude" id="pool-seg-claude" style="width:50%"></div></div>
-      <div class="battle-compact">
-        <div class="fighter" data-ai="claude">
-          <div class="fighter-id"><span class="swatch claude"></span>Claude</div>
-          <div class="fighter-stat-block">
-            <div class="fighter-pnl" id="claude-pnl">—</div>
-            <div class="fighter-meta"><span id="claude-trades">0</span> trades · <span id="claude-wr">—</span> wr · <span id="claude-open">0</span> open</div>
+      <div class="battle-split">
+        <div class="fighter-col" data-ai="claude">
+          <div class="fighter-head"><span class="swatch claude"></span>Claude<span class="lead-tag" id="lead-claude" hidden>leading</span></div>
+          <div class="fighter-pnl" id="claude-pnl">—</div>
+          <div class="fighter-grid">
+            <div><b id="claude-trades">0</b><span>trades</span></div>
+            <div><b id="claude-wr">—</b><span>win rate</span></div>
+            <div><b id="claude-wins">0</b><span>wins</span></div>
+            <div><b id="claude-open">0</b><span>open</span></div>
           </div>
+          <svg class="mini-spark" id="claude-spark" preserveAspectRatio="none"></svg>
         </div>
-        <div class="fighter" data-ai="grok">
-          <div class="fighter-id"><span class="swatch grok"></span>Grok</div>
-          <div class="fighter-stat-block">
-            <div class="fighter-pnl" id="grok-pnl">—</div>
-            <div class="fighter-meta"><span id="grok-trades">0</span> trades · <span id="grok-wr">—</span> wr · <span id="grok-open">0</span> open</div>
+        <div class="fighter-divider"></div>
+        <div class="fighter-col" data-ai="grok">
+          <div class="fighter-head"><span class="swatch grok"></span>Grok<span class="lead-tag" id="lead-grok" hidden>leading</span></div>
+          <div class="fighter-pnl" id="grok-pnl">—</div>
+          <div class="fighter-grid">
+            <div><b id="grok-trades">0</b><span>trades</span></div>
+            <div><b id="grok-wr">—</b><span>win rate</span></div>
+            <div><b id="grok-wins">0</b><span>wins</span></div>
+            <div><b id="grok-open">0</b><span>open</span></div>
           </div>
+          <svg class="mini-spark" id="grok-spark" preserveAspectRatio="none"></svg>
         </div>
       </div>
-      <div class="divider"></div>
-      <div class="strategy-line">
-        <span class="badge" id="strat-badge">—</span>
-        <span id="strat-status-text">loading…</span>
-      </div>
-      <div class="strategy-detail" id="strat-detail">—</div>
     </section>
 
-    <section class="panel positions-panel">
-      <div class="panel-head"><h2>Positions</h2></div>
-      <div class="pos-block">
-        <div class="pos-sub-head">Stocks <span class="meta" id="stock-meta"></span></div>
-        <table class="pos-table" id="stock-table">
-          <tbody id="stock-rows"><tr><td class="pos-empty" colspan="3">no open stock positions</td></tr></tbody>
-        </table>
+    <section class="panel">
+      <div class="panel-head"><h2>Services</h2></div>
+      <div class="health-grid" id="health-strip">
+        <span class="h-chip" id="h-bot"><span class="dot"></span><span class="h-key">bot</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-turtle"><span class="dot"></span><span class="h-key">turtle</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-claude"><span class="dot"></span><span class="h-key">claude</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-grok"><span class="dot"></span><span class="h-key">grok</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-fees"><span class="dot"></span><span class="h-key">fees</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-data"><span class="dot"></span><span class="h-key">data</span><span class="h-val">—</span></span>
       </div>
-      <div class="pos-block">
-        <div class="pos-sub-head">Crypto <span class="meta" id="crypto-meta"></span></div>
-        <table class="pos-table" id="crypto-table">
-          <tbody id="crypto-rows"><tr><td class="pos-empty" colspan="3">no open crypto positions</td></tr></tbody>
-        </table>
-        <div class="wallet-line" id="wallet-line">—</div>
+      <div class="svc-info">
+        <div class="svc-row"><span>Strategy</span><span id="svc-strategy">—</span></div>
+        <div class="svc-row"><span>Pool split (C/G)</span><span id="svc-pool">—</span></div>
       </div>
     </section>
   </div>
 
-  <!-- ── Trade history ───────────────────────────────────────── -->
-  <section class="panel history-panel">
+  <!-- ── Row 3: stocks / crypto / activity ───────────────────── -->
+  <div class="row3">
+    <section class="panel">
+      <div class="panel-head"><h2>Stocks</h2><span class="panel-meta" id="stock-meta"></span></div>
+      <table class="pos-table" id="stock-table">
+        <tbody id="stock-rows"><tr><td class="pos-empty" colspan="3">no open stock positions</td></tr></tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Crypto</h2><span class="panel-meta" id="crypto-meta"></span></div>
+      <table class="pos-table" id="crypto-table">
+        <tbody id="crypto-rows"><tr><td class="pos-empty" colspan="3">no open crypto positions</td></tr></tbody>
+      </table>
+      <div class="wallet-line" id="wallet-line">—</div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Activity</h2><span class="panel-meta" id="activity-last">—</span></div>
+      <div class="activity-list" id="activity-list"></div>
+    </section>
+  </div>
+
+  <!-- ── Row 4: trade history ────────────────────────────────── -->
+  <section class="panel row4">
     <div class="panel-head">
       <h2>Trade <span class="accent-text">history</span></h2>
       <span class="last-trade-line" id="last-trade-line">—</span>
@@ -757,31 +714,72 @@ const timeAgo = ts => {
 };
 
 // ════════════════════════════════════════════════════════════
-// RENDERERS — hero / health / battle / strategy / positions
+// RENDERERS — hero / ticker / health / battle / services / positions
 // ════════════════════════════════════════════════════════════
+function renderWrBar(wins, losses) {
+  const svg = document.getElementById('wr-bar');
+  const total = wins + losses;
+  if (!total) { svg.innerHTML = ''; return; }
+  const wPct = (wins / total) * 100;
+  svg.innerHTML = `<rect x="0" y="0" width="${wPct.toFixed(1)}" height="6" rx="2" fill="var(--good)"/>` +
+    `<rect x="${wPct.toFixed(1)}" y="0" width="${(100 - wPct).toFixed(1)}" height="6" rx="2" fill="var(--bad)"/>`;
+}
+
 function renderHero(stats, crypto, perf, leaderboard) {
   const stockEq = parseFloat(stats?.equity || 0);
   const cryptoEq = parseFloat(crypto?.wallet?.total_value || 0);
+  const cash = parseFloat(stats?.cash || 0);
   const combined = stockEq + cryptoEq;
   setT('hero-equity', fmt$0(combined));
 
   const stockDay = parseFloat(stats?.claude_daily_pnl || 0) + parseFloat(stats?.grok_daily_pnl || 0);
-  setT('hero-day-delta', `${fmtSigned(stockDay)} today (stocks)`, stockDay > 0 ? 'good' : stockDay < 0 ? 'bad' : '');
+  setT('hero-day-delta', `${fmtSigned(stockDay)} today`, stockDay > 0 ? 'good' : stockDay < 0 ? 'bad' : '');
+  setT('hb-stocks', fmt$0(stockEq));
+  setT('hb-crypto', fmt$0(cryptoEq));
+  setT('hb-cash', fmt$0(cash));
 
   const totalPnl = perf?.summary?.total_pnl || 0;
   setT('hero-realized', fmtSigned(totalPnl), totalPnl > 0 ? 'good' : totalPnl < 0 ? 'bad' : '');
   const totalClosed = perf?.summary?.total_closed_trades || 0;
-  setT('hero-realized-sub', `${totalClosed} closed trades`);
+  setT('hero-realized-sub', `${totalClosed} trades`);
 
   const wr = parseFloat(perf?.summary?.win_rate_pct || 0);
   setT('hero-wr', totalClosed > 0 ? wr.toFixed(0) + '%' : '—');
   const wins = (perf?.by_ai?.claude?.wins || 0) + (perf?.by_ai?.grok?.wins || 0);
-  setT('hero-wr-sub', totalClosed > 0 ? `${wins}w / ${totalClosed - wins}l` : 'no closes yet');
+  const losses = Math.max(0, totalClosed - wins);
+  setT('hero-wr-sub', totalClosed > 0 ? `${wins}w / ${losses}l` : 'no closes yet');
+  renderWrBar(wins, losses);
+
+  setT('hero-closed', totalClosed);
+  setT('hero-closed-sub', totalClosed ? 'all-time' : '—');
 
   const stockPos = (stats?.positions || []).length;
   const cryptoPos = crypto?.position_count || 0;
-  setT('hero-pos', (stockPos + cryptoPos));
+  setT('hero-pos', stockPos + cryptoPos);
   setT('hero-pos-sub', `${stockPos} stock · ${cryptoPos} crypto`);
+}
+
+function buildTickerItems(stats, crypto) {
+  const items = [];
+  (stats?.positions || []).forEach(p => items.push({ sym: p.symbol, pct: parseFloat(p.pnl_pct || 0) }));
+  const cp = crypto?.bot_positions || {};
+  Object.keys(cp).forEach(sym => items.push({ sym, pct: parseFloat(cp[sym].pnl_pct || 0) }));
+  return items;
+}
+
+function renderTicker(stats, crypto) {
+  const track = document.getElementById('ticker-track');
+  const items = buildTickerItems(stats, crypto);
+  if (!items.length) {
+    track.innerHTML = '<span class="ticker-item">no active positions</span>';
+    track.style.animation = 'none';
+    return;
+  }
+  const html = items.map(it =>
+    `<span class="ticker-item"><b>${it.sym}</b><span class="${it.pct >= 0 ? 'good' : 'bad'}">${fmtPct(it.pct)}</span></span>`
+  ).join('<span class="ticker-sep">•</span>');
+  track.innerHTML = html + '<span class="ticker-sep">•</span>' + html + '<span class="ticker-sep">•</span>';
+  track.style.animation = '';
 }
 
 function renderHealth(stats, crypto, strategist, perf) {
@@ -845,63 +843,44 @@ function renderBanner(stats) {
   }
 }
 
-function renderBattle(lb, crypto) {
+function renderBattle(lb) {
   if (!lb || lb.error) {
     setT('battle-meta', 'unavailable');
     return;
   }
   setT('battle-meta', `${lb.total_closed || 0} closes`);
   const claudePct = (lb.pool_split?.claude_pct * 100) || 50;
+  const grokPct = (lb.pool_split?.grok_pct * 100) || (100 - claudePct);
   document.getElementById('pool-seg-claude').style.width = claudePct.toFixed(0) + '%';
+  setT('svc-pool', `${claudePct.toFixed(0)}/${grokPct.toFixed(0)}`);
 
-  for (const [ai, side] of [['claude', lb.claude || {}], ['grok', lb.grok || {}]]) {
-    const pnl = parseFloat(side.total_pnl || 0);
+  const cSide = lb.claude || {}, gSide = lb.grok || {};
+  const cPnl = parseFloat(cSide.total_pnl || 0), gPnl = parseFloat(gSide.total_pnl || 0);
+  for (const [ai, side, pnl] of [['claude', cSide, cPnl], ['grok', gSide, gPnl]]) {
     setT(`${ai}-pnl`, side.trades ? fmtSigned(pnl) : '—', pnl > 0 ? 'good' : pnl < 0 ? 'bad' : '');
     setT(`${ai}-trades`, side.trades || 0);
     setT(`${ai}-wr`, side.trades ? (side.win_rate || 0).toFixed(0) + '%' : '—');
+    setT(`${ai}-wins`, side.wins || 0);
     setT(`${ai}-open`, side.open_positions || 0);
   }
+  const bothTraded = cSide.trades && gSide.trades;
+  document.getElementById('lead-claude').hidden = !(bothTraded && cPnl > gPnl);
+  document.getElementById('lead-grok').hidden = !(bothTraded && gPnl > cPnl);
 }
 
 function renderStrategy(strategist) {
-  const badge = document.getElementById('strat-badge');
-  const text  = document.getElementById('strat-status-text');
-  const detail = document.getElementById('strat-detail');
-
-  if (!strategist || strategist.error) {
-    badge.textContent = '—';
-    text.textContent = strategist?.error ? `endpoint error` : 'unreachable';
-    detail.textContent = '';
-    return;
-  }
-  if (strategist.reason === 'module not loaded') {
-    badge.textContent = '—';
-    text.textContent = 'Not loaded';
-    detail.textContent = 'strategic_brain module not imported';
-    return;
-  }
+  if (!strategist || strategist.error) { setT('svc-strategy', 'unreachable'); return; }
+  if (strategist.reason === 'module not loaded') { setT('svc-strategy', 'not loaded'); return; }
   const cs = strategist?.ais?.claude?.current_strategy || {};
   const gs = strategist?.ais?.grok?.current_strategy || {};
-  const cT = cs.strategy_type === 'turtle';
-  const gT = gs.strategy_type === 'turtle';
+  const cT = cs.strategy_type === 'turtle', gT = gs.strategy_type === 'turtle';
   const isDormant = strategist.enabled === false;
-
   if (cT && gT) {
-    badge.textContent = '🐢 turtle';
-    text.textContent = isDormant ? 'dormant (Phase A)' : 'active';
-    detail.textContent = `${cs.rules?.entry_donchian_period || 20}d entry · ${cs.rules?.exit_donchian_period || 10}d exit · 2N stop`;
+    setT('svc-strategy', `Turtle · ${cs.rules?.entry_donchian_period || 20}d/${cs.rules?.exit_donchian_period || 10}d${isDormant ? ' (dormant)' : ''}`);
   } else if (cT || gT) {
-    badge.textContent = '🐢 partial';
-    text.textContent = `${cT ? 'Claude' : 'Grok'} on Turtle`;
-    detail.textContent = 'other AI still on classic';
-  } else if (cs.name || gs.name) {
-    badge.textContent = 'classic';
-    text.textContent = cs.name || gs.name || 'default playbook';
-    detail.textContent = isDormant ? 'playbook frozen' : `v${cs.version || 0}`;
+    setT('svc-strategy', `${cT ? 'Claude' : 'Grok'} turtle, other classic`);
   } else {
-    badge.textContent = 'classic';
-    text.textContent = 'no playbook yet';
-    detail.textContent = isDormant ? 'Phase A — plumbing only' : 'awaiting activation';
+    setT('svc-strategy', isDormant ? 'Classic (Phase A)' : (cs.name || gs.name || 'Classic'));
   }
 }
 
@@ -949,7 +928,7 @@ function renderCrypto(crypto) {
       const isTurtle = p.strategy_type === 'turtle';
       const own = p.owner === 'claude' ? '<span class="ownr">C</span>' :
                   p.owner === 'grok'   ? '<span class="ownr">G</span>'   : '';
-      const turtleTag = isTurtle ? '<span class="ownr" style="color:var(--accent-3)">T</span>' : '';
+      const turtleTag = isTurtle ? '<span class="ownr" style="color:var(--violet)">T</span>' : '';
       rows += `<tr>
         <td><span class="sym">${sym}</span>${own}${turtleTag}</td>
         <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
@@ -965,6 +944,39 @@ function renderCrypto(crypto) {
 }
 
 // ════════════════════════════════════════════════════════════
+// ACTIVITY FEED — most recent raw trade actions (any type)
+// ════════════════════════════════════════════════════════════
+function ownerTag(owner) {
+  return owner === 'claude' ? '<span class="ownr">claude</span>' :
+         owner === 'grok'   ? '<span class="ownr">grok</span>'   :
+         owner === 'shared' ? '<span class="ownr">shared</span>' :
+                               `<span class="ownr">${owner || 'bot'}</span>`;
+}
+
+function renderActivity() {
+  const list = document.getElementById('activity-list');
+  const items = ALL_TRADES.slice(0, 9);
+  if (!items.length) {
+    list.innerHTML = '<div class="empty">no activity yet</div>';
+    setT('activity-last', '—');
+    return;
+  }
+  setT('activity-last', timeAgo(items[0].time));
+  list.innerHTML = items.map(t => {
+    const hasPnl = t.pnl_usd !== null && t.pnl_usd !== undefined;
+    const pnl = parseFloat(t.pnl_usd || 0);
+    const dotCls = !hasPnl ? '' : pnl >= 0 ? 'good' : 'bad';
+    const pnlTxt = hasPnl ? `<span class="a-pnl ${pnl >= 0 ? 'good' : 'bad'}">${fmtSigned(pnl)}</span>` : '';
+    return `<div class="activity-item">
+      <span class="a-dot ${dotCls}"></span>
+      <span class="a-time">${timeAgo(t.time)}</span>
+      <span class="a-detail"><span class="a-sym">${(t.symbol || '—')}</span> ${(t.action || '').replace(/_/g, ' ')} · ${ownerTag(t.owner)}</span>
+      ${pnlTxt}
+    </div>`;
+  }).join('');
+}
+
+// ════════════════════════════════════════════════════════════
 // TRADE HISTORY — client-side filter/search/pagination/expand
 // ════════════════════════════════════════════════════════════
 let ALL_TRADES  = [];
@@ -973,13 +985,6 @@ let histOwner   = '';
 let histSearch  = '';
 let histVisible = 25;
 const HIST_PAGE = 25;
-
-function ownerTag(owner) {
-  return owner === 'claude' ? '<span class="ownr">claude</span>' :
-         owner === 'grok'   ? '<span class="ownr">grok</span>'   :
-         owner === 'shared' ? '<span class="ownr">shared</span>' :
-                               `<span class="ownr">${owner || 'bot'}</span>`;
-}
 
 function filteredTrades() {
   let trades = ALL_TRADES;
@@ -1022,11 +1027,8 @@ function renderCloses() {
   if (last) {
     const act = (last.action || '—').toUpperCase();
     setHTML('last-trade-line', `${timeAgo(last.time)} · ${act} <span class="sym">${last.symbol || '—'}</span> (${last.owner || 'bot'})`);
-    setT('stat-last-trade', timeAgo(last.time));
-    setT('stat-last-trade-sub', `${act} ${last.symbol || '—'}`);
   } else {
     setT('last-trade-line', 'no trades recorded yet');
-    setT('stat-last-trade', '—');
   }
 
   setT('hist-count', trades.length ? `${Math.min(histVisible, trades.length)} of ${trades.length}` : '0');
@@ -1076,31 +1078,41 @@ function renderCloses() {
 }
 
 // ════════════════════════════════════════════════════════════
-// LIVE CHART — cumulative realized P&L, split green/red at zero
+// CHARTS — hero skyline bars (interactive) + mini trend sparks
 // ════════════════════════════════════════════════════════════
-const CHART_W = 600, CHART_H = 260;
-const CHART_PAD = { top: 14, right: 10, bottom: 8, left: 10 };
-
-function buildPnlSeries() {
-  // Oldest → newest closed trades, cumulative running P&L
-  const closes = ALL_TRADES.filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined && t.time)
-                            .slice().reverse();
+function buildPnlSeries(owner) {
+  let closes = ALL_TRADES.filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined && t.time);
+  if (owner) closes = closes.filter(t => t.owner === owner);
+  closes = closes.slice().reverse();
   if (closes.length < 2) return null;
   let cum = 0;
-  const points = closes.map(t => {
+  return closes.map(t => {
     cum += parseFloat(t.pnl_usd || 0);
     const d = new Date(t.time.endsWith('Z') ? t.time : t.time + 'Z');
     return { t: d.getTime(), cum, trade: t };
   });
-  return points;
 }
 
-function renderPnlChart() {
-  const svg = document.getElementById('pnl-svg');
-  const wrap = document.getElementById('chart-wrap');
+function bucketPoints(points, n) {
+  n = Math.min(n, points.length);
+  const buckets = [];
+  for (let i = 0; i < n; i++) {
+    const startIdx = Math.floor(i / n * points.length);
+    const endIdx = Math.max(startIdx + 1, Math.floor((i + 1) / n * points.length));
+    const slice = points.slice(startIdx, endIdx);
+    if (slice.length) buckets.push(slice[slice.length - 1]);
+  }
+  return buckets;
+}
+
+const HERO_W = 480, HERO_H = 110, HERO_BARS = 48;
+
+function renderHeroBars() {
+  const svg = document.getElementById('hero-bars');
+  const wrap = document.getElementById('hero-chart-wrap');
   const points = buildPnlSeries();
-  const existingEmpty = wrap.querySelector('.chart-empty');
-  if (existingEmpty) existingEmpty.remove();
+  const oldEmpty = wrap.querySelector('.chart-empty');
+  if (oldEmpty) oldEmpty.remove();
 
   if (!points) {
     svg.innerHTML = '';
@@ -1108,124 +1120,85 @@ function renderPnlChart() {
     empty.className = 'chart-empty';
     empty.textContent = 'not enough closed trades yet for a curve';
     wrap.appendChild(empty);
-    setT('chart-meta', '—');
     return;
   }
 
-  const minT = points[0].t, maxT = points[points.length - 1].t;
-  const cums = points.map(p => p.cum);
-  let minV = Math.min(0, ...cums), maxV = Math.max(0, ...cums);
+  const buckets = bucketPoints(points, HERO_BARS).map(p => ({ value: p.cum, trade: p.trade }));
+  let minV = Math.min(0, ...buckets.map(b => b.value));
+  let maxV = Math.max(0, ...buckets.map(b => b.value));
   if (minV === maxV) { minV -= 1; maxV += 1; }
-  const padV = (maxV - minV) * 0.12 || 1;
-  minV -= padV; maxV += padV;
+  const range = maxV - minV;
+  const n = buckets.length;
+  const gap = 1.6;
+  const bw = (HERO_W / n) - gap;
+  const recentFrom = Math.ceil(n * 0.82);
 
-  const plotW = CHART_W - CHART_PAD.left - CHART_PAD.right;
-  const plotH = CHART_H - CHART_PAD.top - CHART_PAD.bottom;
-  const scaleX = t => CHART_PAD.left + (maxT === minT ? plotW / 2 : (t - minT) / (maxT - minT) * plotW);
-  const scaleY = v => CHART_PAD.top + (1 - (v - minV) / (maxV - minV)) * plotH;
-  const baselineY = scaleY(0);
+  let rects = `<line x1="0" y1="${HERO_H - 0.5}" x2="${HERO_W}" y2="${HERO_H - 0.5}" stroke="var(--rule-soft)" stroke-width="1"/>`;
+  buckets.forEach((b, i) => {
+    const h = Math.max(2, ((b.value - minV) / range) * (HERO_H - 8));
+    const x = i * (HERO_W / n);
+    const y = HERO_H - h;
+    const color = b.value >= 0 ? 'var(--good)' : 'var(--bad)';
+    const op = i >= recentFrom ? 1 : 0.42;
+    rects += `<rect class="hbar" data-i="${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${color}" opacity="${op}"/>`;
+  });
+  svg.innerHTML = rects;
 
-  const linePts = points.map(p => `${scaleX(p.t).toFixed(1)},${scaleY(p.cum).toFixed(1)}`).join(' L ');
-  const lineD = `M ${linePts}`;
-  const areaD = `M ${scaleX(points[0].t).toFixed(1)},${baselineY.toFixed(1)} L ${linePts} L ${scaleX(points[points.length-1].t).toFixed(1)},${baselineY.toFixed(1)} Z`;
-
-  const last = points[points.length - 1];
-  const lastX = scaleX(last.t), lastY = scaleY(last.cum);
-  const lastGood = last.cum >= 0;
-
-  svg.innerHTML = `
-    <defs>
-      <clipPath id="clipAbove"><rect x="0" y="0" width="${CHART_W}" height="${baselineY.toFixed(1)}"/></clipPath>
-      <clipPath id="clipBelow"><rect x="0" y="${baselineY.toFixed(1)}" width="${CHART_W}" height="${(CHART_H - baselineY).toFixed(1)}"/></clipPath>
-      <linearGradient id="gradGood" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="var(--good-fill)" stop-opacity="0.28"/>
-        <stop offset="100%" stop-color="var(--good-fill)" stop-opacity="0.02"/>
-      </linearGradient>
-      <linearGradient id="gradBad" x1="0" y1="1" x2="0" y2="0">
-        <stop offset="0%" stop-color="var(--bad)" stop-opacity="0.28"/>
-        <stop offset="100%" stop-color="var(--bad)" stop-opacity="0.02"/>
-      </linearGradient>
-    </defs>
-    <line x1="0" y1="${baselineY.toFixed(1)}" x2="${CHART_W}" y2="${baselineY.toFixed(1)}" style="stroke:var(--rule-strong)" stroke-width="1"/>
-    <text x="2" y="${(baselineY - 4).toFixed(1)}" style="fill:var(--ink-3)" font-size="8">$0</text>
-    <text x="2" y="${(CHART_PAD.top + 8).toFixed(1)}" style="fill:var(--ink-3)" font-size="8">${fmt$0(maxV)}</text>
-    <text x="2" y="${(CHART_H - 3).toFixed(1)}" style="fill:var(--ink-3)" font-size="8">${fmt$0(minV)}</text>
-    <path d="${areaD}" clip-path="url(#clipAbove)" style="fill:url(#gradGood)"/>
-    <path d="${areaD}" clip-path="url(#clipBelow)" style="fill:url(#gradBad)"/>
-    <path d="${lineD}" clip-path="url(#clipAbove)" style="fill:none;stroke:var(--good-fill)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-    <path d="${lineD}" clip-path="url(#clipBelow)" style="fill:none;stroke:var(--bad)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-    <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" style="fill:${lastGood ? 'var(--good-fill)' : 'var(--bad)'};stroke:var(--surface)" stroke-width="2" id="pnl-end-dot"/>
-    <text x="${Math.max(6, lastX - 4).toFixed(1)}" y="${(lastY - 9).toFixed(1)}" text-anchor="end" style="fill:${lastGood ? 'var(--good-fill)' : 'var(--bad)'}" font-size="10" font-weight="700">${fmtSigned(last.cum)}</text>
-    <line id="pnl-crosshair" x1="0" y1="${CHART_PAD.top}" x2="0" y2="${CHART_H - CHART_PAD.bottom}" style="stroke:var(--rule-strong)" stroke-width="1" stroke-dasharray="2,2" opacity="0"/>
-    <circle id="pnl-hover-dot" cx="0" cy="0" r="4" style="fill:var(--accent);stroke:var(--surface)" stroke-width="2" opacity="0"/>
-    <rect id="pnl-hit-area" x="${CHART_PAD.left}" y="0" width="${plotW}" height="${CHART_H}" fill="transparent" style="cursor:crosshair"/>
-  `;
-
-  setT('chart-meta', `${points.length} closes · ${tsToLocal(points[0].trade.time)} → ${tsToLocal(last.trade.time)}`);
-
-  // ── Hover crosshair + tooltip ──────────────────────────────
-  const hitArea = document.getElementById('pnl-hit-area');
-  const crosshair = document.getElementById('pnl-crosshair');
-  const hoverDot = document.getElementById('pnl-hover-dot');
   const tooltip = document.getElementById('chart-tooltip');
-
-  function nearestIndex(svgX) {
-    const targetT = minT + ((svgX - CHART_PAD.left) / plotW) * (maxT - minT);
-    let lo = 0, hi = points.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (points[mid].t < targetT) lo = mid + 1; else hi = mid;
-    }
-    if (lo > 0 && Math.abs(points[lo-1].t - targetT) < Math.abs(points[lo].t - targetT)) return lo - 1;
-    return lo;
-  }
-
   function onMove(evt) {
+    const t = evt.target;
+    if (!t.classList || !t.classList.contains('hbar')) { onLeave(); return; }
+    const i = parseInt(t.getAttribute('data-i'), 10);
+    const b = buckets[i];
+    svg.querySelectorAll('.hbar').forEach(r => { r.style.stroke = 'none'; });
+    t.style.stroke = 'var(--ink)';
+    t.style.strokeWidth = '1';
     const rect = svg.getBoundingClientRect();
-    const clientX = evt.touches ? evt.touches[0].clientX : evt.clientX;
-    const svgX = ((clientX - rect.left) / rect.width) * CHART_W;
-    const idx = nearestIndex(svgX);
-    const p = points[idx];
-    const px = scaleX(p.t), py = scaleY(p.cum);
-    crosshair.setAttribute('x1', px.toFixed(1));
-    crosshair.setAttribute('x2', px.toFixed(1));
-    crosshair.setAttribute('opacity', '1');
-    hoverDot.setAttribute('cx', px.toFixed(1));
-    hoverDot.setAttribute('cy', py.toFixed(1));
-    hoverDot.setAttribute('opacity', '1');
-
-    const pxPixel = (px / CHART_W) * rect.width;
-    const pyPixel = (py / CHART_H) * rect.height;
-    tooltip.style.left = pxPixel + 'px';
-    tooltip.style.top = pyPixel + 'px';
+    const bx = parseFloat(t.getAttribute('x')) + bw / 2;
+    const px = (bx / HERO_W) * rect.width;
+    const py = (parseFloat(t.getAttribute('y')) / HERO_H) * rect.height;
+    tooltip.style.left = px + 'px';
+    tooltip.style.top = Math.max(12, py) + 'px';
     tooltip.style.opacity = '1';
-    const tr = p.trade;
-    tooltip.innerHTML = `<div class="tt-value">${fmtSigned(p.cum)}</div>
-      <div class="tt-sub">${tsToLocal(tr.time)} · ${(tr.symbol||'').replace(/</g,'')} ${tr.action||''} ${fmtSigned(parseFloat(tr.pnl_usd||0))}</div>`;
+    const tr = b.trade;
+    tooltip.innerHTML = `<div class="tt-value">${fmtSigned(b.value)}</div>
+      <div class="tt-sub">${tsToLocal(tr.time)} · ${(tr.symbol || '').replace(/</g, '')} ${tr.action || ''}</div>`;
   }
   function onLeave() {
-    crosshair.setAttribute('opacity', '0');
-    hoverDot.setAttribute('opacity', '0');
+    svg.querySelectorAll('.hbar').forEach(r => { r.style.stroke = 'none'; });
     tooltip.style.opacity = '0';
   }
-  hitArea.addEventListener('pointermove', onMove);
-  hitArea.addEventListener('pointerleave', onLeave);
+  svg.addEventListener('pointermove', onMove);
+  svg.addEventListener('pointerleave', onLeave);
+}
 
-  // ── Stat-tile sparkline (last 24 points, muted + accent end) ──
-  const spark = document.getElementById('hero-spark');
-  const tail = points.slice(-24);
-  if (tail.length >= 2) {
-    const tMin = tail[0].t, tMax = tail[tail.length-1].t;
-    const vMin = Math.min(...tail.map(p=>p.cum)), vMax = Math.max(...tail.map(p=>p.cum));
-    const sx = t => tMax === tMin ? 100 : ((t - tMin) / (tMax - tMin)) * 200;
-    const sy = v => vMax === vMin ? 20 : 38 - ((v - vMin) / (vMax - vMin)) * 36;
-    const sparkPts = tail.map(p => `${sx(p.t).toFixed(1)},${sy(p.cum).toFixed(1)}`).join(' ');
-    const lastUp = tail[tail.length-1].cum >= tail[0].cum;
-    spark.innerHTML = `<polyline points="${sparkPts}" style="fill:none;stroke:var(--ink-3)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
-      <circle cx="${sx(tail[tail.length-1].t).toFixed(1)}" cy="${sy(tail[tail.length-1].cum).toFixed(1)}" r="2.5" style="fill:${lastUp ? 'var(--good-fill)' : 'var(--bad)'}"/>`;
-  } else {
-    spark.innerHTML = '';
-  }
+function renderMiniBars(svgId, points, bars) {
+  const svg = document.getElementById(svgId);
+  if (!points || points.length < 2) { svg.innerHTML = ''; return; }
+  const W = 140, H = 26;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const buckets = bucketPoints(points, bars).map(p => p.cum);
+  let minV = Math.min(0, ...buckets), maxV = Math.max(0, ...buckets);
+  if (minV === maxV) { minV -= 1; maxV += 1; }
+  const range = maxV - minV;
+  const n = buckets.length;
+  const gap = 1.2;
+  const bw = (W / n) - gap;
+  let rects = '';
+  buckets.forEach((v, i) => {
+    const h = Math.max(1.5, ((v - minV) / range) * (H - 2));
+    const x = i * (W / n), y = H - h;
+    const color = v >= 0 ? 'var(--good)' : 'var(--bad)';
+    const op = i >= n - 4 ? 1 : 0.5;
+    rects += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="${color}" opacity="${op}"/>`;
+  });
+  svg.innerHTML = rects;
+}
+
+function renderCharts() {
+  renderHeroBars();
+  renderMiniBars('claude-spark', buildPnlSeries('claude'), 16);
+  renderMiniBars('grok-spark', buildPnlSeries('grok'), 16);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1247,15 +1220,17 @@ async function fetchAll() {
     ]);
 
     renderHero(stats, crypto, perf, leaderboard);
+    renderTicker(stats, crypto);
     renderHealth(stats, crypto, strategist, perf);
     renderBanner(stats);
-    renderBattle(leaderboard, crypto);
+    renderBattle(leaderboard);
     renderStrategy(strategist);
     renderStocks(stats);
     renderCrypto(crypto);
     ALL_TRADES = hist?.trades || [];
     renderCloses();
-    renderPnlChart();
+    renderActivity();
+    renderCharts();
 
     statusLive.className = 'live-pill';
     statusText.textContent = 'live';
@@ -1286,7 +1261,7 @@ async function fetchAll() {
     const next = cur === 'dark' ? 'light' : 'dark';
     document.body.setAttribute('data-theme', next);
     localStorage.setItem('nt-theme', next);
-    renderPnlChart(); // re-render so gradient/stroke CSS vars repaint crisply
+    renderCharts(); // re-render so fill colors repaint crisply after the var swap
   });
 
   document.getElementById('health-link').href = getUrl() + '/health';
@@ -1315,7 +1290,7 @@ async function fetchAll() {
     renderCloses();
   });
 
-  window.addEventListener('resize', () => renderPnlChart());
+  window.addEventListener('resize', () => renderCharts());
 
   fetchAll();
   setInterval(fetchAll, 30000);
