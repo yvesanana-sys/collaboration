@@ -132,20 +132,26 @@ RULES = {
     "exit_B_stop_loss":        0.05,  # 5% hard stop (was 10%)
     "exit_B_time_stop_days":   3,     # 3-day time stop (was 5d)
     # ── Tier-based position sizing (stocks) ──────────────────
-    # More aggressive at small equity, shrinks as account grows
+    # More aggressive at small equity, shrinks as account grows.
+    # tp_pct: quick-flip take-profit override used by check_exit_conditions
+    # et al. — at small equity we bank ANY real gain (net of the ~0%
+    # Alpaca commission) fast and redeploy the cash rather than waiting
+    # for the strategy-specific 8% target. None at the top tier means
+    # "no override" — fall back to the existing per-strategy A/B/T logic
+    # (fixed 8% TP / trailing / Turtle Donchian) unchanged.
     "stock_tiers": [
-        {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3,
+        {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3, "tp_pct": 0.015,
          "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB"],
-         "note": "Tier 1 — AGGRESSIVE SCAN: 8 stocks, 3 positions, 30% risk"},
-        {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3,
+         "note": "Tier 1 — AGGRESSIVE SCAN: 8 stocks, 3 positions, 30% risk, 1.5% quick TP"},
+        {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3, "tp_pct": 0.03,
          "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB", "MSTR", "AMZN"],
-         "note": "Tier 2 — 10 stocks, 3 positions, 25% risk"},
-        {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4,
+         "note": "Tier 2 — 10 stocks, 3 positions, 25% risk, 3% quick TP"},
+        {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4, "tp_pct": 0.05,
          "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB", "MSTR", "AMZN", "GOOGL", "AAPL", "MSFT", "NFLX"],
-         "note": "Tier 3 — 14 stocks, 4 positions, 20% risk"},
-        {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5,
+         "note": "Tier 3 — 14 stocks, 4 positions, 20% risk, 5% quick TP"},
+        {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5, "tp_pct": None,
          "focus": None,  # Full universe — let AI pick anything
-         "note": "Tier 4 — Full universe, 5 positions, 15% risk"},
+         "note": "Tier 4 — Full universe, 5 positions, 15% risk, standard 8% TP (patient)"},
     ],
     # Volatile stocks (wider trail needed — 4% aggressive trail)
     "volatile_stocks": ["TSLA","MSTR","COIN","RKLB","SOFI","AMD","NVDA","PLTR","NFLX"],

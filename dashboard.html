@@ -6,682 +6,648 @@
 <title>NovaTrade</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Söhne&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 /* ============================================================
-   NovaTrade — financial broadsheet aesthetic
-   Light theme (warm paper) by default · OLED dark via toggle
-   Display: Fraunces (serif) · Body: IBM Plex Sans · Mono: IBM Plex Mono
-   Single warm accent (vermilion). Color used only for signal.
+   NovaTrade — live trading terminal
+   OKLCH dark-first theme · amber(Claude) / blue(Grok) accents
+   IBM Plex Sans/Mono · single viewport, no page scroll
 ============================================================ */
 :root {
-  /* Light (cream paper) */
-  --paper:        #f5f1e8;
-  --paper-2:      #efeadd;
-  --paper-3:      #e8e1d0;
-  --ink:          #1a1816;
-  --ink-2:        #3a3530;
-  --ink-3:        #6b645b;
-  --ink-4:        #9b9389;
-  --rule:         #d4cab5;
-  --rule-soft:    rgba(26, 24, 22, 0.08);
-  --accent:       #c1421f;   /* vermilion */
-  --accent-soft:  rgba(193, 66, 31, 0.08);
-  --good:         #0f6b3e;
-  --good-soft:    rgba(15, 107, 62, 0.08);
-  --bad:          #a01d28;
-  --bad-soft:     rgba(160, 29, 40, 0.08);
-  --warn:         #c08116;
-  --warn-soft:    rgba(192, 129, 22, 0.08);
+  --page:        oklch(0.97 0.006 262);
+  --surface:     oklch(0.995 0.003 262);
+  --surface-2:   oklch(0.95 0.007 262);
+  --surface-hov: oklch(0.925 0.008 262);
+  --ink:         oklch(0.18 0.012 262);
+  --ink-2:       oklch(0.42 0.012 262);
+  --ink-3:       oklch(0.52 0.012 262);
+  --ink-4:       oklch(0.6 0.01 262);
+  --rule:        oklch(0.85 0.008 262);
+  --rule-soft:   oklch(0.9 0.007 262);
+  --good:        oklch(0.5 0.15 155);
+  --bad:         oklch(0.52 0.18 25);
+  --claude:      oklch(0.55 0.14 85);
+  --grok:        oklch(0.5 0.13 265);
+  --violet:      oklch(0.5 0.14 300);
+  --off:         oklch(0.62 0.01 262);
 
-  --font-display: 'Fraunces', 'Cambria', 'Georgia', serif;
-  --font-body:    'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono:    'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+  --font: 'IBM Plex Sans', system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, "SF Mono", "Cascadia Code", monospace;
 }
+/* JS always sets an explicit data-theme on <body> (defaulting to
+   "dark") — this bare attribute selector matches that element. */
 [data-theme="dark"] {
-  --paper:        #0c0b0a;
-  --paper-2:      #131210;
-  --paper-3:      #1c1a18;
-  --ink:          #ede8df;
-  --ink-2:        #c8c1b3;
-  --ink-3:        #8a8276;
-  --ink-4:        #5d5750;
-  --rule:         #2a2725;
-  --rule-soft:    rgba(237, 232, 223, 0.08);
-  --accent:       #e8744e;
-  --accent-soft:  rgba(232, 116, 78, 0.10);
-  --good:         #5cb784;
-  --good-soft:    rgba(92, 183, 132, 0.10);
-  --bad:          #e07a7a;
-  --bad-soft:     rgba(224, 122, 122, 0.10);
-  --warn:         #e0b06a;
-  --warn-soft:    rgba(224, 176, 106, 0.10);
+  --page:        oklch(0.165 0.008 262);
+  --surface:     oklch(0.195 0.008 262);
+  --surface-2:   oklch(0.185 0.008 262);
+  --surface-hov: oklch(0.225 0.009 262);
+  --ink:         oklch(0.93 0.005 262);
+  --ink-2:       oklch(0.65 0.008 262);
+  --ink-3:       oklch(0.58 0.008 262);
+  --ink-4:       oklch(0.52 0.008 262);
+  --rule:        oklch(0.27 0.01 262);
+  --rule-soft:   oklch(0.23 0.01 262);
+  --good:        oklch(0.78 0.15 155);
+  --bad:         oklch(0.72 0.16 25);
+  --claude:      oklch(0.8 0.14 85);
+  --grok:        oklch(0.68 0.13 265);
+  --violet:      oklch(0.72 0.13 300);
+  --off:         oklch(0.5 0.008 262);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body {
-  background: var(--paper);
+  height: 100%;
+  overflow: hidden;
+  background: var(--page);
   color: var(--ink);
-  font-family: var(--font-body);
-  font-size: 14px;
-  line-height: 1.5;
+  font-family: var(--font);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
+.good { color: var(--good); }
+.bad  { color: var(--bad); }
 
-/* ─── Layout ─────────────────────────────────────────────── */
+/* ─── Page shell — one viewport, no page scroll ─────────────── */
 .page {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 32px 40px 80px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 18px 10px;
+  gap: 8px;
 }
-@media (max-width: 640px) { .page { padding: 20px 16px 60px; } }
+@media (max-height: 720px), (max-width: 900px) {
+  html, body { overflow: auto; }
+  .page { height: auto; min-height: 100vh; }
+}
 
-/* ─── Masthead ───────────────────────────────────────────── */
-.masthead {
+/* ─── Topbar ─────────────────────────────────────────────────── */
+.topbar {
+  flex: 0 0 auto;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--ink);
-  margin-bottom: 28px;
+  gap: 16px;
 }
-.mast-title {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 28px;
-  letter-spacing: -0.02em;
-  font-variation-settings: 'opsz' 144;
-}
-.mast-title .dot { color: var(--accent); }
-.mast-meta {
+.brand {
   display: flex;
-  gap: 18px;
   align-items: baseline;
+  gap: 8px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.brand .mark {
+  width: 9px; height: 9px;
+  border-radius: 2px;
+  background: var(--claude);
+  display: inline-block;
+  transform: rotate(45deg);
+}
+.brand .tag {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+.topbar-mid {
+  display: flex;
+  align-items: center;
+  gap: 14px;
   font-size: 11px;
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
 }
-.mast-meta .live {
+.live-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   color: var(--ink-2);
+  font-weight: 600;
 }
-.mast-meta .live::before {
+.live-pill::before {
   content: '';
-  width: 6px; height: 6px;
+  width: 7px; height: 7px;
   border-radius: 50%;
   background: var(--good);
-  display: inline-block;
-  box-shadow: 0 0 0 0 var(--good);
   animation: pulse 2.2s ease-out infinite;
 }
-.mast-meta .live.offline::before { background: var(--bad); animation: none; }
-.mast-meta .live.warn::before    { background: var(--warn); animation: none; }
+.live-pill.offline::before { background: var(--bad); animation: none; }
+.live-pill.warn::before    { background: var(--claude); animation: none; }
 @keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(15,107,62,0.45); }
-  70%  { box-shadow: 0 0 0 8px rgba(15,107,62,0); }
-  100% { box-shadow: 0 0 0 0 rgba(15,107,62,0); }
+  0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--good) 55%, transparent); }
+  70%  { box-shadow: 0 0 0 7px color-mix(in oklab, var(--good) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--good) 0%, transparent); }
 }
-.mast-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.btn {
-  background: transparent;
-  border: 1px solid var(--rule);
-  color: var(--ink-2);
-  font-family: var(--font-body);
-  font-size: 11px;
-  font-weight: 500;
-  padding: 5px 10px;
-  border-radius: 2px;
-  cursor: pointer;
-  letter-spacing: 0.02em;
-  transition: border-color 0.15s, color 0.15s;
-}
-.btn:hover { border-color: var(--ink-2); color: var(--ink); }
-.btn-accent { color: var(--accent); border-color: var(--accent-soft); }
-.btn-accent:hover { border-color: var(--accent); }
-
-/* ─── Hero numbers ───────────────────────────────────────── */
-.hero {
-  display: grid;
-  grid-template-columns: 1.4fr 1fr 1fr 1fr 1.1fr;
-  gap: 32px;
-  padding: 32px 0 28px;
-  border-bottom: 1px solid var(--ink);
-  margin-bottom: 0;
-}
-@media (max-width: 900px) {
-  .hero { grid-template-columns: 1fr 1fr; gap: 24px; padding: 20px 0; }
-  .hero .h-cell:first-child { grid-column: 1 / -1; }
-}
-.h-cell .h-label {
-  font-family: var(--font-body);
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-bottom: 8px;
-  font-weight: 500;
-}
-.h-cell .h-val {
-  font-family: var(--font-display);
-  font-weight: 500;
-  font-variation-settings: 'opsz' 144;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-}
-.h-cell.hero-main .h-val { font-size: 64px; }
-.h-cell .h-val        { font-size: 32px; }
-@media (max-width: 900px) {
-  .h-cell.hero-main .h-val { font-size: 52px; }
-  .h-cell .h-val        { font-size: 26px; }
-}
-.h-cell .h-sub {
-  font-size: 11px;
-  color: var(--ink-3);
-  margin-top: 6px;
-  font-variant-numeric: tabular-nums;
-}
-.h-val.good { color: var(--good); }
-.h-val.bad  { color: var(--bad);  }
-.h-val.warn { color: var(--warn); }
-
-/* ─── Health strip ───────────────────────────────────────── */
-.health {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0;
-  padding: 14px 0;
-  border-bottom: 1px solid var(--ink);
-  font-size: 12px;
-  color: var(--ink-2);
-}
-.h-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 0 18px;
-  border-right: 1px solid var(--rule-soft);
-  white-space: nowrap;
-}
-.h-item:first-child { padding-left: 0; }
-.h-item:last-child  { border-right: none; }
-@media (max-width: 700px) {
-  .h-item { padding: 4px 12px; border-right: none; }
-}
-.h-item .dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--good);
-  flex-shrink: 0;
-}
-.h-item.bad  .dot { background: var(--bad); }
-.h-item.warn .dot { background: var(--warn); }
-.h-item.off  .dot { background: var(--ink-4); }
-.h-item .h-key { color: var(--ink-3); }
-.h-item .h-val { color: var(--ink); font-weight: 500; }
-
-.banner {
-  padding: 12px 0;
-  font-size: 13px;
-  color: var(--ink-3);
-  font-style: italic;
-  font-family: var(--font-display);
-  font-variation-settings: 'opsz' 14;
-  border-bottom: 1px solid var(--rule);
-  margin-bottom: 28px;
-}
-.banner.sleep { color: var(--ink-3); }
-.banner.active { color: var(--good); font-style: normal; font-family: var(--font-body); }
-
-/* ─── Grid ───────────────────────────────────────────────── */
-.grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0;
-}
-@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-
-.card {
-  padding: 24px 32px 24px 0;
-  border-right: 1px solid var(--rule);
-  border-bottom: 1px solid var(--rule);
-  min-height: 0;
-}
-.card:nth-child(2n) { padding-right: 0; padding-left: 32px; border-right: none; }
-@media (max-width: 900px) {
-  .card { padding: 20px 0; border-right: none; }
-  .card:nth-child(2n) { padding-left: 0; }
-}
-.card-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 18px;
-}
-.card-title {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 18px;
-  letter-spacing: -0.01em;
-  color: var(--ink);
-  font-variation-settings: 'opsz' 144;
-}
-.card-title .accent { color: var(--accent); }
-.card-meta {
-  font-size: 10px;
-  color: var(--ink-3);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-/* ─── AI Battle ──────────────────────────────────────────── */
-.battle {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 24px;
-}
-.fighter-name {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 15px;
-  margin-bottom: 4px;
-}
-.fighter-name .role {
-  display: inline-block;
-  margin-left: 6px;
-  font-family: var(--font-body);
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-4);
-  font-weight: 400;
-}
-.fighter-pnl {
-  font-family: var(--font-display);
-  font-size: 36px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  margin: 6px 0 10px;
-}
-.fighter-stats {
-  display: flex;
-  gap: 18px;
-  flex-wrap: wrap;
-  font-size: 11px;
-  color: var(--ink-3);
-  font-variant-numeric: tabular-nums;
-  border-top: 1px solid var(--rule-soft);
-  padding-top: 10px;
-}
-.fighter-stats b {
-  color: var(--ink);
-  font-weight: 600;
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-.leader-tag {
-  font-size: 9px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--accent);
-  border: 1px solid var(--accent);
-  padding: 2px 6px;
-  display: inline-block;
-  margin-top: 8px;
-  border-radius: 1px;
-  font-weight: 600;
-}
-
-/* ─── Strategy / Turtle ──────────────────────────────────── */
-.strat-status {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 4px;
-  font-variation-settings: 'opsz' 144;
-}
-.strat-status .turtle { font-size: 26px; }
-.strat-status.active { color: var(--good); }
-.strat-status.classic { color: var(--ink-2); }
-.strat-detail { font-size: 12px; color: var(--ink-3); margin-bottom: 16px; }
-.gate-log { font-family: var(--font-mono); font-size: 11px; line-height: 1.7; color: var(--ink-2); }
-.gate-row { padding: 3px 0; border-bottom: 1px dotted var(--rule-soft); }
-.gate-row:last-child { border-bottom: none; }
-.gate-pass { color: var(--good); margin-right: 6px; }
-.gate-reject { color: var(--bad); margin-right: 6px; }
-
-/* ─── Positions table ────────────────────────────────────── */
-.pos-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
-}
-.pos-table th {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--ink-3);
-  font-weight: 500;
-  text-align: left;
-  padding: 6px 8px 6px 0;
-  border-bottom: 1px solid var(--ink-2);
-}
-.pos-table th.r { text-align: right; padding-right: 0; }
-.pos-table td {
-  padding: 9px 8px 9px 0;
-  font-size: 13px;
-  border-bottom: 1px solid var(--rule-soft);
-}
-.pos-table td.r { text-align: right; padding-right: 0; font-family: var(--font-mono); }
-.pos-table tr:last-child td { border-bottom: none; }
-.pos-table .sym {
-  font-weight: 600;
-  font-family: var(--font-display);
-  font-variation-settings: 'opsz' 14;
-}
-.pos-table .ownr {
-  display: inline-block;
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-4);
-  margin-left: 6px;
-}
-.empty {
-  color: var(--ink-4);
-  font-style: italic;
-  font-family: var(--font-display);
-  font-variation-settings: 'opsz' 14;
-  padding: 18px 0;
-  font-size: 13px;
-}
-.wallet-line {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px dotted var(--rule);
-  font-size: 11px;
-  color: var(--ink-3);
-  font-variant-numeric: tabular-nums;
-}
-
-/* ─── Closes table (full width) ──────────────────────────── */
-.full {
-  padding: 28px 0 8px;
-  border-bottom: 1px solid var(--rule);
-}
-.closes-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
-}
-.closes-table th {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--ink-3);
-  font-weight: 500;
-  text-align: left;
-  padding: 6px 12px 6px 0;
-  border-bottom: 1px solid var(--ink-2);
-}
-.closes-table th.r { text-align: right; padding-right: 0; }
-.closes-table td {
-  padding: 10px 12px 10px 0;
-  font-size: 12px;
-  border-bottom: 1px solid var(--rule-soft);
-  color: var(--ink-2);
-}
-.closes-table td.r { text-align: right; padding-right: 0; font-family: var(--font-mono); }
-.closes-table .sym {
-  font-weight: 600;
-  color: var(--ink);
-  font-family: var(--font-display);
-  font-variation-settings: 'opsz' 14;
-}
-.closes-table .act {
-  font-size: 10px;
-  color: var(--ink-3);
-  letter-spacing: 0.05em;
-}
-
-.good { color: var(--good); }
-.bad  { color: var(--bad); }
-
-/* ─── Footer ─────────────────────────────────────────────── */
-.foot {
-  padding: 28px 0 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  font-size: 10px;
-  color: var(--ink-4);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.foot a { color: var(--ink-3); text-decoration: none; border-bottom: 1px dotted var(--rule); }
-.foot a:hover { color: var(--ink); border-color: var(--ink); }
-
-/* ─── Bot URL input ─────────────────────────────────────── */
+.banner-line { font-size: 11px; color: var(--ink-3); }
+.banner-line.active { color: var(--good); }
+.topbar-actions { display: flex; align-items: center; gap: 8px; }
 .url-input {
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--rule);
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
   color: var(--ink);
   font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 4px 6px;
-  width: 220px;
+  font-size: 10px;
+  padding: 5px 8px;
+  width: 170px;
+  border-radius: 4px;
   outline: none;
 }
-.url-input:focus { border-color: var(--accent); }
-@media (max-width: 700px) { .url-input { width: 130px; } }
-
-/* ─── Pull-on-load animation ────────────────────────────── */
-.fade-in {
-  animation: fade-up 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-}
-@keyframes fade-up {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-/* Stagger child reveals */
-.hero .h-cell:nth-child(1) { animation-delay: 0.00s; }
-.hero .h-cell:nth-child(2) { animation-delay: 0.05s; }
-.hero .h-cell:nth-child(3) { animation-delay: 0.10s; }
-.hero .h-cell:nth-child(4) { animation-delay: 0.15s; }
-.hero .h-cell:nth-child(5) { animation-delay: 0.20s; }
-
-/* Theme toggle icon */
-.theme-btn {
-  background: transparent;
+.url-input:focus { border-color: var(--claude); }
+.icon-btn {
+  background: var(--surface-2);
   border: 1px solid var(--rule);
   color: var(--ink-2);
-  width: 28px; height: 28px;
-  border-radius: 14px;
+  width: 26px; height: 26px;
+  border-radius: 13px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: 12px;
   transition: border-color 0.15s, color 0.15s;
 }
-.theme-btn:hover { border-color: var(--ink-2); color: var(--ink); }
+.icon-btn:hover { border-color: var(--claude); color: var(--ink); }
+
+/* ─── Ticker tape ─────────────────────────────────────────────── */
+.ticker {
+  flex: 0 0 auto;
+  height: 24px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  display: flex;
+  align-items: center;
+}
+.ticker-track {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  white-space: nowrap;
+  padding-left: 14px;
+  animation: ticker-scroll 34s linear infinite;
+  width: max-content;
+}
+.ticker:hover .ticker-track { animation-play-state: paused; }
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+.ticker-item {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.ticker-item b { color: var(--ink); font-weight: 600; }
+.ticker-sep { color: var(--rule); font-size: 10px; }
+
+/* ─── Shared panel chrome ────────────────────────────────────── */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 11px 13px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  flex: 0 0 auto;
+}
+.panel-head h2 { font-size: 12.5px; font-weight: 700; letter-spacing: -0.01em; }
+.panel-head h2 .accent-text { color: var(--claude); }
+.panel-meta {
+  font-size: 9px;
+  color: var(--ink-3);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+.stat-label {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.stat-value {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stat-sub {
+  font-size: 9.5px;
+  color: var(--ink-3);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stat-delta { font-size: 10px; margin-top: 2px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.stat-delta.good { color: var(--good); }
+.stat-delta.bad  { color: var(--bad); }
+
+/* ─── Row 1 — hero equity + stat quad ───────────────────────── */
+.row1 { flex: 0 0 auto; display: grid; grid-template-columns: 1.15fr 1fr; gap: 8px; }
+.hero-card { justify-content: flex-start; }
+.hero-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex: 0 0 auto; }
+.hero-value { font-size: 32px; }
+.hero-breakdown { display: flex; flex-direction: column; gap: 3px; min-width: 90px; }
+.hb-row {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 10.5px; color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.hb-row span:last-child { color: var(--ink-2); font-weight: 600; font-family: var(--font-mono); }
+.hero-chart-wrap { position: relative; height: 78px; margin-top: 10px; flex: 0 0 auto; }
+.hero-chart-wrap svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.chart-empty {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink-3); font-size: 11px; font-style: italic;
+}
+.chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.1s;
+  transform: translate(-50%, -115%);
+  z-index: 5;
+}
+.chart-tooltip .tt-value { font-weight: 700; font-size: 13px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.chart-tooltip .tt-sub { color: var(--ink-3); margin-top: 2px; }
+
+.stat-quad { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 8px; }
+.stat-quad .stat-tile {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 9px 12px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.mini-bar { margin-top: 5px; height: 6px; width: 100%; display: block; border-radius: 3px; overflow: hidden; }
+
+/* ─── Row 2 — AI battle + services ──────────────────────────── */
+.row2 { flex: 0 0 auto; display: grid; grid-template-columns: 1.5fr 1fr; gap: 8px; }
+.pool-bar { height: 6px; border-radius: 3px; background: var(--grok); overflow: hidden; margin: 0 0 10px; display: flex; flex: 0 0 auto; }
+.pool-bar .seg-claude { background: var(--claude); height: 100%; }
+.battle-split { display: flex; align-items: stretch; gap: 12px; flex: 1 1 auto; min-height: 0; }
+.fighter-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
+.fighter-divider { width: 1px; background: var(--rule); flex: 0 0 auto; }
+.fighter-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; margin-bottom: 4px; }
+.fighter-head .swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.fighter-head .swatch.claude { background: var(--claude); }
+.fighter-head .swatch.grok   { background: var(--grok); }
+.lead-tag {
+  font-size: 8px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--good); border: 1px solid color-mix(in oklab, var(--good) 45%, var(--rule));
+  border-radius: 3px; padding: 1px 5px; margin-left: 2px;
+}
+.fighter-pnl { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; margin-bottom: 6px; }
+.fighter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 10px; margin-bottom: 8px; }
+.fighter-grid div { display: flex; flex-direction: column; }
+.fighter-grid b { font-size: 12px; font-variant-numeric: tabular-nums; }
+.fighter-grid span { font-size: 8.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.05em; }
+.mini-spark { height: 26px; width: 100%; display: block; margin-top: auto; }
+
+.health-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; flex: 0 0 auto; }
+.h-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 9.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.h-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--good); flex-shrink: 0; }
+.h-chip.bad  .dot { background: var(--bad); }
+.h-chip.warn .dot { background: var(--claude); }
+.h-chip.off  .dot { background: var(--off); }
+.h-chip .h-key { color: var(--ink-3); }
+.h-chip .h-val { color: var(--ink); font-weight: 600; margin-left: 2px; overflow: hidden; text-overflow: ellipsis; }
+.svc-info { flex: 1 1 auto; min-height: 0; }
+.svc-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 10.5px; color: var(--ink-3);
+  padding: 5px 0; border-bottom: 1px dotted var(--rule-soft);
+}
+.svc-row:last-child { border-bottom: none; }
+.svc-row span:last-child { color: var(--ink); font-weight: 600; font-family: var(--font-mono); text-align: right; }
+
+/* ─── Row 3 — stocks / crypto / activity ────────────────────── */
+.row3 { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.row3 .panel { overflow-y: auto; }
+.pos-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.pos-table td { padding: 4px 0; border-bottom: 1px dotted var(--rule); font-variant-numeric: tabular-nums; }
+.pos-table tr:last-child td { border-bottom: none; }
+.pos-table .sym { font-weight: 700; }
+.pos-table .ownr { font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); margin-left: 4px; }
+.pos-table td.r { text-align: right; font-family: var(--font-mono); }
+.pos-empty { color: var(--ink-3); font-style: italic; font-size: 11px; padding: 6px 0; }
+.wallet-line {
+  margin-top: 6px; padding-top: 6px; border-top: 1px dotted var(--rule);
+  font-size: 10px; color: var(--ink-3); font-variant-numeric: tabular-nums; flex: 0 0 auto;
+}
+
+.activity-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.activity-item {
+  display: flex; align-items: baseline; gap: 7px;
+  padding: 5px 0; border-bottom: 1px dotted var(--rule);
+  font-size: 10.5px;
+}
+.activity-item:last-child { border-bottom: none; }
+.a-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; margin-top: 1px; background: var(--off); }
+.a-dot.good { background: var(--good); }
+.a-dot.bad  { background: var(--bad); }
+.a-time { color: var(--ink-3); font-variant-numeric: tabular-nums; width: 46px; flex-shrink: 0; }
+.a-detail { color: var(--ink-2); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.a-sym { font-weight: 700; color: var(--ink); }
+.a-pnl { font-variant-numeric: tabular-nums; font-size: 10px; flex-shrink: 0; }
+.ownr { font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); }
+
+/* ─── Row 4 — trade history ──────────────────────────────────── */
+.row4 { flex: 1 1 0; min-height: 0; }
+.last-trade-line { font-size: 10px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.last-trade-line .sym { color: var(--ink); font-weight: 700; }
+.hist-toolbar { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px; }
+.hist-search {
+  background: var(--surface-2); border: 1px solid var(--rule); color: var(--ink);
+  font-family: var(--font-mono); font-size: 10px; padding: 4px 8px; border-radius: 4px; width: 120px;
+}
+.hist-search:focus { outline: none; border-color: var(--claude); }
+.hist-search::placeholder { color: var(--ink-3); }
+.chip-group { display: flex; gap: 4px; }
+.chip {
+  background: transparent; border: 1px solid var(--rule); color: var(--ink-3);
+  font-size: 9px; font-weight: 600; letter-spacing: 0.03em;
+  padding: 3px 8px; border-radius: 20px; cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.chip:hover { color: var(--ink); border-color: var(--ink-3); }
+.chip.active { color: var(--claude); border-color: var(--claude); background: color-mix(in oklab, var(--claude) 14%, transparent); }
+.hist-count { font-size: 9px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; margin-left: auto; }
+.hist-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.closes-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.closes-table thead th {
+  position: sticky; top: 0; background: var(--surface);
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); font-weight: 600;
+  text-align: left; padding: 4px 10px 6px 0; border-bottom: 1px solid var(--rule);
+}
+.closes-table th.r { text-align: right; padding-right: 0; }
+.closes-table td { padding: 6px 10px 6px 0; font-size: 11px; border-bottom: 1px dotted var(--rule); color: var(--ink-2); }
+.closes-table td.r { text-align: right; padding-right: 0; font-family: var(--font-mono); }
+.closes-table .sym { font-weight: 700; color: var(--ink); }
+.closes-table .act { font-size: 9px; color: var(--ink-3); letter-spacing: 0.04em; }
+.closes-table tbody tr.trade-row { cursor: pointer; }
+.closes-table tbody tr.trade-row:hover td { background: var(--surface-2); }
+.closes-table tr.detail-row td {
+  padding: 3px 10px 10px 0; border-bottom: 1px dotted var(--rule);
+  font-size: 10px; color: var(--ink-3); font-family: var(--font-mono); background: var(--surface-2);
+}
+.detail-empty { font-family: var(--font); font-style: italic; }
+.load-more-row td { text-align: center; padding: 10px 0 4px !important; border-bottom: none !important; background: transparent !important; }
+.load-more-btn {
+  background: transparent; border: 1px solid var(--rule); color: var(--ink-2);
+  font-size: 10px; font-weight: 600; padding: 5px 14px; border-radius: 20px; cursor: pointer;
+}
+.load-more-btn:hover { border-color: var(--claude); color: var(--claude); }
+.empty { color: var(--ink-3); font-style: italic; padding: 12px 0; font-size: 11px; }
+
+/* ─── Footer ──────────────────────────────────────────────────── */
+.foot {
+  flex: 0 0 auto; display: flex; justify-content: space-between;
+  font-size: 9px; color: var(--ink-3); letter-spacing: 0.06em; text-transform: uppercase;
+}
+.foot a { color: var(--ink-3); text-decoration: none; border-bottom: 1px dotted var(--rule); }
+.foot a:hover { color: var(--ink); border-color: var(--ink); }
+
+/* ─── Responsive fallback (narrow / short) ───────────────────── */
+@media (max-width: 1180px) {
+  .row1 { grid-template-columns: 1fr; }
+  .row2 { grid-template-columns: 1fr; }
+  .row3 { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
+}
+@media (max-width: 700px) {
+  .row3 { grid-template-columns: 1fr; }
+  .stat-quad { grid-template-columns: 1fr 1fr; }
+}
 </style>
 </head>
-<body data-theme="light">
+<body data-theme="dark">
 
 <div class="page">
 
-  <!-- ── Masthead ─────────────────────────────────────────── -->
-  <header class="masthead">
-    <div class="mast-title">NovaTrade<span class="dot">.</span></div>
-    <div class="mast-meta">
-      <input class="url-input" id="bot-url" type="text" placeholder="bot url"/>
-      <span class="live" id="status-live"><span id="status-text">connecting…</span></span>
-      <span id="last-update">—</span>
+  <!-- ── Topbar ──────────────────────────────────────────────── -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark"></span>NovaTrade
+      <span class="tag">live terminal</span>
     </div>
-    <div class="mast-actions">
-      <button class="btn" onclick="fetchAll()">refresh</button>
-      <button class="theme-btn" id="theme-toggle" title="toggle theme">◐</button>
+    <div class="topbar-mid">
+      <span class="live-pill" id="status-live"><span id="status-text">connecting…</span></span>
+      <span id="last-update">—</span>
+      <span class="banner-line" id="banner">—</span>
+    </div>
+    <div class="topbar-actions">
+      <input class="url-input" id="bot-url" type="text" placeholder="bot url"/>
+      <button class="icon-btn" onclick="fetchAll()" title="refresh">⟳</button>
+      <button class="icon-btn" id="theme-toggle" title="toggle theme">◐</button>
     </div>
   </header>
 
-  <!-- ── Hero numbers ─────────────────────────────────────── -->
-  <section class="hero">
-    <div class="h-cell hero-main fade-in">
-      <div class="h-label">Combined Equity</div>
-      <div class="h-val" id="hero-equity">—</div>
-      <div class="h-sub" id="hero-equity-sub">stocks + crypto</div>
-    </div>
-    <div class="h-cell fade-in">
-      <div class="h-label">Day P&amp;L</div>
-      <div class="h-val" id="hero-day">—</div>
-      <div class="h-sub" id="hero-day-pct">—</div>
-    </div>
-    <div class="h-cell fade-in">
-      <div class="h-label">Closed Trades</div>
-      <div class="h-val" id="hero-closed">—</div>
-      <div class="h-sub" id="hero-closed-sub">deduped</div>
-    </div>
-    <div class="h-cell fade-in">
-      <div class="h-label">Win Rate</div>
-      <div class="h-val" id="hero-wr">—</div>
-      <div class="h-sub" id="hero-wr-sub">—</div>
-    </div>
-    <div class="h-cell fade-in">
-      <div class="h-label">Open Positions</div>
-      <div class="h-val" id="hero-pos">—</div>
-      <div class="h-sub" id="hero-pos-sub">—</div>
-    </div>
-  </section>
+  <!-- ── Ticker tape ──────────────────────────────────────────── -->
+  <div class="ticker" id="ticker">
+    <div class="ticker-track" id="ticker-track"><span class="ticker-item">loading…</span></div>
+  </div>
 
-  <!-- ── Health strip ─────────────────────────────────────── -->
-  <section class="health">
-    <span class="h-item" id="h-bot"><span class="dot"></span><span class="h-key">bot</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-turtle"><span class="dot"></span><span class="h-key">turtle</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-claude"><span class="dot"></span><span class="h-key">claude</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-grok"><span class="dot"></span><span class="h-key">grok</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-fees"><span class="dot"></span><span class="h-key">fees</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-data"><span class="dot"></span><span class="h-key">data</span><span class="h-val">—</span></span>
-  </section>
-
-  <!-- ── State banner ─────────────────────────────────────── -->
-  <div class="banner" id="banner">loading…</div>
-
-  <!-- ── Two-column grid ──────────────────────────────────── -->
-  <div class="grid">
-
-    <!-- AI Battle -->
-    <div class="card">
-      <div class="card-head">
-        <h2 class="card-title">AI <span class="accent">Battle</span></h2>
-        <span class="card-meta" id="battle-meta">—</span>
-      </div>
-      <div class="battle">
+  <!-- ── Row 1: hero equity + stat quad ──────────────────────── -->
+  <div class="row1">
+    <section class="panel hero-card">
+      <div class="hero-top">
         <div>
-          <div class="fighter-name">Claude <span class="role" id="claude-role">tactician</span></div>
-          <div class="fighter-pnl" id="claude-pnl">—</div>
-          <div class="fighter-stats">
-            <span><b id="claude-trades">0</b> trades</span>
-            <span><b id="claude-wr">—</b> win rate</span>
-            <span><b id="claude-wins">0</b> wins</span>
-            <span><b id="claude-open">0</b> open</span>
-          </div>
-          <div id="claude-leader-tag"></div>
+          <div class="stat-label">Total equity</div>
+          <div class="stat-value hero-value" id="hero-equity">—</div>
+          <div class="stat-delta" id="hero-day-delta">—</div>
         </div>
-        <div>
-          <div class="fighter-name">Grok <span class="role" id="grok-role">tactician</span></div>
-          <div class="fighter-pnl" id="grok-pnl">—</div>
-          <div class="fighter-stats">
-            <span><b id="grok-trades">0</b> trades</span>
-            <span><b id="grok-wr">—</b> win rate</span>
-            <span><b id="grok-wins">0</b> wins</span>
-            <span><b id="grok-open">0</b> open</span>
-          </div>
-          <div id="grok-leader-tag"></div>
+        <div class="hero-breakdown">
+          <div class="hb-row"><span>Stocks</span><span id="hb-stocks">—</span></div>
+          <div class="hb-row"><span>Crypto</span><span id="hb-crypto">—</span></div>
+          <div class="hb-row"><span>Cash</span><span id="hb-cash">—</span></div>
         </div>
       </div>
-    </div>
-
-    <!-- Strategy / Turtle -->
-    <div class="card">
-      <div class="card-head">
-        <h2 class="card-title">Strategy</h2>
-        <span class="card-meta" id="strat-meta">—</span>
+      <div class="hero-chart-wrap" id="hero-chart-wrap">
+        <svg id="hero-bars" viewBox="0 0 480 110" preserveAspectRatio="none"></svg>
+        <div class="chart-tooltip" id="chart-tooltip"></div>
       </div>
-      <div class="strat-status" id="strat-status"><span class="turtle">—</span></div>
-      <div class="strat-detail" id="strat-detail">loading…</div>
-      <div class="gate-log" id="gate-log">
-        <div class="empty">no recent gate activity</div>
+    </section>
+    <div class="stat-quad">
+      <div class="stat-tile">
+        <div class="stat-label">Realized P&amp;L</div>
+        <div class="stat-value" id="hero-realized">—</div>
+        <div class="stat-sub" id="hero-realized-sub">—</div>
       </div>
-    </div>
-
-    <!-- Stock positions -->
-    <div class="card">
-      <div class="card-head">
-        <h2 class="card-title">Stocks</h2>
-        <span class="card-meta" id="stock-meta">—</span>
+      <div class="stat-tile">
+        <div class="stat-label">Win rate</div>
+        <div class="stat-value" id="hero-wr">—</div>
+        <svg class="mini-bar" id="wr-bar" viewBox="0 0 100 6" preserveAspectRatio="none"></svg>
+        <div class="stat-sub" id="hero-wr-sub">—</div>
       </div>
-      <table class="pos-table" id="stock-table">
-        <thead>
-          <tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th></tr>
-        </thead>
-        <tbody id="stock-rows">
-          <tr><td colspan="3" class="empty">no open stock positions</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Crypto positions -->
-    <div class="card">
-      <div class="card-head">
-        <h2 class="card-title">Crypto</h2>
-        <span class="card-meta" id="crypto-meta">—</span>
+      <div class="stat-tile">
+        <div class="stat-label">Closed trades</div>
+        <div class="stat-value" id="hero-closed">—</div>
+        <div class="stat-sub" id="hero-closed-sub">—</div>
       </div>
-      <table class="pos-table" id="crypto-table">
-        <thead>
-          <tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th></tr>
-        </thead>
-        <tbody id="crypto-rows">
-          <tr><td colspan="3" class="empty">no open crypto positions</td></tr>
-        </tbody>
-      </table>
-      <div class="wallet-line" id="wallet-line">—</div>
+      <div class="stat-tile">
+        <div class="stat-label">Open positions</div>
+        <div class="stat-value" id="hero-pos">—</div>
+        <div class="stat-sub" id="hero-pos-sub">—</div>
+      </div>
     </div>
   </div>
 
-  <!-- ── Recent closes (full width) ───────────────────────── -->
-  <section class="full">
-    <div class="card-head" style="border:none;">
-      <h2 class="card-title">Recent <span class="accent">closes</span></h2>
-      <span class="card-meta">deduplicated · last 20</span>
+  <!-- ── Row 2: AI battle + services ─────────────────────────── -->
+  <div class="row2">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>AI <span class="accent-text">battle</span></h2>
+        <span class="panel-meta" id="battle-meta">—</span>
+      </div>
+      <div class="pool-bar" id="pool-bar"><div class="seg-claude" id="pool-seg-claude" style="width:50%"></div></div>
+      <div class="battle-split">
+        <div class="fighter-col" data-ai="claude">
+          <div class="fighter-head"><span class="swatch claude"></span>Claude<span class="lead-tag" id="lead-claude" hidden>leading</span></div>
+          <div class="fighter-pnl" id="claude-pnl">—</div>
+          <div class="fighter-grid">
+            <div><b id="claude-trades">0</b><span>trades</span></div>
+            <div><b id="claude-wr">—</b><span>win rate</span></div>
+            <div><b id="claude-wins">0</b><span>wins</span></div>
+            <div><b id="claude-open">0</b><span>open</span></div>
+          </div>
+          <svg class="mini-spark" id="claude-spark" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="fighter-divider"></div>
+        <div class="fighter-col" data-ai="grok">
+          <div class="fighter-head"><span class="swatch grok"></span>Grok<span class="lead-tag" id="lead-grok" hidden>leading</span></div>
+          <div class="fighter-pnl" id="grok-pnl">—</div>
+          <div class="fighter-grid">
+            <div><b id="grok-trades">0</b><span>trades</span></div>
+            <div><b id="grok-wr">—</b><span>win rate</span></div>
+            <div><b id="grok-wins">0</b><span>wins</span></div>
+            <div><b id="grok-open">0</b><span>open</span></div>
+          </div>
+          <svg class="mini-spark" id="grok-spark" preserveAspectRatio="none"></svg>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Services</h2></div>
+      <div class="health-grid" id="health-strip">
+        <span class="h-chip" id="h-bot"><span class="dot"></span><span class="h-key">bot</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-turtle"><span class="dot"></span><span class="h-key">turtle</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-claude"><span class="dot"></span><span class="h-key">claude</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-grok"><span class="dot"></span><span class="h-key">grok</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-fees"><span class="dot"></span><span class="h-key">fees</span><span class="h-val">—</span></span>
+        <span class="h-chip" id="h-data"><span class="dot"></span><span class="h-key">data</span><span class="h-val">—</span></span>
+      </div>
+      <div class="svc-info">
+        <div class="svc-row"><span>Strategy</span><span id="svc-strategy">—</span></div>
+        <div class="svc-row"><span>Pool split (C/G)</span><span id="svc-pool">—</span></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ── Row 3: stocks / crypto / activity ───────────────────── -->
+  <div class="row3">
+    <section class="panel">
+      <div class="panel-head"><h2>Stocks</h2><span class="panel-meta" id="stock-meta"></span></div>
+      <table class="pos-table" id="stock-table">
+        <tbody id="stock-rows"><tr><td class="pos-empty" colspan="3">no open stock positions</td></tr></tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Crypto</h2><span class="panel-meta" id="crypto-meta"></span></div>
+      <table class="pos-table" id="crypto-table">
+        <tbody id="crypto-rows"><tr><td class="pos-empty" colspan="3">no open crypto positions</td></tr></tbody>
+      </table>
+      <div class="wallet-line" id="wallet-line">—</div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Activity</h2><span class="panel-meta" id="activity-last">—</span></div>
+      <div class="activity-list" id="activity-list"></div>
+    </section>
+  </div>
+
+  <!-- ── Row 4: trade history ────────────────────────────────── -->
+  <section class="panel row4">
+    <div class="panel-head">
+      <h2>Trade <span class="accent-text">history</span></h2>
+      <span class="last-trade-line" id="last-trade-line">—</span>
     </div>
-    <table class="closes-table">
-      <thead>
-        <tr>
-          <th>Time</th>
-          <th>Symbol</th>
-          <th>Action</th>
-          <th>Owner</th>
-          <th class="r">P&amp;L %</th>
-          <th class="r">P&amp;L $</th>
-        </tr>
-      </thead>
-      <tbody id="closes-rows">
-        <tr><td colspan="6" class="empty">no closes recorded</td></tr>
-      </tbody>
-    </table>
+    <div class="hist-toolbar">
+      <input class="hist-search" id="hist-search" type="text" placeholder="filter symbol…"/>
+      <div class="chip-group" id="hist-view-chips">
+        <button class="chip active" data-view="closes">closes</button>
+        <button class="chip" data-view="all">all activity</button>
+      </div>
+      <div class="chip-group" id="hist-owner-chips">
+        <button class="chip active" data-owner="">all</button>
+        <button class="chip" data-owner="claude">claude</button>
+        <button class="chip" data-owner="grok">grok</button>
+        <button class="chip" data-owner="other">other</button>
+      </div>
+      <span class="hist-count" id="hist-count">—</span>
+    </div>
+    <div class="hist-scroll">
+      <table class="closes-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Symbol</th>
+            <th>Action</th>
+            <th>Owner</th>
+            <th class="r">P&amp;L %</th>
+            <th class="r">P&amp;L $</th>
+          </tr>
+        </thead>
+        <tbody id="closes-rows">
+          <tr><td colspan="6" class="empty">no trades recorded</td></tr>
+        </tbody>
+      </table>
+    </div>
   </section>
 
   <footer class="foot">
@@ -712,7 +678,7 @@ async function apiFetch(path) {
 // ════════════════════════════════════════════════════════════
 const fmt$ = v => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmt$0 = v => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-const fmtSigned = v => (v >= 0 ? '+' : '') + fmt$(Math.abs(v));
+const fmtSigned = v => (v >= 0 ? '+' : '-') + fmt$(Math.abs(v));
 const fmtPct = v => (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
 const cls = v => v > 0 ? 'good' : v < 0 ? 'bad' : '';
 const setT = (id, txt, klass) => {
@@ -732,46 +698,95 @@ const tsToLocal = ts => {
     return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   } catch { return '—'; }
 };
+const timeAgo = ts => {
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts.endsWith('Z') ? ts : ts + 'Z');
+    const secs = Math.max(0, (Date.now() - d.getTime()) / 1000);
+    if (secs < 60) return 'just now';
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+  } catch { return '—'; }
+};
 
 // ════════════════════════════════════════════════════════════
-// RENDERERS
+// RENDERERS — hero / ticker / health / battle / services / positions
 // ════════════════════════════════════════════════════════════
+function renderWrBar(wins, losses) {
+  const svg = document.getElementById('wr-bar');
+  const total = wins + losses;
+  if (!total) { svg.innerHTML = ''; return; }
+  const wPct = (wins / total) * 100;
+  svg.innerHTML = `<rect x="0" y="0" width="${wPct.toFixed(1)}" height="6" rx="2" fill="var(--good)"/>` +
+    `<rect x="${wPct.toFixed(1)}" y="0" width="${(100 - wPct).toFixed(1)}" height="6" rx="2" fill="var(--bad)"/>`;
+}
+
 function renderHero(stats, crypto, perf, leaderboard) {
   const stockEq = parseFloat(stats?.equity || 0);
   const cryptoEq = parseFloat(crypto?.wallet?.total_value || 0);
+  const cash = parseFloat(stats?.cash || 0);
   const combined = stockEq + cryptoEq;
-  setT('hero-equity', fmt$(combined));
-  setT('hero-equity-sub', `stocks ${fmt$0(stockEq)} · crypto ${fmt$0(cryptoEq)}`);
+  setT('hero-equity', fmt$0(combined));
 
-  // Day P&L: stock daily (claude+grok). Crypto day P&L not exposed by
-  // /crypto_status, so we label this as "stocks" to be honest.
   const stockDay = parseFloat(stats?.claude_daily_pnl || 0) + parseFloat(stats?.grok_daily_pnl || 0);
-  const day = stockDay;
-  setT('hero-day', fmtSigned(day), day > 0 ? 'good' : day < 0 ? 'bad' : '');
-  const dayPct = stockEq ? (day / (stockEq - day)) * 100 : 0;
-  setT('hero-day-pct', `stocks · ${isFinite(dayPct) ? fmtPct(dayPct) : '—'}`);
+  setT('hero-day-delta', `${fmtSigned(stockDay)} today`, stockDay > 0 ? 'good' : stockDay < 0 ? 'bad' : '');
+  setT('hb-stocks', fmt$0(stockEq));
+  setT('hb-crypto', fmt$0(cryptoEq));
+  setT('hb-cash', fmt$0(cash));
 
-  // Closed trades (from perf, which reads persistent trade_history only — no dupes)
+  const totalPnl = perf?.summary?.total_pnl || 0;
+  setT('hero-realized', fmtSigned(totalPnl), totalPnl > 0 ? 'good' : totalPnl < 0 ? 'bad' : '');
   const totalClosed = perf?.summary?.total_closed_trades || 0;
-  setT('hero-closed', totalClosed);
+  setT('hero-realized-sub', `${totalClosed} trades`);
+
   const wr = parseFloat(perf?.summary?.win_rate_pct || 0);
-  setT('hero-wr', totalClosed > 0 ? wr.toFixed(0) + '%' : '—', totalClosed > 0 ? (wr >= 50 ? 'good' : 'bad') : '');
+  setT('hero-wr', totalClosed > 0 ? wr.toFixed(0) + '%' : '—');
   const wins = (perf?.by_ai?.claude?.wins || 0) + (perf?.by_ai?.grok?.wins || 0);
-  setT('hero-wr-sub', totalClosed > 0 ? `${wins} wins · ${totalClosed - wins} losses` : 'no closes yet');
+  const losses = Math.max(0, totalClosed - wins);
+  setT('hero-wr-sub', totalClosed > 0 ? `${wins}w / ${losses}l` : 'no closes yet');
+  renderWrBar(wins, losses);
+
+  setT('hero-closed', totalClosed);
+  setT('hero-closed-sub', totalClosed ? 'all-time' : '—');
 
   const stockPos = (stats?.positions || []).length;
   const cryptoPos = crypto?.position_count || 0;
-  setT('hero-pos', (stockPos + cryptoPos));
+  setT('hero-pos', stockPos + cryptoPos);
   setT('hero-pos-sub', `${stockPos} stock · ${cryptoPos} crypto`);
 }
 
+function buildTickerItems(stats, crypto) {
+  const items = [];
+  (stats?.positions || []).forEach(p => items.push({ sym: p.symbol, pct: parseFloat(p.pnl_pct || 0) }));
+  const cp = crypto?.bot_positions || {};
+  Object.keys(cp).forEach(sym => items.push({ sym, pct: parseFloat(cp[sym].pnl_pct || 0) }));
+  return items;
+}
+
+function renderTicker(stats, crypto) {
+  const track = document.getElementById('ticker-track');
+  const items = buildTickerItems(stats, crypto);
+  if (!items.length) {
+    track.innerHTML = '<span class="ticker-item">no active positions</span>';
+    track.style.animation = 'none';
+    return;
+  }
+  const html = items.map(it =>
+    `<span class="ticker-item"><b>${it.sym}</b><span class="${it.pct >= 0 ? 'good' : 'bad'}">${fmtPct(it.pct)}</span></span>`
+  ).join('<span class="ticker-sep">•</span>');
+  track.innerHTML = html + '<span class="ticker-sep">•</span>' + html + '<span class="ticker-sep">•</span>';
+  track.style.animation = '';
+}
+
 function renderHealth(stats, crypto, strategist, perf) {
-  // bot
   const botEl = document.getElementById('h-bot');
   botEl.querySelector('.h-val').textContent = stats?.error ? 'error' : 'online';
-  botEl.className = 'h-item ' + (stats?.error ? 'bad' : '');
+  botEl.className = 'h-chip ' + (stats?.error ? 'bad' : '');
 
-  // turtle: are both AIs using Turtle?
   const claudeS = strategist?.ais?.claude?.current_strategy;
   const grokS = strategist?.ais?.grok?.current_strategy;
   const claudeTurtle = claudeS?.strategy_type === 'turtle';
@@ -782,146 +797,90 @@ function renderHealth(stats, crypto, strategist, perf) {
   else if (claudeTurtle || grokTurtle) { tStat = claudeTurtle ? 'claude only' : 'grok only'; tCls = 'warn'; }
   else { tStat = 'classic'; tCls = 'off'; }
   turtleEl.querySelector('.h-val').textContent = tStat;
-  turtleEl.className = 'h-item ' + tCls;
+  turtleEl.className = 'h-chip ' + tCls;
 
-  // claude credits / health
   const cHealthy = stats?.claude_healthy && stats?.claude_credits_ok;
   const cEl = document.getElementById('h-claude');
   cEl.querySelector('.h-val').textContent = cHealthy ? 'ok' : (stats?.claude_fail_reason || 'unknown');
-  cEl.className = 'h-item ' + (cHealthy ? '' : 'bad');
+  cEl.className = 'h-chip ' + (cHealthy ? '' : 'bad');
 
-  // grok credits / health
   const gHealthy = stats?.grok_healthy && stats?.grok_credits_ok;
   const gEl = document.getElementById('h-grok');
   gEl.querySelector('.h-val').textContent = gHealthy ? 'ok' : (stats?.grok_fail_reason || 'unknown');
-  gEl.className = 'h-item ' + (gHealthy ? '' : 'bad');
+  gEl.className = 'h-chip ' + (gHealthy ? '' : 'bad');
 
-  // fees — show effective round-trip rate + BNB discount status
   const feesEl = document.getElementById('h-fees');
-  if (feesEl) {
-    const f = crypto?.fees;
-    if (f) {
-      const rtPct = (f.round_trip * 100).toFixed(3);
-      const bnb = f.bnb_active ? '🔶 BNB on' : 'no BNB';
-      feesEl.querySelector('.h-val').textContent = `${rtPct}% rt · ${bnb}`;
-      feesEl.className = 'h-item ' + (f.bnb_active ? '' : 'warn');
-    } else {
-      feesEl.querySelector('.h-val').textContent = 'unknown';
-      feesEl.className = 'h-item off';
-    }
+  const f = crypto?.fees;
+  if (f) {
+    const rtPct = (f.round_trip * 100).toFixed(3);
+    const bnb = f.bnb_active ? 'BNB on' : 'no BNB';
+    feesEl.querySelector('.h-val').textContent = `${rtPct}% · ${bnb}`;
+    feesEl.className = 'h-chip ' + (f.bnb_active ? '' : 'warn');
+  } else {
+    feesEl.querySelector('.h-val').textContent = 'unknown';
+    feesEl.className = 'h-chip off';
   }
 
-  // data quality — flag if leaderboard trades > perf trades (the duplicate bug)
   const dataEl = document.getElementById('h-data');
-  const perfTrades = perf?.summary?.total_closed_trades || 0;
-  // Note: leaderboard counts CRYPTO ONLY, perf counts ALL. Hard to dedup cleanly here.
-  // Use a simpler signal: data is "ok" unless an endpoint errored.
   const dataOk = !stats?.error && !crypto?.error;
   dataEl.querySelector('.h-val').textContent = dataOk ? 'ok' : 'partial';
-  dataEl.className = 'h-item ' + (dataOk ? '' : 'warn');
+  dataEl.className = 'h-chip ' + (dataOk ? '' : 'warn');
 }
 
 function renderBanner(stats) {
   const el = document.getElementById('banner');
   if (!stats || stats.error) {
     el.textContent = stats?.error || 'no data';
-    el.className = 'banner bad';
+    el.className = 'banner-line bad';
     return;
   }
   if (stats.ai_sleeping) {
     el.textContent = `sleeping — ${stats.sleep_reason || 'no reason given'}`;
-    el.className = 'banner sleep';
+    el.className = 'banner-line';
   } else {
     el.textContent = stats.wake_reason ? `active — ${stats.wake_reason}` : 'active';
-    el.className = 'banner active';
+    el.className = 'banner-line active';
   }
 }
 
-function renderBattle(lb, crypto) {
+function renderBattle(lb) {
   if (!lb || lb.error) {
-    setT('battle-meta', 'leaderboard unavailable');
+    setT('battle-meta', 'unavailable');
     return;
   }
-  setT('battle-meta', `${lb.total_closed || 0} crypto closes · pool ${(lb.pool_split?.claude_pct * 100 || 50).toFixed(0)}/${(lb.pool_split?.grok_pct * 100 || 50).toFixed(0)}`);
+  setT('battle-meta', `${lb.total_closed || 0} closes`);
+  const claudePct = (lb.pool_split?.claude_pct * 100) || 50;
+  const grokPct = (lb.pool_split?.grok_pct * 100) || (100 - claudePct);
+  document.getElementById('pool-seg-claude').style.width = claudePct.toFixed(0) + '%';
+  setT('svc-pool', `${claudePct.toFixed(0)}/${grokPct.toFixed(0)}`);
 
-  for (const [ai, side] of [['claude', lb.claude || {}], ['grok', lb.grok || {}]]) {
-    const pnl = parseFloat(side.total_pnl || 0);
+  const cSide = lb.claude || {}, gSide = lb.grok || {};
+  const cPnl = parseFloat(cSide.total_pnl || 0), gPnl = parseFloat(gSide.total_pnl || 0);
+  for (const [ai, side, pnl] of [['claude', cSide, cPnl], ['grok', gSide, gPnl]]) {
     setT(`${ai}-pnl`, side.trades ? fmtSigned(pnl) : '—', pnl > 0 ? 'good' : pnl < 0 ? 'bad' : '');
     setT(`${ai}-trades`, side.trades || 0);
-    // win_rate is already 0–100 from /leaderboard (single multiplication)
     setT(`${ai}-wr`, side.trades ? (side.win_rate || 0).toFixed(0) + '%' : '—');
     setT(`${ai}-wins`, side.wins || 0);
     setT(`${ai}-open`, side.open_positions || 0);
-    const lt = document.getElementById(`${ai}-leader-tag`);
-    if (lb.leader === ai) {
-      lt.innerHTML = `<span class="leader-tag">leading by ${fmt$(lb.margin_usd || 0)}</span>`;
-    } else {
-      lt.innerHTML = '';
-    }
   }
+  const bothTraded = cSide.trades && gSide.trades;
+  document.getElementById('lead-claude').hidden = !(bothTraded && cPnl > gPnl);
+  document.getElementById('lead-grok').hidden = !(bothTraded && gPnl > cPnl);
 }
 
 function renderStrategy(strategist) {
-  // Three states we care about:
-  //   1. Real error (endpoint failed, module missing)  → red "error"
-  //   2. enabled === false (Phase A by design)         → show playbook + "dormant" tag
-  //   3. enabled === true                              → full strategist info
-  // In ALL cases where we have a payload, render the current playbook —
-  // because the playbook is active even when the strategist (the thing
-  // that rewrites the playbook) is dormant.
-
-  const statusEl = document.getElementById('strat-status');
-
-  if (!strategist || strategist.error) {
-    // Genuine error fetching /strategy
-    setT('strat-status', '—');
-    setT('strat-detail', strategist?.error
-      ? `endpoint error: ${strategist.error}`
-      : 'strategist unreachable');
-    setT('strat-meta', 'error');
-    return;
-  }
-
-  // Module unloaded? Show that clearly — different from "disabled by design"
-  if (strategist.reason === "module not loaded") {
-    statusEl.innerHTML = '<span>—</span> Not loaded';
-    statusEl.className = 'strat-status classic';
-    setT('strat-detail', 'strategic_brain module not imported on bot');
-    setT('strat-meta', '');
-    return;
-  }
-
-  // We have a payload. Read the current playbook (active even if strategist is dormant).
+  if (!strategist || strategist.error) { setT('svc-strategy', 'unreachable'); return; }
+  if (strategist.reason === 'module not loaded') { setT('svc-strategy', 'not loaded'); return; }
   const cs = strategist?.ais?.claude?.current_strategy || {};
   const gs = strategist?.ais?.grok?.current_strategy || {};
-  const cT = cs.strategy_type === 'turtle';
-  const gT = gs.strategy_type === 'turtle';
+  const cT = cs.strategy_type === 'turtle', gT = gs.strategy_type === 'turtle';
   const isDormant = strategist.enabled === false;
-  const phaseTag  = isDormant ? ` · <span style="color:var(--ink-3);font-size:11px;font-family:var(--font-body);font-weight:400;">dormant (Phase A)</span>` : '';
-
   if (cT && gT) {
-    statusEl.innerHTML = `<span class="turtle">🐢</span> Turtle${phaseTag}`;
-    statusEl.className = 'strat-status active';
-    setT('strat-detail', `System 1 · ${cs.rules?.entry_donchian_period || 20}d entry · ${cs.rules?.exit_donchian_period || 10}d exit · 2N stop · 1% risk`);
-    setT('strat-meta', isDormant ? `playbook frozen · v${cs.version || 1}` : `v${cs.version || 1}`);
+    setT('svc-strategy', `Turtle · ${cs.rules?.entry_donchian_period || 20}d/${cs.rules?.exit_donchian_period || 10}d${isDormant ? ' (dormant)' : ''}`);
   } else if (cT || gT) {
-    statusEl.innerHTML = `<span class="turtle">🐢</span> Turtle (partial)${phaseTag}`;
-    statusEl.className = 'strat-status active';
-    setT('strat-detail', `Only ${cT ? 'Claude' : 'Grok'} on Turtle. Other still on classic.`);
-    setT('strat-meta', isDormant ? 'playbook frozen · partial' : 'partial');
-  } else if (cs.name || gs.name) {
-    statusEl.innerHTML = `<span>—</span> Classic${phaseTag}`;
-    statusEl.className = 'strat-status classic';
-    setT('strat-detail', cs.name || gs.name || 'Default playbook · % stops · fixed TP');
-    setT('strat-meta', isDormant ? `playbook frozen · v${cs.version || 0}` : `v${cs.version || 0}`);
+    setT('svc-strategy', `${cT ? 'Claude' : 'Grok'} turtle, other classic`);
   } else {
-    // Phase A but state files haven't been initialized yet
-    statusEl.innerHTML = `<span>—</span> No playbook yet${phaseTag}`;
-    statusEl.className = 'strat-status classic';
-    setT('strat-detail', isDormant
-      ? 'Phase A — strategist plumbing only, no playbooks written yet'
-      : 'awaiting first strategist activation');
-    setT('strat-meta', '');
+    setT('svc-strategy', isDormant ? 'Classic (Phase A)' : (cs.name || gs.name || 'Classic'));
   }
 }
 
@@ -929,7 +888,7 @@ function renderStocks(stats) {
   const positions = stats?.positions || [];
   const tbody = document.getElementById('stock-rows');
   if (!positions.length) {
-    tbody.innerHTML = '<tr><td colspan="3" class="empty">no open stock positions</td></tr>';
+    tbody.innerHTML = '<tr><td class="pos-empty" colspan="3">no open stock positions</td></tr>';
     setT('stock-meta', '');
     return;
   }
@@ -939,8 +898,8 @@ function renderStocks(stats) {
     const pnlPct = parseFloat(p.pnl_pct || 0);
     const pnl = parseFloat(p.pnl || 0);
     totalPnl += pnl;
-    const own = p.owner === 'claude' ? '<span class="ownr">claude</span>' :
-                p.owner === 'grok'   ? '<span class="ownr">grok</span>'   : '';
+    const own = p.owner === 'claude' ? '<span class="ownr">C</span>' :
+                p.owner === 'grok'   ? '<span class="ownr">G</span>'   : '';
     rows += `<tr>
       <td><span class="sym">${p.symbol}</span>${own}</td>
       <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
@@ -948,7 +907,7 @@ function renderStocks(stats) {
     </tr>`;
   }
   tbody.innerHTML = rows;
-  setT('stock-meta', `${positions.length} · total ${fmtSigned(totalPnl)}`);
+  setT('stock-meta', `${positions.length} · ${fmtSigned(totalPnl)}`);
 }
 
 function renderCrypto(crypto) {
@@ -956,7 +915,7 @@ function renderCrypto(crypto) {
   const symbols = Object.keys(positions);
   const tbody = document.getElementById('crypto-rows');
   if (!symbols.length) {
-    tbody.innerHTML = '<tr><td colspan="3" class="empty">no open crypto positions</td></tr>';
+    tbody.innerHTML = '<tr><td class="pos-empty" colspan="3">no open crypto positions</td></tr>';
     setT('crypto-meta', '');
   } else {
     let totalPnl = 0;
@@ -967,9 +926,9 @@ function renderCrypto(crypto) {
       const pnl = parseFloat(p.pnl_usd || 0);
       totalPnl += pnl;
       const isTurtle = p.strategy_type === 'turtle';
-      const own = p.owner === 'claude' ? '<span class="ownr">claude</span>' :
-                  p.owner === 'grok'   ? '<span class="ownr">grok</span>'   : '';
-      const turtleTag = isTurtle ? '<span class="ownr" style="color:var(--accent)">🐢</span>' : '';
+      const own = p.owner === 'claude' ? '<span class="ownr">C</span>' :
+                  p.owner === 'grok'   ? '<span class="ownr">G</span>'   : '';
+      const turtleTag = isTurtle ? '<span class="ownr" style="color:var(--violet)">T</span>' : '';
       rows += `<tr>
         <td><span class="sym">${sym}</span>${own}${turtleTag}</td>
         <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
@@ -977,41 +936,269 @@ function renderCrypto(crypto) {
       </tr>`;
     }
     tbody.innerHTML = rows;
-    setT('crypto-meta', `${symbols.length} · total ${fmtSigned(totalPnl)}`);
+    setT('crypto-meta', `${symbols.length} · ${fmtSigned(totalPnl)}`);
   }
-  // Wallet line always shown
   const usdt = parseFloat(crypto?.wallet?.usdt_free || 0);
   const total = parseFloat(crypto?.wallet?.total_value || 0);
-  setT('wallet-line', `${fmt$(total)} wallet · ${fmt$(usdt)} USDT free`);
+  setT('wallet-line', `${fmt$(total)} wallet · ${fmt$(usdt)} free`);
 }
 
-function renderCloses(history) {
-  const trades = (history || []).filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined);
-  const tbody = document.getElementById('closes-rows');
-  if (!trades.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">no closes recorded</td></tr>';
+// ════════════════════════════════════════════════════════════
+// ACTIVITY FEED — most recent raw trade actions (any type)
+// ════════════════════════════════════════════════════════════
+function ownerTag(owner) {
+  return owner === 'claude' ? '<span class="ownr">claude</span>' :
+         owner === 'grok'   ? '<span class="ownr">grok</span>'   :
+         owner === 'shared' ? '<span class="ownr">shared</span>' :
+                               `<span class="ownr">${owner || 'bot'}</span>`;
+}
+
+function renderActivity() {
+  const list = document.getElementById('activity-list');
+  const items = ALL_TRADES.slice(0, 9);
+  if (!items.length) {
+    list.innerHTML = '<div class="empty">no activity yet</div>';
+    setT('activity-last', '—');
     return;
   }
-  // /history returns newest first already; just take top 20
-  const recent = trades.slice(0, 20);
+  setT('activity-last', timeAgo(items[0].time));
+  list.innerHTML = items.map(t => {
+    const hasPnl = t.pnl_usd !== null && t.pnl_usd !== undefined;
+    const pnl = parseFloat(t.pnl_usd || 0);
+    const dotCls = !hasPnl ? '' : pnl >= 0 ? 'good' : 'bad';
+    const pnlTxt = hasPnl ? `<span class="a-pnl ${pnl >= 0 ? 'good' : 'bad'}">${fmtSigned(pnl)}</span>` : '';
+    return `<div class="activity-item">
+      <span class="a-dot ${dotCls}"></span>
+      <span class="a-time">${timeAgo(t.time)}</span>
+      <span class="a-detail"><span class="a-sym">${(t.symbol || '—')}</span> ${(t.action || '').replace(/_/g, ' ')} · ${ownerTag(t.owner)}</span>
+      ${pnlTxt}
+    </div>`;
+  }).join('');
+}
+
+// ════════════════════════════════════════════════════════════
+// TRADE HISTORY — client-side filter/search/pagination/expand
+// ════════════════════════════════════════════════════════════
+let ALL_TRADES  = [];
+let histView    = 'closes';
+let histOwner   = '';
+let histSearch  = '';
+let histVisible = 25;
+const HIST_PAGE = 25;
+
+function filteredTrades() {
+  let trades = ALL_TRADES;
+  if (histView === 'closes') {
+    trades = trades.filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined);
+  }
+  if (histOwner === 'claude' || histOwner === 'grok') {
+    trades = trades.filter(t => t.owner === histOwner);
+  } else if (histOwner === 'other') {
+    trades = trades.filter(t => t.owner !== 'claude' && t.owner !== 'grok');
+  }
+  if (histSearch) {
+    const q = histSearch.toUpperCase();
+    trades = trades.filter(t => (t.symbol || '').toUpperCase().includes(q));
+  }
+  return trades;
+}
+
+function tradeDetailHTML(t) {
+  const parts = [];
+  if (t.reason)                       parts.push(`reason: ${t.reason}`);
+  if (t.confidence !== null && t.confidence !== undefined) parts.push(`confidence: ${t.confidence}%`);
+  if (t.strategy)                     parts.push(`strategy: ${t.strategy}`);
+  if (t.entry_price)                  parts.push(`entry: ${fmt$(t.entry_price)}`);
+  if (t.price)                        parts.push(`fill: ${fmt$(t.price)}`);
+  if (t.notional)                     parts.push(`notional: ${fmt$(t.notional)}`);
+  if (t.qty)                          parts.push(`qty: ${t.qty}`);
+  if (t.spy_trend)                    parts.push(`spy trend: ${t.spy_trend}`);
+  if (t.time_et)                      parts.push(t.time_et);
+  return parts.length
+    ? parts.join('  ·  ')
+    : '<span class="detail-empty">no extra detail recorded for this trade</span>';
+}
+
+function renderCloses() {
+  const tbody = document.getElementById('closes-rows');
+  const trades = filteredTrades();
+
+  const last = ALL_TRADES[0];
+  if (last) {
+    const act = (last.action || '—').toUpperCase();
+    setHTML('last-trade-line', `${timeAgo(last.time)} · ${act} <span class="sym">${last.symbol || '—'}</span> (${last.owner || 'bot'})`);
+  } else {
+    setT('last-trade-line', 'no trades recorded yet');
+  }
+
+  setT('hist-count', trades.length ? `${Math.min(histVisible, trades.length)} of ${trades.length}` : '0');
+
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">no trades match this filter</td></tr>';
+    return;
+  }
+
+  const visible = trades.slice(0, histVisible);
   let rows = '';
-  for (const t of recent) {
+  visible.forEach((t, i) => {
     const pnl = parseFloat(t.pnl_usd || 0);
     const pnlPct = parseFloat(t.pnl_pct || 0);
-    const own = t.owner === 'claude' ? '<span class="ownr">claude</span>' :
-                t.owner === 'grok'   ? '<span class="ownr">grok</span>'   :
-                t.owner === 'shared' ? '<span class="ownr">shared</span>' :
-                                       `<span class="ownr">${t.owner || 'bot'}</span>`;
-    rows += `<tr>
+    const hasPnl = t.pnl_usd !== null && t.pnl_usd !== undefined;
+    rows += `<tr class="trade-row" data-idx="${i}">
       <td>${tsToLocal(t.time)}</td>
       <td><span class="sym">${t.symbol || '—'}</span></td>
       <td><span class="act">${t.action || '—'}</span></td>
-      <td>${own}</td>
-      <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
-      <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
+      <td>${ownerTag(t.owner)}</td>
+      <td class="r ${hasPnl ? (pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : '') : ''}">${hasPnl ? fmtPct(pnlPct) : '—'}</td>
+      <td class="r ${hasPnl ? (pnl > 0 ? 'good' : pnl < 0 ? 'bad' : '') : ''}">${hasPnl ? fmtSigned(pnl) : '—'}</td>
+    </tr>
+    <tr class="detail-row" data-detail-for="${i}" style="display:none;">
+      <td colspan="6">${tradeDetailHTML(t)}</td>
     </tr>`;
+  });
+  if (trades.length > histVisible) {
+    rows += `<tr class="load-more-row"><td colspan="6"><button class="load-more-btn" id="hist-load-more">show more (${trades.length - histVisible} left)</button></td></tr>`;
   }
   tbody.innerHTML = rows;
+
+  tbody.querySelectorAll('tr.trade-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const idx = row.getAttribute('data-idx');
+      const detail = tbody.querySelector(`tr[data-detail-for="${idx}"]`);
+      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
+    });
+  });
+  const loadMoreBtn = document.getElementById('hist-load-more');
+  if (loadMoreBtn) {
+    loadMoreBtn.addEventListener('click', () => {
+      histVisible += HIST_PAGE;
+      renderCloses();
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// CHARTS — hero skyline bars (interactive) + mini trend sparks
+// ════════════════════════════════════════════════════════════
+function buildPnlSeries(owner) {
+  let closes = ALL_TRADES.filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined && t.time);
+  if (owner) closes = closes.filter(t => t.owner === owner);
+  closes = closes.slice().reverse();
+  if (closes.length < 2) return null;
+  let cum = 0;
+  return closes.map(t => {
+    cum += parseFloat(t.pnl_usd || 0);
+    const d = new Date(t.time.endsWith('Z') ? t.time : t.time + 'Z');
+    return { t: d.getTime(), cum, trade: t };
+  });
+}
+
+function bucketPoints(points, n) {
+  n = Math.min(n, points.length);
+  const buckets = [];
+  for (let i = 0; i < n; i++) {
+    const startIdx = Math.floor(i / n * points.length);
+    const endIdx = Math.max(startIdx + 1, Math.floor((i + 1) / n * points.length));
+    const slice = points.slice(startIdx, endIdx);
+    if (slice.length) buckets.push(slice[slice.length - 1]);
+  }
+  return buckets;
+}
+
+const HERO_W = 480, HERO_H = 110, HERO_BARS = 48;
+
+function renderHeroBars() {
+  const svg = document.getElementById('hero-bars');
+  const wrap = document.getElementById('hero-chart-wrap');
+  const points = buildPnlSeries();
+  const oldEmpty = wrap.querySelector('.chart-empty');
+  if (oldEmpty) oldEmpty.remove();
+
+  if (!points) {
+    svg.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'chart-empty';
+    empty.textContent = 'not enough closed trades yet for a curve';
+    wrap.appendChild(empty);
+    return;
+  }
+
+  const buckets = bucketPoints(points, HERO_BARS).map(p => ({ value: p.cum, trade: p.trade }));
+  let minV = Math.min(0, ...buckets.map(b => b.value));
+  let maxV = Math.max(0, ...buckets.map(b => b.value));
+  if (minV === maxV) { minV -= 1; maxV += 1; }
+  const range = maxV - minV;
+  const n = buckets.length;
+  const gap = 1.6;
+  const bw = (HERO_W / n) - gap;
+  const recentFrom = Math.ceil(n * 0.82);
+
+  let rects = `<line x1="0" y1="${HERO_H - 0.5}" x2="${HERO_W}" y2="${HERO_H - 0.5}" stroke="var(--rule-soft)" stroke-width="1"/>`;
+  buckets.forEach((b, i) => {
+    const h = Math.max(2, ((b.value - minV) / range) * (HERO_H - 8));
+    const x = i * (HERO_W / n);
+    const y = HERO_H - h;
+    const color = b.value >= 0 ? 'var(--good)' : 'var(--bad)';
+    const op = i >= recentFrom ? 1 : 0.42;
+    rects += `<rect class="hbar" data-i="${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${color}" opacity="${op}"/>`;
+  });
+  svg.innerHTML = rects;
+
+  const tooltip = document.getElementById('chart-tooltip');
+  function onMove(evt) {
+    const t = evt.target;
+    if (!t.classList || !t.classList.contains('hbar')) { onLeave(); return; }
+    const i = parseInt(t.getAttribute('data-i'), 10);
+    const b = buckets[i];
+    svg.querySelectorAll('.hbar').forEach(r => { r.style.stroke = 'none'; });
+    t.style.stroke = 'var(--ink)';
+    t.style.strokeWidth = '1';
+    const rect = svg.getBoundingClientRect();
+    const bx = parseFloat(t.getAttribute('x')) + bw / 2;
+    const px = (bx / HERO_W) * rect.width;
+    const py = (parseFloat(t.getAttribute('y')) / HERO_H) * rect.height;
+    tooltip.style.left = px + 'px';
+    tooltip.style.top = Math.max(12, py) + 'px';
+    tooltip.style.opacity = '1';
+    const tr = b.trade;
+    tooltip.innerHTML = `<div class="tt-value">${fmtSigned(b.value)}</div>
+      <div class="tt-sub">${tsToLocal(tr.time)} · ${(tr.symbol || '').replace(/</g, '')} ${tr.action || ''}</div>`;
+  }
+  function onLeave() {
+    svg.querySelectorAll('.hbar').forEach(r => { r.style.stroke = 'none'; });
+    tooltip.style.opacity = '0';
+  }
+  svg.addEventListener('pointermove', onMove);
+  svg.addEventListener('pointerleave', onLeave);
+}
+
+function renderMiniBars(svgId, points, bars) {
+  const svg = document.getElementById(svgId);
+  if (!points || points.length < 2) { svg.innerHTML = ''; return; }
+  const W = 140, H = 26;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const buckets = bucketPoints(points, bars).map(p => p.cum);
+  let minV = Math.min(0, ...buckets), maxV = Math.max(0, ...buckets);
+  if (minV === maxV) { minV -= 1; maxV += 1; }
+  const range = maxV - minV;
+  const n = buckets.length;
+  const gap = 1.2;
+  const bw = (W / n) - gap;
+  let rects = '';
+  buckets.forEach((v, i) => {
+    const h = Math.max(1.5, ((v - minV) / range) * (H - 2));
+    const x = i * (W / n), y = H - h;
+    const color = v >= 0 ? 'var(--good)' : 'var(--bad)';
+    const op = i >= n - 4 ? 1 : 0.5;
+    rects += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="${color}" opacity="${op}"/>`;
+  });
+  svg.innerHTML = rects;
+}
+
+function renderCharts() {
+  renderHeroBars();
+  renderMiniBars('claude-spark', buildPnlSeries('claude'), 16);
+  renderMiniBars('grok-spark', buildPnlSeries('grok'), 16);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1021,32 +1208,36 @@ async function fetchAll() {
   const statusText = document.getElementById('status-text');
   const statusLive = document.getElementById('status-live');
   statusText.textContent = 'syncing…';
-  statusLive.className = 'live warn';
+  statusLive.className = 'live-pill warn';
   try {
     const [stats, crypto, perf, hist, leaderboard, strategist] = await Promise.all([
       apiFetch('/stats').catch(e => ({ error: e.message })),
       apiFetch('/crypto_status').catch(e => ({ error: e.message })),
       apiFetch('/performance').catch(e => ({ error: e.message })),
-      apiFetch('/history?limit=30').catch(e => ({ error: e.message })),
+      apiFetch('/history?limit=500').catch(e => ({ error: e.message })),
       apiFetch('/leaderboard').catch(e => ({ error: e.message })),
       apiFetch('/strategy').catch(e => ({ error: e.message })),
     ]);
 
     renderHero(stats, crypto, perf, leaderboard);
+    renderTicker(stats, crypto);
     renderHealth(stats, crypto, strategist, perf);
     renderBanner(stats);
-    renderBattle(leaderboard, crypto);
+    renderBattle(leaderboard);
     renderStrategy(strategist);
     renderStocks(stats);
     renderCrypto(crypto);
-    renderCloses(hist?.trades || []);
+    ALL_TRADES = hist?.trades || [];
+    renderCloses();
+    renderActivity();
+    renderCharts();
 
-    statusLive.className = 'live';
+    statusLive.className = 'live-pill';
     statusText.textContent = 'live';
     document.getElementById('last-update').textContent =
       'updated ' + new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   } catch (e) {
-    statusLive.className = 'live offline';
+    statusLive.className = 'live-pill offline';
     statusText.textContent = 'offline';
     document.getElementById('last-update').textContent = 'error: ' + e.message;
   }
@@ -1056,7 +1247,6 @@ async function fetchAll() {
 // INIT
 // ════════════════════════════════════════════════════════════
 (function init() {
-  // Restore saved bot URL & theme
   const savedUrl = localStorage.getItem('nt-bot-url');
   if (savedUrl) document.getElementById('bot-url').value = savedUrl;
   document.getElementById('bot-url').addEventListener('change', e => {
@@ -1064,16 +1254,43 @@ async function fetchAll() {
     fetchAll();
   });
 
-  const savedTheme = localStorage.getItem('nt-theme') || 'light';
+  const savedTheme = localStorage.getItem('nt-theme') || 'dark';
   document.body.setAttribute('data-theme', savedTheme);
   document.getElementById('theme-toggle').addEventListener('click', () => {
     const cur = document.body.getAttribute('data-theme');
-    const next = cur === 'light' ? 'dark' : 'light';
+    const next = cur === 'dark' ? 'light' : 'dark';
     document.body.setAttribute('data-theme', next);
     localStorage.setItem('nt-theme', next);
+    renderCharts(); // re-render so fill colors repaint crisply after the var swap
   });
 
   document.getElementById('health-link').href = getUrl() + '/health';
+
+  document.getElementById('hist-search').addEventListener('input', e => {
+    histSearch = e.target.value.trim();
+    histVisible = HIST_PAGE;
+    renderCloses();
+  });
+  document.getElementById('hist-view-chips').addEventListener('click', e => {
+    const btn = e.target.closest('.chip');
+    if (!btn) return;
+    document.querySelectorAll('#hist-view-chips .chip').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    histView = btn.getAttribute('data-view');
+    histVisible = HIST_PAGE;
+    renderCloses();
+  });
+  document.getElementById('hist-owner-chips').addEventListener('click', e => {
+    const btn = e.target.closest('.chip');
+    if (!btn) return;
+    document.querySelectorAll('#hist-owner-chips .chip').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    histOwner = btn.getAttribute('data-owner');
+    histVisible = HIST_PAGE;
+    renderCloses();
+  });
+
+  window.addEventListener('resize', () => renderCharts());
 
   fetchAll();
   setInterval(fetchAll, 30000);

@@ -219,6 +219,7 @@ import portfolio_manager as _portfolio_manager
 
 from pdt_manager import (
     record_intraday_buy, is_day_trade, get_stock_tier,
+    get_quick_take_profit_pct,
     reset_intraday_buys_if_new_day, check_pdt_safe,
     run_pdt_hold_council, _pdt_fallback_plan,
     check_pdt_hold_plans, get_pdt_decision, get_pdt_status,
@@ -1870,7 +1871,7 @@ def smart_sell(symbol, reason, pos):
             shared_state["failed_sells"].pop(symbol, None)
     return False
 
-def check_exit_conditions(positions):
+def check_exit_conditions(positions, equity):
     """
     Strategy-aware exit system.
     Each position uses whichever strategy was assigned at entry:
@@ -1878,6 +1879,7 @@ def check_exit_conditions(positions):
     Strategy B: Trailing stop + 4% hard stop + 3-day time stop
     """
     today = datetime.now().strftime("%Y-%m-%d")
+    quick_tp = get_quick_take_profit_pct(equity)
 
     for pos in positions:
         symbol       = pos["symbol"]
@@ -1901,6 +1903,27 @@ def check_exit_conditions(positions):
                              float(pos.get("market_value", 0)), owner.lower(),
                              reason="stop loss triggered", pnl_usd=pnl_usd,
                              pnl_pct=pnl_pct, strategy=strategy,
+                             entry_price=entry_price)
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                shared_state["position_exits"].pop(symbol, None)
+            continue
+
+        # ── UNIVERSAL: Small-account quick take-profit ────────
+        # At low equity tiers, bank any real gain instead of waiting for
+        # the strategy-specific 8% target — maximize round-trips and
+        # keep cash working. Skips Turtle (strategy T), which has its
+        # own deliberate trend-following exit. quick_tp is None at the
+        # top tier, so this is a no-op there — existing A/B logic below
+        # runs exactly as before.
+        if quick_tp is not None and strategy != "T" and pnl_pct >= quick_tp:
+            log(f"⚡ [{owner}] QUICK TP {symbol} +{pnl_pct*100:.1f}% >= {quick_tp*100:.1f}% "
+                f"(tier: equity ${equity:.0f}) | +${pnl_usd:.2f}")
+            if smart_sell(symbol, "quick take-profit (small-account velocity)", pos):
+                record_trade("take_profit", symbol, pos.get("qty"), current_price,
+                             float(pos.get("market_value", 0)), owner.lower(),
+                             reason=f"quick take-profit (tier tp={quick_tp*100:.1f}%)",
+                             pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy=strategy,
                              entry_price=entry_price)
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
@@ -2750,12 +2773,14 @@ def run_autopilot(positions, pos_symbols, cash, equity):
     log("🤖 AUTOPILOT MODE — Pure technical rules, no AI calls")
     log(f"   Rules: BUY if RSI<{RULES['autopilot_rsi_buy']} + MACD+ | SELL if RSI>{RULES['autopilot_rsi_sell']}")
 
+    tp_target = get_quick_take_profit_pct(equity) or RULES["take_profit_pct"]
+
     # Check exits first
     for pos in positions:
         symbol  = pos["symbol"]
         pnl_pct = float(pos["unrealized_plpc"])
-        if pnl_pct >= RULES["take_profit_pct"]:
-            log(f"🎯 AUTOPILOT take-profit: {symbol} +{pnl_pct*100:.1f}%")
+        if pnl_pct >= tp_target:
+            log(f"🎯 AUTOPILOT take-profit: {symbol} +{pnl_pct*100:.1f}% >= {tp_target*100:.1f}%")
             try:
                 cancel_stock_orders(symbol, "(before autopilot TP close)")
                 alpaca("DELETE", f"/v2/positions/{symbol}")
@@ -2971,10 +2996,11 @@ Respond ONLY with JSON:
     g_action = (grok_decision   or {}).get("action", "hold").lower()
 
     # Check if any position hit take-profit or stop-loss automatically
+    tp_target = (get_quick_take_profit_pct(equity) or RULES["take_profit_pct"]) * 100
     sold_something = False
     for p in pos_details:
-        if p["pnl_pct"] >= RULES["take_profit_pct"] * 100:
-            log(f"🎯 [{p['owner']}] Auto take-profit: {p['symbol']} at +{p['pnl_pct']:.1f}%")
+        if p["pnl_pct"] >= tp_target:
+            log(f"🎯 [{p['owner']}] Auto take-profit: {p['symbol']} at +{p['pnl_pct']:.1f}% (target {tp_target:.1f}%)")
             try:
                 cancel_stock_orders(p["symbol"], "(before low-cash TP close)")
                 alpaca("DELETE", f"/v2/positions/{p['symbol']}")
@@ -3473,7 +3499,7 @@ def run_cycle():
     track_pnl(positions)
     log(f"📊 Today: Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}")
 
-    check_exit_conditions(positions)
+    check_exit_conditions(positions, equity)
     positions   = alpaca("GET", "/v2/positions")
     pos_symbols = [p["symbol"] for p in positions]
     open_count  = len(positions)
@@ -4435,8 +4461,30 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
                 stops_fired += 1
                 sold = True
 
+        # ── UNIVERSAL: Small-account quick take-profit ────────
+        # Same tiered override as check_exit_conditions — bank any real
+        # gain fast at low equity instead of waiting for the 8% target.
+        # No-op (quick_tp None) at the top tier.
+        if not sold and strategy != "T":
+            quick_tp = get_quick_take_profit_pct(equity)
+            if quick_tp is not None and pnl_pct >= quick_tp:
+                log(f"⚡ AUTO QUICK TP {symbol} +{pnl_pct*100:.1f}% >= {quick_tp*100:.1f}% "
+                    f"(tier: equity ${equity:.0f}) — bot executing (AIs sleeping)")
+                if smart_sell(symbol, "autonomous quick take-profit (small-account velocity)", pos):
+                    owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                    record_trade("take_profit", symbol, pos.get("qty"), current_price,
+                                 pos_value, owner,
+                                 reason=f"autonomous quick take-profit (tier tp={quick_tp*100:.1f}%)",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy=strategy,
+                                 entry_price=entry_price)
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+                    shared_state["sleeping_strategies"].pop(symbol, None)
+                    sold = True
+
         # ── STRATEGY A: Fixed take-profit ─────────────────────
-        elif strategy == "A" and not sold:
+        if strategy == "A" and not sold:
             if pnl_pct >= RULES["exit_A_take_profit"]:
                 log(f"🎯 AUTO TAKE-PROFIT [A] {symbol} +{pnl_pct*100:.1f}% — bot executing")
                 if smart_sell(symbol, "autonomous strategy A take-profit", pos):

@@ -197,22 +197,27 @@ CRYPTO_RULES = {
 # ── Tier-based risk sizing ─────────────────────────────────────
 # At small equity we must take bigger % risks to compound toward goal
 # As equity grows, risk per trade shrinks (protecting gains)
+# tp_pct: quick-flip take-profit override (classic-strategy positions
+# only — Turtle keeps its own Donchian/2N exit, never a fixed TP). At
+# small wallet size we bank any real gain fast and redeploy the cash
+# instead of waiting for the flat 8% CRYPTO_RULES["take_profit_pct"].
+# None at the top tier = no override, existing 8% tp_price stands.
 CRYPTO_TIERS = [
     # AGGRESSIVE PROFILE + DISCOVERY MODE ENABLED
     # coins list is ADVISORY (prefer these) — AI can buy anything from scan
     # if confidence ≥ 70%. No hard tier restrictions on buys.
-    {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3,
+    {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3, "tp_pct": 0.015,
      "coins": None,  # DISCOVERY MODE — AI can pick from top market movers
-     "note": "Tier 1 — AGGRESSIVE + DISCOVERY: 30% risk, 3 positions, any trending coin"},
-    {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3,
+     "note": "Tier 1 — AGGRESSIVE + DISCOVERY: 30% risk, 3 positions, any trending coin, 1.5% quick TP"},
+    {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3, "tp_pct": 0.03,
      "coins": None,
-     "note": "Tier 2 — 25% risk, 3 positions, full discovery"},
-    {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4,
+     "note": "Tier 2 — 25% risk, 3 positions, full discovery, 3% quick TP"},
+    {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4, "tp_pct": 0.05,
      "coins": None,
-     "note": "Tier 3 — 20% risk, 4 positions, full discovery"},
-    {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5,
+     "note": "Tier 3 — 20% risk, 4 positions, full discovery, 5% quick TP"},
+    {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5, "tp_pct": None,
      "coins": None,
-     "note": "Tier 4 — 15% risk, 5 positions, full discovery"},
+     "note": "Tier 4 — 15% risk, 5 positions, full discovery, standard 8% TP (patient)"},
 ]
 
 def effective_fees(has_bnb: bool = False) -> dict:
@@ -249,6 +254,15 @@ def get_crypto_tier(wallet_value: float) -> dict:
         if t["min_equity"] <= wallet_value < t["max_equity"]:
             return t
     return CRYPTO_TIERS[-1]
+
+
+def get_crypto_quick_take_profit_pct(wallet_value: float):
+    """
+    Small-wallet quick-flip take-profit override, or None at the top
+    tier (meaning: use the existing fixed 8% tp_price / trailing logic
+    as-is). Single source of truth for run_exit_monitor.
+    """
+    return get_crypto_tier(wallet_value).get("tp_pct")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2313,6 +2327,16 @@ class CryptoTrader:
         if not self.positions:
             return 0
 
+        # ── Quick-flip take-profit tier (computed once per cycle, not
+        # per-position, to avoid extra API calls). Falls back to None
+        # (no override — existing 8% tp_price stands) on any failure.
+        quick_tp = None
+        try:
+            wallet_value = get_full_wallet().get("total_value", 0)
+            quick_tp = get_crypto_quick_take_profit_pct(wallet_value)
+        except Exception as we:
+            self._log(f"   ⚠️ Quick-TP wallet lookup failed: {we}")
+
         exits = 0
         for symbol, pos in list(self.positions.items()):
             try:
@@ -2367,6 +2391,11 @@ class CryptoTrader:
                         exit_reason = f"turtle_2N_stop ({pnl:.2f}%)"
                     else:
                         exit_reason = f"stop_loss ({pnl:.2f}%)"
+                elif (exit_reason is None and pos.strategy_type != "turtle"
+                      and quick_tp is not None and pnl >= quick_tp * 100):
+                    # Small-wallet velocity override — bank any real gain
+                    # above the tier floor instead of holding for 8%.
+                    exit_reason = f"take_profit (quick tier {pnl:.2f}%)"
                 elif exit_reason is None and pos.should_take_profit(current):
                     exit_reason = f"take_profit ({pnl:.2f}%)"
                 elif exit_reason is None and pos.should_time_exit():
