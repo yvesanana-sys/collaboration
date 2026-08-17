@@ -1795,6 +1795,46 @@ def get_live_asset_balance(symbol: str) -> float:
         return 0.0
 
 
+def reconcile_ghost_exit(symbol: str, entry_time) -> dict:
+    """
+    A tracked position's live Binance balance dropped to zero/dust without
+    the bot selling it — almost always a broker-side STOP_LOSS order that
+    filled directly on the exchange (survives bot restarts/redeploys by
+    design). Query Binance's own fill history since entry to recover the
+    real exit price/qty/fees so the loss can still be recorded, instead of
+    the position just vanishing from trade history.
+
+    Returns {} if no matching SELL fill is found (caller should fall back
+    to an estimate using the current mark price rather than lose the
+    trade entirely).
+    """
+    try:
+        start_ms = int(entry_time.timestamp() * 1000)
+        trades = binance_get("/api/v3/myTrades",
+                              {"symbol": symbol, "startTime": start_ms, "limit": 100},
+                              signed=True)
+        sells = [t for t in (trades or [])
+                 if not t.get("isBuyer") and float(t.get("qty", 0)) > 0]
+        if not sells:
+            return {}
+        total_qty   = sum(float(t["qty"]) for t in sells)
+        total_quote = sum(float(t["quoteQty"]) for t in sells)
+        total_fee   = sum(float(t.get("commission", 0)) for t in sells
+                           if t.get("commissionAsset") in ("USDT", "USD", "USDC"))
+        if total_qty <= 0:
+            return {}
+        return {
+            "qty":             total_qty,
+            "avg_price":       total_quote / total_qty,
+            "gross_proceeds":  total_quote,
+            "fee_usd":         total_fee,
+            "last_fill_time":  max(int(t["time"]) for t in sells),
+        }
+    except Exception as e:
+        print(f"[CRYPTO] ⚠️ reconcile_ghost_exit({symbol}) failed: {e}", flush=True)
+        return {}
+
+
 def place_crypto_sell(symbol: str, qty: float,
                       limit_price: float = None,
                       force_limit: bool = False) -> dict:
@@ -2344,18 +2384,53 @@ class CryptoTrader:
 
                 # ── Ghost position cleanup ───────────────────────
                 # If wallet balance for this symbol is dust ($ < $1.50)
-                # or zero, the position was sold outside the bot (manual
-                # sale, prior liquidation). Clear the tracker silently
-                # so we don't spam logs every cycle and don't fire
-                # ghost stop/TP exits on a phantom holding.
+                # or zero, the position was sold outside the bot — almost
+                # always a broker-side STOP_LOSS order filling directly on
+                # Binance. Reconcile against Binance's own fill history so
+                # the loss still lands in trade history/performance/the
+                # AI's memory instead of vanishing (see reconcile_ghost_exit).
                 try:
                     asset = symbol.replace("USDT", "")
                     live_qty = get_live_asset_balance(symbol)
                     live_val = live_qty * current if current > 0 else 0
                     if live_qty == 0 or 0 < live_val < 1.5:
-                        self._log(f"   🧹 {symbol}: ghost position detected "
-                                  f"(live qty={live_qty:.8f}, ~${live_val:.4f}) — "
-                                  f"clearing tracker (sold outside bot)")
+                        recon = reconcile_ghost_exit(symbol, pos.entry_time)
+                        if recon:
+                            pnl_usd = round(recon["gross_proceeds"] - recon["fee_usd"]
+                                             - pos.entry_price * recon["qty"], 2)
+                            pnl_pct = round((recon["avg_price"] / pos.entry_price - 1) * 100, 2)
+                            self._log(f"   🧹 {symbol}: ghost position — reconciled broker-side "
+                                      f"exit @ ${recon['avg_price']:.6f} | P&L: ${pnl_usd:+.2f} "
+                                      f"({pnl_pct:+.2f}%) — likely stop-loss fill")
+                        else:
+                            # No matching fill found on Binance — still record an
+                            # ESTIMATE off the current mark rather than lose the
+                            # trade silently. Clearly tagged as inexact.
+                            pnl_usd = round((current - pos.entry_price) * pos.qty, 2)
+                            pnl_pct = pos.pnl_pct(current)
+                            self._log(f"   🧹 {symbol}: ghost position detected "
+                                      f"(live qty={live_qty:.8f}, ~${live_val:.4f}) — no Binance "
+                                      f"fill found, recording ESTIMATE P&L: ${pnl_usd:+.2f} "
+                                      f"({pnl_pct:+.2f}%)")
+                        if record_trade_fn:
+                            try:
+                                record_trade_fn(
+                                    action       = "stop_loss",
+                                    symbol       = symbol,
+                                    qty          = recon.get("qty", pos.qty) if recon else pos.qty,
+                                    price        = recon.get("avg_price", current) if recon else current,
+                                    notional     = round((recon.get("avg_price", current) if recon else current)
+                                                          * (recon.get("qty", pos.qty) if recon else pos.qty), 2),
+                                    owner        = pos.owner,
+                                    pnl_usd      = pnl_usd,
+                                    pnl_pct      = pnl_pct / 100,
+                                    strategy     = "crypto",
+                                    entry_price  = pos.entry_price,
+                                    reason       = "crypto:stop_loss (broker-side"
+                                                   + ("" if recon else ", estimated") + ")",
+                                )
+                            except Exception as rte:
+                                self._log(f"   ⚠️ ghost-exit record_trade failed: {rte}")
                         del self.positions[symbol]
                         continue
                 except Exception as ge:
@@ -2473,8 +2548,41 @@ class CryptoTrader:
             ghost_errors = ("ZERO_BALANCE", "DUST_BALANCE", "QTY_ROUNDED_TO_ZERO")
             if isinstance(result, dict) and result.get("error") in ghost_errors:
                 err = result.get("error")
-                self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — "
-                          f"removing tracker (likely sold outside bot)")
+                recon = reconcile_ghost_exit(pos.symbol, pos.entry_time)
+                if recon:
+                    pnl_usd = round(recon["gross_proceeds"] - recon["fee_usd"]
+                                     - pos.entry_price * recon["qty"], 2)
+                    pnl_pct = round((recon["avg_price"] / pos.entry_price - 1) * 100, 2)
+                    exit_price = recon["avg_price"]
+                    exit_qty   = recon["qty"]
+                    self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — reconciled "
+                              f"broker-side exit @ ${exit_price:.6f} | P&L: ${pnl_usd:+.2f} "
+                              f"({pnl_pct:+.2f}%)")
+                else:
+                    exit_price = current_price
+                    exit_qty   = pos.qty
+                    pnl_usd = round((current_price - pos.entry_price) * pos.qty, 2)
+                    pnl_pct = pos.pnl_pct(current_price)
+                    self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — no Binance fill "
+                              f"found, recording ESTIMATE P&L: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)")
+                if record_trade_fn:
+                    try:
+                        record_trade_fn(
+                            action       = reason.split("(")[0].strip(),
+                            symbol       = pos.symbol,
+                            qty          = exit_qty,
+                            price        = exit_price,
+                            notional     = round(exit_price * exit_qty, 2),
+                            owner        = pos.owner,
+                            pnl_usd      = pnl_usd,
+                            pnl_pct      = pnl_pct / 100,
+                            strategy     = "crypto",
+                            entry_price  = pos.entry_price,
+                            reason       = f"crypto:{reason} (ghost, "
+                                           + ("reconciled)" if recon else "estimated)"),
+                        )
+                    except Exception as rte:
+                        self._log(f"   ⚠️ ghost-exit record_trade failed: {rte}")
                 del self.positions[pos.symbol]
                 return True  # Treat as success to prevent infinite retries
 
