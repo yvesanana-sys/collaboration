@@ -1632,6 +1632,10 @@ def place_stock_protective_stop(symbol, qty, stop_price):
     if _is_option_symbol(symbol):
         log(f"   [STOP] {symbol} looks like an option — software-managed only")
         return None
+    if qty != int(qty):
+        log(f"   [STOP] {symbol} qty={qty} is fractional — Alpaca rejects stop "
+            f"orders on fractional share quantities, software stop still active")
+        return None
     # Alpaca price increments: $0.01 at/above $1, $0.0001 below
     stop_price = round(stop_price, 2) if stop_price >= 1 else round(stop_price, 4)
     if stop_price <= 0 or qty <= 0:
