@@ -190,12 +190,49 @@ import ai_clients as _ai_clients
 def ask_claude_guarded(*args, **kwargs):
     if not shared_state.get("claude_healthy", True):
         raise Exception(f"Claude unhealthy ({shared_state.get('claude_fail_reason','unknown')}) — call skipped")
-    return ask_claude(*args, **kwargs)
+    try:
+        return ask_claude(*args, **kwargs)
+    except Exception as e:
+        # Mirror safe_ask_claude's classification so a known-dead AI actually
+        # gets marked unhealthy here too — otherwise this guard only ever
+        # reads the flag and never sets it, so a doomed call (e.g. credits
+        # exhausted) keeps firing every cycle instead of backing off.
+        error_type = classify_ai_error(str(e))
+        shared_state["claude_fail_count"] = shared_state.get("claude_fail_count", 0) + 1
+        shared_state["claude_fail_reason"] = error_type
+        if error_type == "credits_exhausted":
+            shared_state["claude_healthy"]    = False
+            shared_state["claude_credits_ok"] = False
+            shared_state["last_claude_fail"]  = datetime.now().isoformat()
+        elif error_type == "auth_error":
+            shared_state["claude_healthy"]   = False
+            shared_state["last_claude_fail"] = datetime.now().isoformat()
+        elif shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
+            shared_state["claude_healthy"]   = False
+            shared_state["last_claude_fail"] = datetime.now().isoformat()
+        raise
 
 def ask_grok_guarded(*args, **kwargs):
     if not shared_state.get("grok_healthy", True):
         raise Exception(f"Grok unhealthy ({shared_state.get('grok_fail_reason','unknown')}) — call skipped")
-    return ask_grok(*args, **kwargs)
+    try:
+        return ask_grok(*args, **kwargs)
+    except Exception as e:
+        # Same as ask_claude_guarded above — see that comment.
+        error_type = classify_ai_error(str(e))
+        shared_state["grok_fail_count"] = shared_state.get("grok_fail_count", 0) + 1
+        shared_state["grok_fail_reason"] = error_type
+        if error_type == "credits_exhausted":
+            shared_state["grok_healthy"]    = False
+            shared_state["grok_credits_ok"] = False
+            shared_state["last_grok_fail"]  = datetime.now().isoformat()
+        elif error_type == "auth_error":
+            shared_state["grok_healthy"]   = False
+            shared_state["last_grok_fail"] = datetime.now().isoformat()
+        elif shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
+            shared_state["grok_healthy"]   = False
+            shared_state["last_grok_fail"] = datetime.now().isoformat()
+        raise
 
 from sleep_manager import (
     ai_sleep, ai_wake, check_wake_conditions, check_ai_wake_instructions,
