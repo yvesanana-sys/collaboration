@@ -139,24 +139,41 @@ RULES = {
     # for the strategy-specific 8% target. None at the top tier means
     # "no override" — fall back to the existing per-strategy A/B/T logic
     # (fixed 8% TP / trailing / Turtle Donchian) unchanged.
+    # ── Wide-net tier focus lists ─────────────────────────────
+    # Widened 2026-09-18 (Claude-led, stocks-only strategy change): each
+    # tier now blends the original large-cap/momentum names with liquid,
+    # lower-priced stocks (airlines, telecom/value, EV, fintech, crypto
+    # miners) so a small account still gets a wide net, not just the
+    # handful of expensive mega-caps. Floor is "real, liquid, exchange
+    # -listed" (no OTC/penny tickers) rather than a strict $ minimum.
     "stock_tiers": [
         {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3, "tp_pct": 0.015,
-         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB"],
-         "note": "Tier 1 — AGGRESSIVE SCAN: 8 stocks, 3 positions, 30% risk, 1.5% quick TP"},
+         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB",
+                   "F", "T", "SNAP", "NIO", "MARA", "HOOD"],
+         "note": "Tier 1 — AGGRESSIVE SCAN: 14 stocks (wide net incl. cheap names), 3 positions, 30% risk, 1.5% quick TP"},
         {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3, "tp_pct": 0.03,
-         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB", "MSTR", "AMZN"],
-         "note": "Tier 2 — 10 stocks, 3 positions, 25% risk, 3% quick TP"},
+         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB",
+                   "F", "T", "SNAP", "NIO", "MARA", "HOOD",
+                   "MSTR", "AMZN", "INTC", "CSCO", "AAL", "CCL"],
+         "note": "Tier 2 — 20 stocks (wide net incl. cheap names), 3 positions, 25% risk, 3% quick TP"},
         {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4, "tp_pct": 0.05,
-         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB", "MSTR", "AMZN", "GOOGL", "AAPL", "MSFT", "NFLX"],
-         "note": "Tier 3 — 14 stocks, 4 positions, 20% risk, 5% quick TP"},
+         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB",
+                   "F", "T", "SNAP", "NIO", "MARA", "HOOD",
+                   "MSTR", "AMZN", "INTC", "CSCO", "AAL", "CCL",
+                   "GOOGL", "AAPL", "MSFT", "NFLX", "RIVN", "LCID", "DKNG", "UPST"],
+         "note": "Tier 3 — 28 stocks (wide net incl. cheap names), 4 positions, 20% risk, 5% quick TP"},
         {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5, "tp_pct": None,
          "focus": None,  # Full universe — let AI pick anything
          "note": "Tier 4 — Full universe, 5 positions, 15% risk, standard 8% TP (patient)"},
     ],
     # Volatile stocks (wider trail needed — 4% aggressive trail)
-    "volatile_stocks": ["TSLA","MSTR","COIN","RKLB","SOFI","AMD","NVDA","PLTR","NFLX"],
+    "volatile_stocks": ["TSLA","MSTR","COIN","RKLB","SOFI","AMD","NVDA","PLTR","NFLX",
+                         "SNAP","NIO","PLUG","CHPT","MARA","RIOT","HOOD","AFRM","UPST",
+                         "RIVN","LCID","DKNG","RBLX","U","PATH","OPEN","AAL","DAL","UAL",
+                         "CCL","WBD","PARA"],
     # Stable stocks (tighter trail — 2% aggressive trail)
-    "stable_stocks":   ["AAPL","MSFT","GOOGL","AMZN","META"],
+    "stable_stocks":   ["AAPL","MSFT","GOOGL","AMZN","META","F","T","VZ","INTC","CSCO",
+                         "PFE","KVUE","SIRI"],
     # ── Breakout entry parameters ─────────────────────────────
     "breakout_periods":       20,     # 20-period high breakout
     "vol_spike_multiplier":   1.5,    # Volume must be 1.5x average
@@ -202,6 +219,16 @@ RULES = {
         "AMZN","SOFI","MSTR","COIN","RKLB",
         # Tier 4 (full universe)
         "AAPL","MSFT","GOOGL","NFLX","CRM",
+        # ── Wide-net additions (2026-09-18 strategy change) ───────
+        # Liquid, exchange-listed, lower-priced names — value/telecom,
+        # airlines/travel, EV, fintech, crypto-proxy miners, growth
+        # software. Real tickers only, no OTC/penny stocks. This is a
+        # deliberately wider net so a small account isn't limited to
+        # a handful of $150+ mega-caps — "as long as we gain."
+        "F","T","VZ","INTC","CSCO","PFE","KVUE","SIRI","WBD","PARA",
+        "CCL","AAL","DAL","UAL",
+        "NIO","PLUG","CHPT","RIVN","LCID",
+        "SNAP","MARA","RIOT","HOOD","AFRM","UPST","DKNG","RBLX","U","PATH","OPEN",
         # ── ETFs (Turtle-friendly: clean trends, no earnings gaps) ──
         # Broad market: most liquid, cleanest trend behaviour
         "SPY","QQQ","IWM",
@@ -663,7 +690,16 @@ def rebalance_allocations(daily=True):
     Rebalance fund allocation based on performance.
     Winner gets more funds, loser gets less.
     Performance window: daily + weekly.
+
+    Disabled — Claude is the sole stock decision-maker and Grok is
+    advisory-only, so there is no competing pool to rebalance. Kept as a
+    no-op (rather than removing call sites) so claude_allocation/grok_allocation
+    stay pinned at 1.0/0.0.
     """
+    period = "daily" if daily else "weekly"
+    log(f"⚖️ {period.upper()} REBALANCE — skipped (Grok is advisory-only, no pool to rebalance)")
+    return
+
     now_et = datetime.now(ZoneInfo("America/New_York"))
     today  = now_et.date()
     week   = now_et.isocalendar()[1]
