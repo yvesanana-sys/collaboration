@@ -355,8 +355,8 @@ html, body {
 .svc-row:last-child { border-bottom: none; }
 .svc-row span:last-child { color: var(--ink); font-weight: 600; font-family: var(--font-mono); text-align: right; }
 
-/* ─── Row 3 — stocks / crypto / activity ────────────────────── */
-.row3 { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+/* ─── Row 3 — stocks / activity ──────────────────────────────── */
+.row3 { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .row3 .panel { overflow-y: auto; }
 .pos-table { width: 100%; border-collapse: collapse; font-size: 11px; }
 .pos-table td { padding: 4px 0; border-bottom: 1px dotted var(--rule); font-variant-numeric: tabular-nums; }
@@ -365,10 +365,6 @@ html, body {
 .pos-table .ownr { font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); margin-left: 4px; }
 .pos-table td.r { text-align: right; font-family: var(--font-mono); }
 .pos-empty { color: var(--ink-3); font-style: italic; font-size: 11px; padding: 6px 0; }
-.wallet-line {
-  margin-top: 6px; padding-top: 6px; border-top: 1px dotted var(--rule);
-  font-size: 10px; color: var(--ink-3); font-variant-numeric: tabular-nums; flex: 0 0 auto;
-}
 
 .activity-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .activity-item {
@@ -446,7 +442,6 @@ html, body {
 @media (max-width: 1180px) {
   .row1 { grid-template-columns: 1fr; }
   .row2 { grid-template-columns: 1fr; }
-  .row3 { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
 }
 @media (max-width: 700px) {
   .row3 { grid-template-columns: 1fr; }
@@ -492,7 +487,6 @@ html, body {
         </div>
         <div class="hero-breakdown">
           <div class="hb-row"><span>Stocks</span><span id="hb-stocks">—</span></div>
-          <div class="hb-row"><span>Crypto</span><span id="hb-crypto">—</span></div>
           <div class="hb-row"><span>Cash</span><span id="hb-cash">—</span></div>
         </div>
       </div>
@@ -551,7 +545,6 @@ html, body {
         <span class="h-chip" id="h-turtle"><span class="dot"></span><span class="h-key">turtle</span><span class="h-val">—</span></span>
         <span class="h-chip" id="h-claude"><span class="dot"></span><span class="h-key">claude</span><span class="h-val">—</span></span>
         <span class="h-chip" id="h-grok"><span class="dot"></span><span class="h-key">grok</span><span class="h-val">—</span></span>
-        <span class="h-chip" id="h-fees"><span class="dot"></span><span class="h-key">fees</span><span class="h-val">—</span></span>
         <span class="h-chip" id="h-data"><span class="dot"></span><span class="h-key">data</span><span class="h-val">—</span></span>
       </div>
       <div class="svc-info">
@@ -561,20 +554,13 @@ html, body {
     </section>
   </div>
 
-  <!-- ── Row 3: stocks / crypto / activity ───────────────────── -->
+  <!-- ── Row 3: stocks / activity ─────────────────────────────── -->
   <div class="row3">
     <section class="panel">
       <div class="panel-head"><h2>Stocks</h2><span class="panel-meta" id="stock-meta"></span></div>
       <table class="pos-table" id="stock-table">
         <tbody id="stock-rows"><tr><td class="pos-empty" colspan="3">no open stock positions</td></tr></tbody>
       </table>
-    </section>
-    <section class="panel">
-      <div class="panel-head"><h2>Crypto <span class="accent-text">(winding down)</span></h2><span class="panel-meta" id="crypto-meta"></span></div>
-      <table class="pos-table" id="crypto-table">
-        <tbody id="crypto-rows"><tr><td class="pos-empty" colspan="3">no open crypto positions</td></tr></tbody>
-      </table>
-      <div class="wallet-line" id="wallet-line">—</div>
     </section>
     <section class="panel">
       <div class="panel-head"><h2>Activity</h2><span class="panel-meta" id="activity-last">—</span></div>
@@ -696,17 +682,14 @@ function renderWrBar(wins, losses) {
     `<rect x="${wPct.toFixed(1)}" y="0" width="${(100 - wPct).toFixed(1)}" height="6" rx="2" fill="var(--bad)"/>`;
 }
 
-function renderHero(stats, crypto, perf, leaderboard) {
+function renderHero(stats, perf, leaderboard) {
   const stockEq = parseFloat(stats?.equity || 0);
-  const cryptoEq = parseFloat(crypto?.wallet?.total_value || 0);
   const cash = parseFloat(stats?.cash || 0);
-  const combined = stockEq + cryptoEq;
-  setT('hero-equity', fmt$0(combined));
+  setT('hero-equity', fmt$0(stockEq));
 
   const stockDay = parseFloat(stats?.claude_daily_pnl || 0) + parseFloat(stats?.grok_daily_pnl || 0);
   setT('hero-day-delta', `${fmtSigned(stockDay)} today`, stockDay > 0 ? 'good' : stockDay < 0 ? 'bad' : '');
   setT('hb-stocks', fmt$0(stockEq));
-  setT('hb-crypto', fmt$0(cryptoEq));
   setT('hb-cash', fmt$0(cash));
 
   const totalPnl = perf?.summary?.total_pnl || 0;
@@ -725,22 +708,19 @@ function renderHero(stats, crypto, perf, leaderboard) {
   setT('hero-closed-sub', totalClosed ? 'all-time' : '—');
 
   const stockPos = (stats?.positions || []).length;
-  const cryptoPos = crypto?.position_count || 0;
-  setT('hero-pos', stockPos + cryptoPos);
-  setT('hero-pos-sub', `${stockPos} stock · ${cryptoPos} crypto`);
+  setT('hero-pos', stockPos);
+  setT('hero-pos-sub', `${stockPos} stock`);
 }
 
-function buildTickerItems(stats, crypto) {
+function buildTickerItems(stats) {
   const items = [];
   (stats?.positions || []).forEach(p => items.push({ sym: p.symbol, pct: parseFloat(p.pnl_pct || 0) }));
-  const cp = crypto?.bot_positions || {};
-  Object.keys(cp).forEach(sym => items.push({ sym, pct: parseFloat(cp[sym].pnl_pct || 0) }));
   return items;
 }
 
-function renderTicker(stats, crypto) {
+function renderTicker(stats) {
   const track = document.getElementById('ticker-track');
-  const items = buildTickerItems(stats, crypto);
+  const items = buildTickerItems(stats);
   if (!items.length) {
     track.innerHTML = '<span class="ticker-item">no active positions</span>';
     track.style.animation = 'none';
@@ -753,7 +733,7 @@ function renderTicker(stats, crypto) {
   track.style.animation = '';
 }
 
-function renderHealth(stats, crypto, strategist, perf) {
+function renderHealth(stats, strategist, perf) {
   const botEl = document.getElementById('h-bot');
   botEl.querySelector('.h-val').textContent = stats?.error ? 'error' : 'online';
   botEl.className = 'h-chip ' + (stats?.error ? 'bad' : '');
@@ -780,20 +760,8 @@ function renderHealth(stats, crypto, strategist, perf) {
   gEl.querySelector('.h-val').textContent = gHealthy ? 'ok' : (stats?.grok_fail_reason || 'unknown');
   gEl.className = 'h-chip ' + (gHealthy ? '' : 'bad');
 
-  const feesEl = document.getElementById('h-fees');
-  const f = crypto?.fees;
-  if (f) {
-    const rtPct = (f.round_trip * 100).toFixed(3);
-    const bnb = f.bnb_active ? 'BNB on' : 'no BNB';
-    feesEl.querySelector('.h-val').textContent = `${rtPct}% · ${bnb}`;
-    feesEl.className = 'h-chip ' + (f.bnb_active ? '' : 'warn');
-  } else {
-    feesEl.querySelector('.h-val').textContent = 'unknown';
-    feesEl.className = 'h-chip off';
-  }
-
   const dataEl = document.getElementById('h-data');
-  const dataOk = !stats?.error && !crypto?.error;
+  const dataOk = !stats?.error;
   dataEl.querySelector('.h-val').textContent = dataOk ? 'ok' : 'partial';
   dataEl.className = 'h-chip ' + (dataOk ? '' : 'warn');
 }
@@ -868,39 +836,6 @@ function renderStocks(stats) {
   }
   tbody.innerHTML = rows;
   setT('stock-meta', `${positions.length} · ${fmtSigned(totalPnl)}`);
-}
-
-function renderCrypto(crypto) {
-  const positions = crypto?.bot_positions || {};
-  const symbols = Object.keys(positions);
-  const tbody = document.getElementById('crypto-rows');
-  if (!symbols.length) {
-    tbody.innerHTML = '<tr><td class="pos-empty" colspan="3">no open crypto positions</td></tr>';
-    setT('crypto-meta', '');
-  } else {
-    let totalPnl = 0;
-    let rows = '';
-    for (const sym of symbols) {
-      const p = positions[sym];
-      const pnlPct = parseFloat(p.pnl_pct || 0);
-      const pnl = parseFloat(p.pnl_usd || 0);
-      totalPnl += pnl;
-      const isTurtle = p.strategy_type === 'turtle';
-      const own = p.owner === 'claude' ? '<span class="ownr">C</span>' :
-                  p.owner === 'grok'   ? '<span class="ownr">G</span>'   : '';
-      const turtleTag = isTurtle ? '<span class="ownr" style="color:var(--violet)">T</span>' : '';
-      rows += `<tr>
-        <td><span class="sym">${sym}</span>${own}${turtleTag}</td>
-        <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
-        <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
-      </tr>`;
-    }
-    tbody.innerHTML = rows;
-    setT('crypto-meta', `${symbols.length} · ${fmtSigned(totalPnl)}`);
-  }
-  const usdt = parseFloat(crypto?.wallet?.usdt_free || 0);
-  const total = parseFloat(crypto?.wallet?.total_value || 0);
-  setT('wallet-line', `${fmt$(total)} wallet · ${fmt$(usdt)} free`);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1168,23 +1103,21 @@ async function fetchAll() {
   statusText.textContent = 'syncing…';
   statusLive.className = 'live-pill warn';
   try {
-    const [stats, crypto, perf, hist, leaderboard, strategist] = await Promise.all([
+    const [stats, perf, hist, leaderboard, strategist] = await Promise.all([
       apiFetch('/stats').catch(e => ({ error: e.message })),
-      apiFetch('/crypto_status').catch(e => ({ error: e.message })),
       apiFetch('/performance').catch(e => ({ error: e.message })),
       apiFetch('/history?limit=500').catch(e => ({ error: e.message })),
       apiFetch('/leaderboard').catch(e => ({ error: e.message })),
       apiFetch('/strategy').catch(e => ({ error: e.message })),
     ]);
 
-    renderHero(stats, crypto, perf, leaderboard);
-    renderTicker(stats, crypto);
-    renderHealth(stats, crypto, strategist, perf);
+    renderHero(stats, perf, leaderboard);
+    renderTicker(stats);
+    renderHealth(stats, strategist, perf);
     renderBanner(stats);
     renderPerformance(leaderboard);
     renderStrategy(strategist);
     renderStocks(stats);
-    renderCrypto(crypto);
     ALL_TRADES = hist?.trades || [];
     renderCloses();
     renderActivity();
