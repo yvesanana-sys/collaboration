@@ -635,10 +635,84 @@ def get_biggest_gainers():
                         "in_universe": sym in RULES["universe"],
                     })
             if top:
-                log(f"📈 Biggest gainers today (>3%): {[(t['symbol'], f'+{t["change"]:.1f}%') for t in top]}")
+                parts = [f"{t['symbol']} +{t['change']:.1f}%" for t in top]
+                log(f"📈 Biggest gainers today (>3%): {parts}")
             return top
     except Exception as e:
         log(f"⚠️ Gainers fetch failed: {e}")
+    return []
+
+def get_penny_stock_movers():
+    """
+    Scan today's biggest movers (gainers + losers, same Alpaca screener
+    as get_biggest_gainers) for sub-$5, exchange-listed opportunities.
+
+    NOT an exhaustive scan of the whole under-$5 universe — Alpaca's
+    movers screener only returns today's top 20 gainers and top 20
+    losers, so this is a fast, bounded "what's moving that's cheap
+    right now" signal, not a full penny-stock market scan (that would
+    need a per-symbol price loop over thousands of tickers, which isn't
+    practical on a 5-minute cycle).
+
+    Excludes OTC/pink-sheet tickers — cross-checked against Alpaca's
+    tradable-assets list (one bulk call, no per-symbol network loop) so
+    only real exchange-listed names come back. Deliberately separate
+    from RULES["universe"]/stock_tiers, whose documented policy is
+    "no OTC/penny tickers" for the core curated list — this is an
+    explicit, higher-risk opportunistic channel on top of that.
+    """
+    try:
+        headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+        url     = f"{DATA_URL}/v1beta1/screener/stocks/movers?top=20&market_type=stocks"
+        res     = requests.get(url, headers=headers, timeout=10)
+        if not res.ok:
+            return []
+        data   = res.json()
+        movers = data.get("gainers", []) + data.get("losers", [])
+
+        candidates = []
+        for m in movers:
+            sym   = m.get("symbol", "")
+            price = m.get("price")
+            pct   = float(m.get("percent_change", 0) or 0)
+            if not sym or price is None:
+                continue
+            price = float(price)
+            if not (0.10 <= price < 5.0):   # skip sub-dime junk and anything >= $5
+                continue
+            candidates.append({"symbol": sym, "price": price, "change": pct})
+
+        if not candidates:
+            return []
+
+        # Cross-check tradability + exchange with one bulk assets call —
+        # no per-symbol network loop.
+        assets_res = requests.get(
+            f"{BASE_URL}/v2/assets?status=active&asset_class=us_equity",
+            headers=headers, timeout=15
+        )
+        if not assets_res.ok:
+            return []
+        by_symbol = {a.get("symbol"): a for a in assets_res.json()}
+
+        safe = []
+        for c in candidates:
+            a = by_symbol.get(c["symbol"])
+            if not a or not a.get("tradable"):
+                continue
+            if (a.get("exchange") or "").upper() == "OTC":
+                continue
+            c["exchange"] = a.get("exchange")
+            safe.append(c)
+
+        safe.sort(key=lambda x: abs(x["change"]), reverse=True)
+        top = safe[:8]
+        if top:
+            parts = [f"{t['symbol']} ${t['price']:.2f} ({t['change']:+.1f}%)" for t in top]
+            log(f"🔍 Sub-$5 movers today (exchange-listed): {parts}")
+        return top
+    except Exception as e:
+        log(f"⚠️ Penny stock scan failed: {e}")
     return []
 
 def get_recent_ipos(min_days=30, max_days=180):

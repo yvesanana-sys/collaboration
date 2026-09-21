@@ -692,6 +692,44 @@ class PromptBuilder:
             "near_tp":   near_tp,
         }
 
+    # ── BUILD PENNY-STOCK RESEARCH PROMPT (Grok social/news pass) ──
+    def build_penny_research_prompt(self, candidates):
+        """
+        Prompt for Grok to research today's sub-$5 movers on X/Twitter
+        and news before Claude decides whether any are real opportunities
+        or just pump-and-dump noise. Same "plain text bullets, no JSON"
+        pattern as binance_crypto.py's crypto research call — Grok is
+        asked to search, but note this is a prompt instruction only;
+        nothing here forces or verifies an actual live-search API call.
+        """
+        cand_str = ", ".join(
+            f"{c['symbol']} (${c['price']:.2f}, {c['change']:+.1f}% today)"
+            for c in candidates
+        )
+        prompt = (
+            f"You have LIVE access to Twitter/X, Reddit, StockTwits, and news search. "
+            f"Search for each of these sub-$5 stocks RIGHT NOW:\n\n"
+            f"CANDIDATES: {cand_str}\n\n"
+            f"FOR EACH SYMBOL, tell me:\n"
+            f"• Any real catalyst — news, earnings, contract, insider buying, FDA/regulatory event?\n"
+            f"• Social sentiment on X/StockTwits in the last few hours — genuinely bullish, or one-sided hype?\n"
+            f"• RED FLAGS: sudden volume spike with no news, coordinated promotional posts, "
+            f"paid stock-promotion language, penny-stock newsletter pushes — flag AVOID if you see these\n\n"
+            f"REPLY FORMAT — plain text, one line per symbol:\n"
+            f"• SYMBOL — catalyst or 'no catalyst found' — sentiment — CONFIRM or AVOID\n"
+            f"Be specific and skeptical. Most sub-$5 movers are noise, not opportunity — say so plainly "
+            f"when that's what you find."
+        )
+        return prompt
+
+    def build_penny_research_system(self):
+        return (
+            "You are Grok, a skeptical small-cap research analyst with LIVE Twitter/X, "
+            "Reddit, StockTwits, and web search access. Your job is to separate real "
+            "catalysts from pump-and-dump hype on sub-$5 stocks. Default to AVOID unless "
+            "you find a genuine, verifiable catalyst. Plain text bullets only, no JSON."
+        )
+
     # ── BUILD R1 PROMPT (main collaborative session) ────────
     def build_r1(self, equity, cash, positions, pos_details,
                  pool, chart_section, news, market_ctx,
@@ -700,6 +738,8 @@ class PromptBuilder:
                  short_note, spy_trend, features,
                  projections=None,
                  crypto_context: str = "",
+                 penny_stocks=None,
+                 penny_research: str = "",
                  ai_name: str = ""):   # ai_name enables playbook injection
         """
         Build the Round 1 collaborative session prompt.
@@ -775,6 +815,29 @@ Rules: min 2.5% profit | -4% stop | 72h max hold | LIMIT orders only | VIABLE ra
 JSON crypto_trades field: [{{"symbol":"BTCUSDT","action":"buy","notional_usdt":12.0,"confidence":80,"entry_target":95000.0,"tp_target":97500.0,"rationale":"brief"}}]
 Leave crypto_trades empty [] if no good setup — never force a crypto trade."""
 
+        # ── Sub-$5 opportunity section (Grok social/news research) ──
+        penny_block = ""
+        if penny_stocks:
+            cand_lines = "\n".join(
+                f"  {c['symbol']}: ${c['price']:.2f} ({c['change']:+.1f}% today, {c.get('exchange','?')})"
+                for c in penny_stocks
+            )
+            penny_block = f"""
+=== 🔎 SUB-$5 OPPORTUNITIES (exchange-listed only, not OTC) ===
+Today's movers priced under $5:
+{cand_lines}
+
+Grok's social/news research on these:
+{penny_research or "(no research available this cycle)"}
+
+PENNY STOCK RULES — these are HIGHER RISK than the normal universe:
+- Require a real catalyst (news, earnings, contract, insider buying) — hype/social buzz ALONE is not enough
+- Be skeptical of coordinated pump patterns (sudden volume spike + one-sided social sentiment + no fundamental news)
+- Only propose a trade here if confidence is genuinely 80%+ — when in doubt, skip
+- Size same as any other position — no special sizing for these
+Include as a normal proposed_trades entry only if it clears the bar above.
+"""
+
         # 7. Assemble the full prompt
         # Performance vs targets
         trading_pool  = pool.get("trading", equity * 0.85)
@@ -814,6 +877,7 @@ Trading Pool: ${pool['trading']:.2f}
 
 {f"=== {lessons} ===" if lessons else ""}
 {crypto_block}
+{penny_block}
 === YOUR TASK [{mode.upper().replace('_',' ')} MODE] ===
 FOCUS: {focus}
 SPY: {spy_trend.upper()} {'— NO NEW BUYS' if spy_trend == 'bear' else '— Full trading active'}
