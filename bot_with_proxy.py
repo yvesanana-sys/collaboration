@@ -22,6 +22,15 @@ DATA_URL       = "https://data.alpaca.markets"
 BOT_NAME       = "NovaTrade"
 PORT           = int(os.environ.get("PORT", 8080))
 
+# ── Crypto trading — split out of this process ────────────────
+# NovaTrade is stocks-only now. Crypto trading (new entries, staking)
+# is being moved to its own standalone bot (see binance_crypto.py's
+# __main__ entrypoint). This process still runs the exit monitor so
+# any crypto positions already open get managed safely, but it will
+# not open new crypto positions. Flip to True only if you intend to
+# run crypto and stocks from this same process again.
+CRYPTO_TRADING_ENABLED = False
+
 app = Flask(__name__)
 CORS(app)
 
@@ -898,84 +907,40 @@ def performance():
 @app.route("/leaderboard")
 def leaderboard():
     """
-    Claude vs Grok head-to-head crypto trading scoreboard.
-    Pulls realized P&L from both the persistent trade_history
-    (stocks + crypto via /data volume) and CryptoTrader's in-memory
-    history. Counts only crypto closes, tagged by `owner`.
+    Stock trading performance summary.
+    Claude is the sole decision-maker now — Grok only reviews Claude's
+    proposals (support/risk-check), so there's no more head-to-head
+    competition to score. This reports overall stock performance plus
+    whether Grok's review pass is currently active.
     """
     try:
-        # Use persistent trade_history (loaded from /data on boot,
-        # contains all owner-tagged closes across both stocks & crypto).
-        # ALSO merge in CryptoTrader's in-memory crypto closes — but
-        # dedup, because _execute_exit writes to BOTH lists. Without
-        # dedup, every crypto close was counted twice in the leaderboard
-        # → inflated trade counts and >100% win rates on the dashboard.
-        all_history = list(trade_history)
+        closes = [t for t in trade_history
+                  if t.get("pnl_usd") is not None
+                  and not (t.get("symbol") or "").upper().endswith(("USDT", "USDC", "BUSD"))]
+        wins      = sum(1 for t in closes if (t.get("pnl_usd") or 0) > 0)
+        total_pnl = sum(t.get("pnl_usd") or 0 for t in closes)
+        win_rate  = round(wins / len(closes) * 100, 1) if closes else 0.0
 
-        # Build a signature set from the persistent history so we can
-        # skip duplicates when merging the in-memory list. Signature is
-        # (symbol, time, pnl_usd) — same close has all three identical
-        # since both code paths derive from one _execute_exit() call.
-        def _sig(t):
-            pnl = t.get("pnl_usd")
-            return (
-                (t.get("symbol") or "").upper(),
-                t.get("time") or "",
-                round(float(pnl), 4) if pnl is not None else None,
-            )
+        recent_trades = [{
+            "symbol":  t.get("symbol"),
+            "action":  t.get("action"),
+            "pnl_usd": t.get("pnl_usd"),
+            "pnl_pct": t.get("pnl_pct"),
+            "time":    t.get("time"),
+        } for t in closes[-10:]]
 
-        seen_sigs = {_sig(t) for t in all_history if t.get("pnl_usd") is not None}
-
-        if hasattr(crypto_trader, "trade_history"):
-            for t in crypto_trader.trade_history:
-                sig = _sig(t)
-                if sig in seen_sigs:
-                    continue   # already counted via persistent history
-                seen_sigs.add(sig)
-                # Merge — CryptoTrader format slightly differs, normalize
-                all_history.append({
-                    "action":     t.get("action", "sell"),
-                    "symbol":     t.get("symbol", ""),
-                    "owner":      t.get("owner", "shared"),
-                    "pnl_usd":    t.get("pnl_usd"),
-                    "pnl_pct":    t.get("pnl_pct"),
-                    "time":       t.get("time", ""),
-                    "entry_price": t.get("entry_price"),
-                    "exit_price":  t.get("exit_price"),
-                })
-
-        lb = crypto_trader.get_ai_leaderboard(all_history)
-
-        # Annotate with helpful context
-        c, g = lb["claude"], lb["grok"]
-        recent_trades = []
-        for t in all_history[-20:]:
-            sym = (t.get("symbol") or "").upper()
-            if (t.get("pnl_usd") is not None
-                and sym.endswith(("USDT", "USDC", "BUSD"))):
-                recent_trades.append({
-                    "symbol":  t.get("symbol"),
-                    "owner":   t.get("owner"),
-                    "pnl_usd": t.get("pnl_usd"),
-                    "pnl_pct": t.get("pnl_pct"),
-                    "time":    t.get("time"),
-                })
+        open_positions = len(shared_state.get("claude_positions", [])) + len(shared_state.get("grok_positions", []))
 
         return jsonify({
-            "competition_enabled": getattr(binance_crypto, "ENABLE_AI_COMPETITION", False),
-            "pool_split": {
-                "claude_pct": getattr(binance_crypto, "CLAUDE_POOL_PCT", 0.5),
-                "grok_pct":   getattr(binance_crypto, "GROK_POOL_PCT",   0.5),
-            },
-            "reserve": _get_reserve_info(),
-            "leader":          lb["leader"],
-            "leader_emoji":    lb["leader_emoji"],
-            "margin_usd":      lb["margin_usd"],
-            "claude":          c,
-            "grok":            g,
-            "shared":          lb["shared"],   # legacy "both AIs agreed" trades
-            "total_closed":    lb["total_closed"],
-            "recent_trades":   recent_trades[-10:],   # last 10 crypto closes
+            "decision_model":  "claude_primary_grok_support",
+            "grok_active":     bool(GROK_KEY) and shared_state.get("grok_healthy", True),
+            "reserve":         _get_reserve_info(),
+            "total_pnl":       round(total_pnl, 2),
+            "total_closed":    len(closes),
+            "wins":            wins,
+            "win_rate":        win_rate,
+            "open_positions":  open_positions,
+            "recent_trades":   recent_trades,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1952,14 +1917,14 @@ def check_exit_conditions(positions, equity):
                 shared_state["position_exits"].pop(symbol, None)
             continue
 
-        # ── UNIVERSAL: Small-account quick take-profit ────────
-        # At low equity tiers, bank any real gain instead of waiting for
-        # the strategy-specific 8% target — maximize round-trips and
-        # keep cash working. Skips Turtle (strategy T), which has its
-        # own deliberate trend-following exit. quick_tp is None at the
-        # top tier, so this is a no-op there — existing A/B logic below
-        # runs exactly as before.
-        if quick_tp is not None and strategy != "T" and pnl_pct >= quick_tp:
+        # ── UNIVERSAL: Quick take-profit, all strategies ──────
+        # Bank any real gain instead of waiting for the strategy-specific
+        # 8% target — maximize round-trips and keep cash working.
+        # Applies to Turtle (strategy T) too now — every tier has a
+        # tp_pct (see portfolio_manager.py stock_tiers), so this always
+        # fires before the A/B/T-specific logic below gets a chance to
+        # hold out for a bigger, slower move.
+        if quick_tp is not None and pnl_pct >= quick_tp:
             log(f"⚡ [{owner}] QUICK TP {symbol} +{pnl_pct*100:.1f}% >= {quick_tp*100:.1f}% "
                 f"(tier: equity ${equity:.0f}) | +${pnl_usd:.2f}")
             if smart_sell(symbol, "quick take-profit (small-account velocity)", pos):
@@ -2142,79 +2107,7 @@ def check_exit_conditions(positions, equity):
                         log(f"   [B] {symbol}: {status} | {days_held}d held")
                 except Exception: pass
 
-# ── Collaboration Engine ─────────────────────────────────
-
-def is_collaborative_trade_worthy(trade_claude, trade_grok, chart_section, news, equity=0, collab_pool=0):
-    """
-    Gate-keeper for collaborative big-ticket trades.
-    LOCKED until equity >= $3,000 and min trade size $1,000.
-    Requires: 95%+ confidence BOTH AIs + news catalyst + 5+ signals.
-    This is the HIGH CONVICTION filter — fires rarely but powerfully.
-    """
-    if not trade_claude or not trade_grok:
-        return False, "One AI did not propose a trade"
-
-    # ── PRIMARY GATEKEEPER — equity must be $3,000+ ──────────────
-    if equity < RULES["collab_unlock_equity"]:
-        needed = RULES["collab_unlock_equity"] - equity
-        pct    = round(equity / RULES["collab_unlock_equity"] * 100, 1)
-        return False, f"LOCKED — need ${needed:.0f} more equity (${equity:.0f}/${RULES['collab_unlock_equity']} = {pct}%)"
-
-    # ── MINIMUM TRADE SIZE — must be able to deploy $1,000 ───────
-    if collab_pool < RULES["collab_min_trade_size"]:
-        return False, f"Collaborative pool ${collab_pool:.0f} < ${RULES['collab_min_trade_size']} minimum trade size"
-
-    # Must be same symbol
-    if trade_claude.get("symbol") != trade_grok.get("symbol"):
-        return False, f"Symbol mismatch: Claude={trade_claude.get('symbol')} Grok={trade_grok.get('symbol')}"
-
-    # BONUS: Biggest gainers get automatic collaborative consideration
-    # (still need both AIs to agree, but lower confidence threshold)
-    gainers      = get_biggest_gainers()
-    gainer_syms  = [g["symbol"] for g in gainers if g.get("change", 0) > 3.0]
-    is_big_gainer = symbol in gainer_syms
-    if is_big_gainer:
-        log(f"📈 {symbol} is a biggest gainer today — lowering collab confidence to 88%")
-
-    # Both must hit confidence threshold
-    # Biggest gainers get lower threshold (88% vs 95%)
-    c_conf     = trade_claude.get("confidence", 0)
-    g_conf     = trade_grok.get("confidence", 0)
-    conf_floor = 88 if is_big_gainer else RULES["collab_min_confidence"]
-    if c_conf < conf_floor:
-        return False, f"Claude confidence {c_conf}% < {conf_floor}% required"
-    if g_conf < conf_floor:
-        return False, f"Grok confidence {g_conf}% < {conf_floor}% required"
-
-    # Must have 5+ combined signals
-    # Read new compact "flags" string or legacy "signals" list — both work
-    def _to_signal_list(t):
-        flags = t.get("flags") or t.get("f") or ""
-        sigs  = t.get("signals", [])
-        return [x.strip() for x in flags.split(",") if x.strip()] + list(sigs)
-    c_signals   = _to_signal_list(trade_claude)
-    g_signals   = _to_signal_list(trade_grok)
-    all_signals = list(set(c_signals + g_signals))
-    if len(all_signals) < RULES["collab_min_signals"]:
-        return False, f"Only {len(all_signals)} unique signals (need {RULES['collab_min_signals']}+)"
-
-    # Must have news catalyst
-    symbol = trade_claude.get("symbol", "")
-    if RULES["collab_require_news"] and symbol:
-        news_lower = news.lower()
-        sym_lower  = symbol.lower()
-        has_news   = sym_lower in news_lower or any(
-            word in news_lower for word in ["earnings", "acquisition", "fed", "rate", "ai", "revenue", "merger"]
-        )
-        if not has_news:
-            return False, f"No news catalyst found for {symbol}"
-
-    # Expected profit check
-    expected_profit = trade_claude.get("net_profit_target", 0)
-    if expected_profit > 0 and expected_profit < RULES["collab_min_profit_pct"]:
-        return False, f"Expected profit {expected_profit*100:.1f}% < {RULES['collab_min_profit_pct']*100:.0f}% minimum"
-
-    return True, f"✅ All gates passed: conf={c_conf}%/{g_conf}% signals={len(all_signals)} news=✅"
+# ── Decision Engine (Claude primary, Grok support/review) ────
 
 def collaborative_session(equity, cash, positions, pos_symbols, open_count,
                           chart_section, news, market_ctx, features, pool):
@@ -2289,32 +2182,11 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
     if ipo_syms:
         log(f"🆕 IPOs in play: {ipo_syms}")
 
-    # ── Build crypto context for unified R1 call ─────────────
-    # If crypto_trader is enabled, gather crypto data and append
-    # to R1 prompt — no extra AI call needed
-    crypto_context_str = ""
-    if crypto_trader.is_enabled():
-        try:
-            crypto_projs  = crypto_trader.get_projections_snapshot()
-            crypto_wallet = crypto_trader.get_wallet_snapshot()
-            crypto_stats  = crypto_trader.get_stats_snapshot()
-            crypto_cross  = crypto_trader.get_stock_cross_ref(
-                shared_state.get("last_projections", {})
-            )
-            crypto_context_str = prompt_builder.build_crypto_context(
-                wallet_summary  = crypto_wallet.get("summary", ""),
-                crypto_pool     = crypto_wallet.get("usdt_free", 0),
-                crypto_proj_text = crypto_projs,
-                crypto_holdings = crypto_wallet.get("holdings_text", ""),
-                crypto_stats    = crypto_stats,
-                stock_cross_ref = crypto_cross,
-            )
-            if crypto_context_str:
-                log("🪙 Crypto context added to R1 prompt — unified call")
-        except Exception as ce:
-            log(f"⚠️ Crypto context build failed: {ce} — skipping crypto in R1")
+    # Crypto trading has been split out of the stock decision cycle —
+    # see binance_crypto.py's standalone entrypoint. No crypto context
+    # is built or piggybacked onto the stock R1 call any more.
 
-    # Round 1: Both propose independently
+    # ── Round 1: Claude proposes (sole decision-maker) ─────────
     # ── Adaptive prompt — situation-aware, projection-informed, memory-injected ──
     r1_prompt, situation_mode = prompt_builder.build_r1(
         equity          = equity,
@@ -2337,196 +2209,94 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
         spy_trend       = shared_state.get("spy_trend", "neutral"),
         features        = features,
         projections     = shared_state.get("last_projections", {}),
-        crypto_context  = crypto_context_str,
+        crypto_context  = "",
     )
     log(f"🧠 Prompt mode: {situation_mode.upper().replace('_',' ')}")
 
-    log("🔵 Round 1 — Claude proposing...")
-    log("🔴 Round 1 — Grok proposing...")
+    log("🔵 Round 1 — Claude proposing (primary decision-maker)...")
 
     c_ok = shared_state["claude_healthy"]
-    g_ok = shared_state["grok_healthy"]
-
-    if c_ok:
-        claude_r1 = safe_ask_claude(r1_prompt,
-            prompt_builder.build_claude_system())
-    else:
-        log("⚠️ Claude unhealthy — skipping Round 1 for Claude")
-        claude_r1 = None
-
-    if g_ok:
-        grok_r1 = safe_ask_grok(r1_prompt,
-            prompt_builder.build_grok_system())
-    else:
-        log("⚠️ Grok unhealthy — skipping Round 1 for Grok")
-        grok_r1 = None
-
-    # Single AI failover — one AI runs solo
-    if claude_r1 and not grok_r1:
-        log("⚠️ FAILOVER: Grok down — Claude running solo this cycle")
-    elif grok_r1 and not claude_r1:
-        log("⚠️ FAILOVER: Claude down — Grok running solo this cycle")
-
-    if claude_r1:
-        log(f"🔵 Claude: '{claude_r1.get('strategy_name','')}' | {len(claude_r1.get('proposed_trades',[]))} trades")
-    if grok_r1:
-        log(f"🔴 Grok: '{grok_r1.get('strategy_name','')}' | {len(grok_r1.get('proposed_trades',[]))} trades")
-
-    if not claude_r1 and not grok_r1:
-        log("⚠️ Both failed Round 1 — holding")
+    if not c_ok:
+        log("⚠️ Claude unhealthy — no trade this cycle (Grok is support-only, never trades solo)")
         return [], False, {}
 
-    # ── UNIFIED CRYPTO EXECUTION from R1 responses ────────────
-    # Extract crypto_trades from both AI responses and execute now.
-    # Zero extra AI calls — crypto piggybacks on the stock R1 call.
-    if crypto_trader.is_enabled() and crypto_context_str:
-        try:
-            crypto_pool_now = crypto_trader.get_wallet_snapshot().get("usdt_free", 0)
-            crypto_new = crypto_trader.execute_from_r1(
-                claude_r1       = claude_r1,
-                grok_r1         = grok_r1,
-                crypto_pool     = crypto_pool_now,
-                record_trade_fn = record_trade,
-                prompt_builder  = prompt_builder,
-            )
-            if crypto_new:
-                log(f"🪙 Crypto: {crypto_new} new position(s) from unified R1")
-        except Exception as cex:
-            log(f"⚠️ Crypto R1 execution failed: {cex}")
+    claude_r1 = safe_ask_claude(r1_prompt, prompt_builder.build_claude_system())
+    if not claude_r1:
+        log("⚠️ Claude Round 1 failed — holding")
+        return [], False, {}
 
-    # ── AUTONOMOUS TRADES (Round 2 — quick review) ─────────────────
-    # Each AI proposes trades for their own fund independently
+    log(f"🔵 Claude: '{claude_r1.get('strategy_name','')}' | {len(claude_r1.get('proposed_trades',[]))} trades")
+
+    # ── Round 2 — Grok reviews Claude's proposal (support role only) ──
+    # Grok no longer trades its own fund or proposes independent trades;
+    # it's a second-opinion / risk-check on Claude's picks.
     c_trades = [(t.get("symbol"),t.get("confidence"),t.get("direction","long"))
                 for t in (claude_r1 or {}).get("proposed_trades",[])]
-    g_trades = [(t.get("symbol"),t.get("confidence"),t.get("direction","long"))
-                for t in (grok_r1 or {}).get("proposed_trades",[])]
 
-    log("🔵 Round 2 — Claude autonomous review (sole decision-maker)...")
-    log("🔴 Grok is advisory-only this cycle — no independent budget/trades")
+    g_ok = shared_state.get("grok_healthy", True)
+    grok_review = None
+    if g_ok and c_trades:
+        log("🔴 Round 2 — Grok reviewing Claude's proposal (support role)...")
+        g_review_prompt = f"""Claude is proposing these trades this cycle: {c_trades}.
+You are Grok, acting as a SUPPORT / second-opinion risk-check — you do NOT trade your own fund.
+Use X/Twitter sentiment and news to flag risk on each symbol.
+JSON only: {{"reviewed":[{{"symbol":"NVDA","verdict":"confirm|caution|veto","note":"<12w>"}}]}}"""
+        grok_review = ask_with_retry(ask_grok_guarded, g_review_prompt,
+            "You are Grok, a support/risk-check reviewer only — not an independent trader. ONLY valid JSON under 400 chars.")
+        if grok_review:
+            log(f"🔴 Grok review: {len(grok_review.get('reviewed',[]))} trade(s) reviewed")
+    elif not g_ok:
+        log("⚠️ Grok unhealthy — proceeding on Claude's proposal alone")
 
-    c_review_prompt = f"""Your autonomous trades: {c_trades}. Grok's second opinion (advisory only — you have final say): {g_trades}.
-Your budget: ${pool['claude']:.2f}. You are the sole decision-maker for stock trades.
-Confirm your best 1-2 trades (owner=claude). Weigh Grok's ideas above as supporting input where they
-strengthen your conviction, but you are not required to follow them. Min $8. Confidence 80%+.
+    vetoed = set()
+    for r in (grok_review or {}).get("reviewed", []):
+        verdict = str(r.get("verdict", "")).lower()
+        sym     = r.get("symbol")
+        if verdict == "veto" and sym:
+            vetoed.add(sym)
+            log(f"🔴 Grok VETO {sym}: {r.get('note','')[:60]} — skipping")
+        elif verdict == "caution" and sym:
+            log(f"🟡 Grok caution on {sym}: {r.get('note','')[:60]}")
+
+    # ── Round 3 — Claude confirms its best trades ──────────────
+    log("🔵 Round 3 — Claude confirming best trades...")
+    c_review_prompt = f"""Your proposed trades: {c_trades}. Grok's risk review: {(grok_review or {}).get('reviewed', [])}.
+Your budget: ${pool['claude']:.2f}. Confirm your best 1-2 trades (owner=claude).
+Min $8. Confidence 80%+.
 JSON: {{"refined_trades":[{{"action":"buy|sell","symbol":"NVDA","notional_usd":15.0,"confidence":85,"f":"flags","r":"<8w>","owner":"claude"}}]}}"""
 
-    # Re-check health here (not the c_ok/g_ok from before Round 1) — a
+    # Re-check health here (not c_ok from before Round 1) — a
     # credits_exhausted failure in Round 1 flips claude_healthy to False
-    # immediately, and we don't want Round 2 to hit the same dead API.
+    # immediately, and we don't want Round 3 to hit the same dead API.
     claude_r2 = (ask_with_retry(ask_claude_guarded, c_review_prompt,
-        "You are Claude confirming your autonomous trades. ONLY valid JSON under 500 chars.")
+        "You are Claude confirming your proposed trades. ONLY valid JSON under 500 chars.")
         if shared_state.get("claude_healthy", True) else None)
-    # Grok no longer gets an independent Round 2 budget call — its Round 1
-    # proposals (g_trades, above) already feed Claude's decision as advisory
-    # context. grok_allocation is pinned at 0.0, so any owner="grok" trade
-    # would be sized to $0 and rejected in execute_trades() anyway.
-    grok_r2 = None
 
-    if claude_r2: log(f"🔵 Claude autonomous: {len(claude_r2.get('refined_trades',[]))} trades confirmed")
+    if claude_r2: log(f"🔵 Claude confirmed: {len(claude_r2.get('refined_trades',[]))} trades")
 
-    # ── COLLABORATIVE BIG-TICKET CHECK (Round 3) ─────────────────
-    # Only fires when BOTH AIs agree at 95%+ with news + 5 signals
-    log("🤝 Round 3 — Collaborative big-ticket gate check...")
+    c_ref = (claude_r2 or {}).get("refined_trades", (claude_r1 or {}).get("proposed_trades",[])[:2])
+    final_trades = [t for t in c_ref if t.get("symbol") not in vetoed]
+    for t in final_trades:
+        t["owner"] = "claude"
+        t.setdefault("fee_estimate", estimate_fees(float(t.get("notional_usd", 0) or 0)))
 
-    collab_trades = []
-    collab_budget = pool.get("collaborative", 0)
-
-    # Find highest-confidence matching trades from both AIs
-    c_proposals = (claude_r1 or {}).get("proposed_trades", [])
-    g_proposals = (grok_r1 or {}).get("proposed_trades", [])
-
-    # Also gather collaborative candidates both AIs flagged
-    c_collab_candidates = (claude_r1 or {}).get("collaborative_candidates", [])
-    g_collab_candidates = (grok_r1   or {}).get("collaborative_candidates", [])
-    all_collab_syms = set(
-        [c.get("symbol") for c in c_collab_candidates if c.get("symbol")] +
-        [c.get("symbol") for c in g_collab_candidates if c.get("symbol")]
-    )
-    if all_collab_syms:
-        log(f"🤝 Collaborative candidates flagged by AIs: {list(all_collab_syms)}")
-
-    # Add collaborative candidates as synthetic trade proposals for gate check
-    for sym in all_collab_syms:
-        c_conf_val = next((c.get("confidence",85) for c in c_collab_candidates if c.get("symbol")==sym), 85)
-        g_conf_val = next((c.get("confidence",85) for c in g_collab_candidates if c.get("symbol")==sym), 85)
-        if c_conf_val >= 85 and g_conf_val >= 85:
-            c_proposals.append({"symbol":sym,"action":"buy","confidence":c_conf_val,"signals":["collab_candidate","politician_or_gainer"],"rationale":f"Flagged by Claude as collaborative"})
-            g_proposals.append({"symbol":sym,"action":"buy","confidence":g_conf_val,"signals":["collab_candidate","politician_or_gainer"],"rationale":f"Flagged by Grok as collaborative"})
-
-    for c_trade in c_proposals:
-        for g_trade in g_proposals:
-            if c_trade.get("symbol") == g_trade.get("symbol"):
-                worthy, reason = is_collaborative_trade_worthy(
-                    c_trade, g_trade, chart_section, news,
-                    equity=equity, collab_pool=collab_budget
-                )
-                if worthy:
-                    log(f"🚨 COLLABORATIVE GATE PASSED: {c_trade.get('symbol')} — {reason}")
-                    # Size the collaborative trade — minimum $1,000
-                    collab_notional = min(
-                        collab_budget * RULES["collab_max_trade_pct"],
-                        collab_budget - 50  # keep buffer
-                    )
-                    collab_notional = max(collab_notional, RULES["collab_min_trade_size"])
-                    fee_est = estimate_fees(collab_notional)
-                    collab_trades.append({
-                        "action":       c_trade.get("action", "buy"),
-                        "symbol":       c_trade.get("symbol"),
-                        "notional_usd": round(collab_notional, 2),
-                        "confidence":   min(c_trade.get("confidence",95), g_trade.get("confidence",95)),
-                        "owner":        "shared",
-                        "rationale":    f"COLLABORATIVE: Claude+Grok both 95%+ | {c_trade.get('rationale','')[:60]}",
-                        "fee_estimate": fee_est,
-                        "is_collab":    True,
-                    })
-                    log(f"💥 BIG TICKET: {c_trade.get('symbol')} ${collab_notional:.2f} from collaborative pool!")
-                else:
-                    log(f"⛔ Collaborative gate FAILED: {c_trade.get('symbol')} — {reason}")
-
-    # Combine autonomous + collaborative trades
-    c_ref   = (claude_r2 or {}).get("refined_trades", c_proposals[:2])
-    # Grok is advisory-only — no independent trades of its own outside the
-    # rare Round-3 collaborative gate above.
-    g_ref   = []
-    all_trades = c_ref + g_ref + collab_trades
-
-    # Deduplicate — collab takes priority over autonomous for same symbol
-    seen_symbols = set()
-    final_trades = []
-    # Add collab first (priority)
-    for t in collab_trades:
-        if t.get("symbol") not in seen_symbols:
-            final_trades.append(t)
-            seen_symbols.add(t.get("symbol"))
-    # Add autonomous trades (no overlap with collab)
-    for t in c_ref + g_ref:
-        if t.get("symbol") not in seen_symbols:
-            final_trades.append(t)
-            seen_symbols.add(t.get("symbol"))
-
-    all_owned = shared_state["claude_positions"] + shared_state["grok_positions"]
     total_alloc = sum(t.get("notional_usd", 0) for t in final_trades)
-
-    log(f"🤝 Final plan: {len(collab_trades)} collaborative + {len(c_ref)} Claude + {len(g_ref)} Grok trades")
-    log(f"💰 Total to deploy: ${total_alloc:.2f} | Cash: ${cash:.2f}")
+    log(f"🎯 Final plan: {len(final_trades)} Claude trade(s), Grok-reviewed | ${total_alloc:.2f} to deploy | Cash: ${cash:.2f}")
 
     for t in final_trades:
-        tag = "💥 COLLAB" if t.get("is_collab") else f"[{t.get('owner','?').upper()}]"
-        log(f"   {tag} {t.get('action','?').upper()} {t.get('symbol','?')} "
+        log(f"   [CLAUDE] {t.get('action','?').upper()} {t.get('symbol','?')} "
             f"${t.get('notional_usd',0):.2f} conf={t.get('confidence','?')}% "
             f"fee≈${t.get('fee_estimate',0):.3f}")
 
     # Update bearish watchlist
-    for r in [claude_r1, grok_r1]:
-        if r:
-            for sym in r.get("bearish_watchlist", []):
-                if sym not in shared_state["bearish_watchlist"]:
-                    shared_state["bearish_watchlist"].append(sym)
+    for sym in (claude_r1 or {}).get("bearish_watchlist", []):
+        if sym not in shared_state["bearish_watchlist"]:
+            shared_state["bearish_watchlist"].append(sym)
     if shared_state["bearish_watchlist"]:
         log(f"📋 Bearish watchlist: {shared_state['bearish_watchlist']}")
 
     autonomy_unlocked = equity >= 150
-    return final_trades, autonomy_unlocked, {"joint_message": f"{len(collab_trades)} collab + {len(c_ref+g_ref)} autonomous trades"}
+    return final_trades, autonomy_unlocked, {"joint_message": f"{len(final_trades)} Claude trade(s), Grok-reviewed"}
 
 def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, features):
     remaining_cash = cash
@@ -3507,17 +3277,9 @@ def run_cycle():
             log(f"🎯 Next tier: ${autonomy['needed']:.2f} away — {autonomy.get('next_description','')}")
 
     if pool["autonomy_active"]:
-        log(f"💼 Tier {pool['tier']}: Claude=${pool['claude']:.2f}(auto) | Grok=${pool['grok']:.2f}(auto) | Collab=${pool['collaborative']:.2f} | Reserve=${pool['reserve']:.2f}")
+        log(f"💼 Tier {pool['tier']}: Claude=${pool['claude']:.2f} (sole decision-maker) | Reserve=${pool['reserve']:.2f}")
     else:
-        log(f"💼 Pool: ${pool['trading']:.2f} collaborative | Reserve=${pool['reserve']:.2f} (safe)")
-
-    # Collaborative big-ticket status
-    collab_needed = max(0, RULES["collab_unlock_equity"] - equity)
-    if collab_needed > 0:
-        collab_pct = round(equity / RULES["collab_unlock_equity"] * 100, 1)
-        log(f"🔒 Collaborative big-ticket: LOCKED — need ${collab_needed:.0f} more (${equity:.0f}/${RULES['collab_unlock_equity']} = {collab_pct}% | min trade ${RULES['collab_min_trade_size']:,})")
-    else:
-        log(f"💥 Collaborative big-ticket: UNLOCKED — pool=${pool.get('collaborative',0):.2f} | min trade ${RULES['collab_min_trade_size']:,}")
+        log(f"💼 Pool: ${pool['trading']:.2f} (Claude-managed) | Reserve=${pool['reserve']:.2f} (safe)")
 
     # Daily loss limit — compare to today's starting equity, not all-time budget
     # Use equity at market open (stored in shared_state) as the baseline
@@ -3939,7 +3701,7 @@ Both AIs agree on this plan. Plain text 200 words."""
         # ── 🔒 STAKING REVIEW (once daily at afterhours) ──────
         # Much better here than mid-cycle — no overlap with stock trading.
         # AIs are already awake for afterhours so no extra wake cost.
-        if crypto_trader.is_enabled():
+        if CRYPTO_TRADING_ENABLED and crypto_trader.is_enabled():
             try:
                 log("=" * 50)
                 log("🔒 STAKING REVIEW — Daily check at afterhours")
@@ -4501,11 +4263,11 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
                 stops_fired += 1
                 sold = True
 
-        # ── UNIVERSAL: Small-account quick take-profit ────────
+        # ── UNIVERSAL: Quick take-profit, all strategies ──────
         # Same tiered override as check_exit_conditions — bank any real
-        # gain fast at low equity instead of waiting for the 8% target.
-        # No-op (quick_tp None) at the top tier.
-        if not sold and strategy != "T":
+        # gain fast instead of waiting for the 8% target. Applies to
+        # Turtle (T) positions too now.
+        if not sold:
             quick_tp = get_quick_take_profit_pct(equity)
             if quick_tp is not None and pnl_pct >= quick_tp:
                 log(f"⚡ AUTO QUICK TP {symbol} +{pnl_pct*100:.1f}% >= {quick_tp*100:.1f}% "
@@ -4603,19 +4365,21 @@ def run_autonomous_monitor(positions, pos_symbols, cash, equity):
     return stops_fired
 
 def trading_loop():
-    log(f"🚀 COLLABORATIVE AI Trading System v2.0")
+    log(f"🚀 AI Trading System v3.0 — Stocks Only, Claude-Primary")
     log(f"💰 Budget: ${RULES['total_budget']} | Reserve: {RULES['growth_reserve_pct']*100:.0f}% untouchable")
-    log(f"⚖️ Start: 50/50 split → performance-based rebalance daily + weekly")
+    log(f"🧠 Claude is the sole decision-maker — Grok is a support/risk-review tool only")
+    log(f"🪙 Crypto trading disabled in this process — see binance_crypto.py standalone entrypoint")
     log(f"🏆 Autonomy Tiers:")
     for tier in RULES["autonomy_tiers"]:
         log(f"   ${tier['equity']} → {tier['description']}")
     log(f"🔒 Short selling unlocks at $2,000")
-    log(f"💥 Collaborative big-ticket unlocks at $3,000 (min trade ${RULES['collab_min_trade_size']:,})")
     log(f"🆕 IPO detection: active (30-180 day old stocks, >500k volume)")
-    log(f"🛡️ Stop={RULES['stop_loss_pct']*100}% | TP={RULES['take_profit_pct']*100}% | Daily limit={RULES['daily_loss_limit_pct']*100}%")
+    log(f"🛡️ Stop={RULES['stop_loss_pct']*100}% | TP={RULES['take_profit_pct']*100}% (quick-TP tiers apply below that) | Daily limit={RULES['daily_loss_limit_pct']*100}%")
 
-    if not all([ALPACA_KEY, ALPACA_SECRET, ANTHROPIC_KEY, GROK_KEY]):
-        log("❌ Missing env vars!"); return
+    if not all([ALPACA_KEY, ALPACA_SECRET, ANTHROPIC_KEY]):
+        log("❌ Missing env vars! (ALPACA_KEY, ALPACA_SECRET, ANTHROPIC_KEY are required — Claude is the sole decision-maker)"); return
+    if not GROK_KEY:
+        log("⚠️ GROK_KEY not set — running with Claude only, no support/risk-review pass")
 
     # Initialize day/week/month/year tracking
     account = alpaca("GET", "/v2/account")
@@ -4824,7 +4588,19 @@ def trading_loop():
         # Every run after that is exactly 60 min from last run.
         # This staggers logs cleanly — stocks run first, crypto 2.5 min later.
         try:
-            if crypto_trader.is_enabled():
+            if crypto_trader.is_enabled() and not CRYPTO_TRADING_ENABLED:
+                # Crypto is split out of this process (see binance_crypto.py's
+                # standalone entrypoint) — never open new crypto positions here,
+                # but keep the exit monitor running so anything already open
+                # stays protected by its stop/TP instead of being abandoned.
+                exits = crypto_trader.run_exit_monitor(
+                    record_trade_fn = record_trade,
+                    prompt_builder  = prompt_builder,
+                )
+                if exits:
+                    log(f"🪙 Crypto: {exits} autonomous exit(s) (new entries disabled — stocks-only mode)")
+
+            elif crypto_trader.is_enabled():
                 spy_now     = shared_state.get("spy_trend", "neutral")
                 now_utc     = datetime.now(timezone.utc)
                 last_run    = shared_state.get("crypto_last_run")

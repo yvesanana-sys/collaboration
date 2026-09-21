@@ -123,14 +123,14 @@ RULES = {
     # Strategy A: Fixed TP (good for breakout entries)
     "exit_A_take_profit":      0.08,  # 8% fixed TP (was 20% — bank wins fast)
     "exit_A_stop_loss":        0.05,  # 5% stop (was 10% — tighter)
-    "exit_A_time_stop_days":   3,     # 3-day time stop (was 5d)
+    "exit_A_time_stop_days":   1,     # 1-day time stop (was 3d — faster turnaround)
     # Strategy B: Trailing (lets winners run but with tight trail)
     "exit_B_trail_default":    0.025, # 2.5% trail below peak (was 8%)
     "exit_B_trail_volatile":   0.04,  # 4% trail for TSLA/MSTR/COIN (was 12%)
     "exit_B_trail_stable":     0.02,  # 2% trail for AAPL/MSFT (was 6%)
     "exit_B_trail_activates":  0.04,  # Trail activates at +4% (was +10%)
     "exit_B_stop_loss":        0.05,  # 5% hard stop (was 10%)
-    "exit_B_time_stop_days":   3,     # 3-day time stop (was 5d)
+    "exit_B_time_stop_days":   1,     # 1-day time stop (was 3d — faster turnaround)
     # ── Tier-based position sizing (stocks) ──────────────────
     # More aggressive at small equity, shrinks as account grows.
     # tp_pct: quick-flip take-profit override used by check_exit_conditions
@@ -157,14 +157,11 @@ RULES = {
                    "MSTR", "AMZN", "INTC", "CSCO", "AAL", "CCL"],
          "note": "Tier 2 — 20 stocks (wide net incl. cheap names), 3 positions, 25% risk, 3% quick TP"},
         {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4, "tp_pct": 0.05,
-         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB",
-                   "F", "T", "SNAP", "NIO", "MARA", "HOOD",
-                   "MSTR", "AMZN", "INTC", "CSCO", "AAL", "CCL",
-                   "GOOGL", "AAPL", "MSFT", "NFLX", "RIVN", "LCID", "DKNG", "UPST"],
-         "note": "Tier 3 — 28 stocks (wide net incl. cheap names), 4 positions, 20% risk, 5% quick TP"},
-        {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5, "tp_pct": None,
+         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB", "MSTR", "AMZN", "GOOGL", "AAPL", "MSFT", "NFLX"],
+         "note": "Tier 3 — 14 stocks, 4 positions, 20% risk, 5% quick TP"},
+        {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5, "tp_pct": 0.03,
          "focus": None,  # Full universe — let AI pick anything
-         "note": "Tier 4 — Full universe, 5 positions, 15% risk, standard 8% TP (patient)"},
+         "note": "Tier 4 — Full universe, 5 positions, 15% risk, 3% quick TP (bank small gains, turn around fast)"},
     ],
     # Volatile stocks (wider trail needed — 4% aggressive trail)
     "volatile_stocks": ["TSLA","MSTR","COIN","RKLB","SOFI","AMD","NVDA","PLTR","NFLX",
@@ -219,21 +216,26 @@ RULES = {
         "AMZN","SOFI","MSTR","COIN","RKLB",
         # Tier 4 (full universe)
         "AAPL","MSFT","GOOGL","NFLX","CRM",
-        # ── Wide-net additions (2026-09-18 strategy change) ───────
-        # Liquid, exchange-listed, lower-priced names — value/telecom,
-        # airlines/travel, EV, fintech, crypto-proxy miners, growth
-        # software. Real tickers only, no OTC/penny stocks. This is a
-        # deliberately wider net so a small account isn't limited to
-        # a handful of $150+ mega-caps — "as long as we gain."
-        "F","T","VZ","INTC","CSCO","PFE","KVUE","SIRI","WBD","PARA",
-        "CCL","AAL","DAL","UAL",
-        "NIO","PLUG","CHPT","RIVN","LCID",
-        "SNAP","MARA","RIOT","HOOD","AFRM","UPST","DKNG","RBLX","U","PATH","OPEN",
+        # ── Wide-net additions: cast beyond the usual mega-cap momentum names ──
+        # Financials
+        "JPM","V","MA","GS",
+        # Healthcare
+        "UNH","LLY","JNJ",
+        # Consumer / retail
+        "WMT","COST","DIS","SBUX","NKE",
+        # Industrials
+        "BA","CAT","DE",
+        # Energy
+        "XOM","CVX",
+        # Semis / tech beyond mega-cap
+        "ORCL","CSCO","INTC","QCOM","AVGO","SMCI","ARM",
+        # Growth / newer names
+        "SHOP","UBER","ABNB","SNOW",
         # ── ETFs (Turtle-friendly: clean trends, no earnings gaps) ──
         # Broad market: most liquid, cleanest trend behaviour
-        "SPY","QQQ","IWM",
+        "SPY","QQQ","IWM","DIA","VTI",
         # Sector ETFs: sector rotation is a classic Turtle edge
-        "XLK","XLF","XLE","XLV",
+        "XLK","XLF","XLE","XLV","XLY","XLI","XLB","XLU","XLP",
         # Commodities / store-of-value
         "GLD",
     ],
@@ -549,11 +551,10 @@ def get_trading_pool(equity):
         tier_data  = RULES["autonomy_tiers"][shared_state["autonomy_tier"] - 1]
         total_auto = tier_data["autonomous_fund"]
 
-        # Split autonomous fund by performance allocation
-        c_alloc = shared_state["claude_allocation"]
-        g_alloc = shared_state["grok_allocation"]
-        c_auto  = round(total_auto * c_alloc, 2)
-        g_auto  = round(total_auto * g_alloc, 2)
+        # Claude is the sole decision-maker — Grok is a support/review
+        # role only and no longer trades its own funded pool.
+        c_auto  = round(total_auto, 2)
+        g_auto  = 0.0
 
         # Collaborative pool = trading pool minus autonomous funds
         collab  = max(0, round(trading - total_auto, 2))
@@ -570,9 +571,10 @@ def get_trading_pool(equity):
             "tier":            shared_state["autonomy_tier"],
         }
     else:
-        # No autonomy yet — full trading pool is collaborative
-        claude = trading * shared_state["claude_allocation"]
-        grok   = trading * shared_state["grok_allocation"]
+        # No autonomy yet — Claude gets the full trading pool (sole
+        # decision-maker); Grok is support/review only, no funded pool.
+        claude = trading
+        grok   = 0.0
         return {
             "total":           equity,
             "reserve":         reserve,
