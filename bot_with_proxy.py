@@ -42,9 +42,11 @@ shared_state: dict = {
     "claude_positions":    [],
     "grok_positions":      [],
     "bearish_watchlist":   [],
-    # Fund allocation
-    "claude_allocation":   0.50,
-    "grok_allocation":     0.50,
+    # Fund allocation — Claude is sole decision-maker; Grok is advisory-only
+    # (see rebalance_allocations() in portfolio_manager.py, which no longer
+    # moves these away from 1.0/0.0)
+    "claude_allocation":   1.0,
+    "grok_allocation":     0.0,
     "growth_reserve":      0.0,
     # Performance tracking
     "claude_daily_pnl":    0.0,
@@ -199,12 +201,49 @@ import ai_clients as _ai_clients
 def ask_claude_guarded(*args, **kwargs):
     if not shared_state.get("claude_healthy", True):
         raise Exception(f"Claude unhealthy ({shared_state.get('claude_fail_reason','unknown')}) — call skipped")
-    return ask_claude(*args, **kwargs)
+    try:
+        return ask_claude(*args, **kwargs)
+    except Exception as e:
+        # Mirror safe_ask_claude's classification so a known-dead AI actually
+        # gets marked unhealthy here too — otherwise this guard only ever
+        # reads the flag and never sets it, so a doomed call (e.g. credits
+        # exhausted) keeps firing every cycle instead of backing off.
+        error_type = classify_ai_error(str(e))
+        shared_state["claude_fail_count"] = shared_state.get("claude_fail_count", 0) + 1
+        shared_state["claude_fail_reason"] = error_type
+        if error_type == "credits_exhausted":
+            shared_state["claude_healthy"]    = False
+            shared_state["claude_credits_ok"] = False
+            shared_state["last_claude_fail"]  = datetime.now().isoformat()
+        elif error_type == "auth_error":
+            shared_state["claude_healthy"]   = False
+            shared_state["last_claude_fail"] = datetime.now().isoformat()
+        elif shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
+            shared_state["claude_healthy"]   = False
+            shared_state["last_claude_fail"] = datetime.now().isoformat()
+        raise
 
 def ask_grok_guarded(*args, **kwargs):
     if not shared_state.get("grok_healthy", True):
         raise Exception(f"Grok unhealthy ({shared_state.get('grok_fail_reason','unknown')}) — call skipped")
-    return ask_grok(*args, **kwargs)
+    try:
+        return ask_grok(*args, **kwargs)
+    except Exception as e:
+        # Same as ask_claude_guarded above — see that comment.
+        error_type = classify_ai_error(str(e))
+        shared_state["grok_fail_count"] = shared_state.get("grok_fail_count", 0) + 1
+        shared_state["grok_fail_reason"] = error_type
+        if error_type == "credits_exhausted":
+            shared_state["grok_healthy"]    = False
+            shared_state["grok_credits_ok"] = False
+            shared_state["last_grok_fail"]  = datetime.now().isoformat()
+        elif error_type == "auth_error":
+            shared_state["grok_healthy"]   = False
+            shared_state["last_grok_fail"] = datetime.now().isoformat()
+        elif shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
+            shared_state["grok_healthy"]   = False
+            shared_state["last_grok_fail"] = datetime.now().isoformat()
+        raise
 
 from sleep_manager import (
     ai_sleep, ai_wake, check_wake_conditions, check_ai_wake_instructions,
@@ -1597,6 +1636,10 @@ def place_stock_protective_stop(symbol, qty, stop_price):
     if _is_option_symbol(symbol):
         log(f"   [STOP] {symbol} looks like an option — software-managed only")
         return None
+    if qty != int(qty):
+        log(f"   [STOP] {symbol} qty={qty} is fractional — Alpaca rejects stop "
+            f"orders on fractional share quantities, software stop still active")
+        return None
     # Alpaca price increments: $0.01 at/above $1, $0.0001 below
     stop_price = round(stop_price, 2) if stop_price >= 1 else round(stop_price, 4)
     if stop_price <= 0 or qty <= 0:
@@ -2758,7 +2801,8 @@ Respond ONLY with JSON:
         log(f"❌ Grok low-cash: {e}")
 
     # ── DECISION LOGIC ──────────────────────────────────────
-    # Only sell if BOTH AIs agree on same symbol
+    # Claude is the sole decision-maker; Grok's read is advisory context,
+    # logged alongside Claude's call but never required to act.
     c_sell = (claude_decision or {}).get("sell_recommendation", "none").upper()
     g_sell = (grok_decision   or {}).get("sell_recommendation", "none").upper()
     c_action = (claude_decision or {}).get("action", "hold").lower()
@@ -2798,18 +2842,20 @@ Respond ONLY with JSON:
             except Exception as e:
                 log(f"❌ Sell {p['symbol']}: {e}")
 
-    # If both AIs agree to sell same symbol AND it's not already auto-sold
-    if c_sell == g_sell and c_sell != "NONE" and c_sell in pos_symbols and not sold_something:
-        log(f"🤝 Both AIs agree: SELL {c_sell} to free up cash")
+    # Claude decides whether to sell; Grok's agreement (or not) is logged
+    # as supporting context only, and is never required to act.
+    if c_sell != "NONE" and c_sell in pos_symbols and not sold_something:
+        grok_note = ("Grok agrees" if c_sell == g_sell
+                     else f"Grok says {g_sell or 'HOLD'} (advisory only)")
+        log(f"🔵 Claude decision: SELL {c_sell} to free up cash ({grok_note})")
         log(f"   Claude reason: {(claude_decision or {}).get('sell_reason','')}")
-        log(f"   Grok reason:   {(grok_decision   or {}).get('sell_reason','')}")
         try:
-            cancel_stock_orders(c_sell, "(before low-cash agreed sell)")
+            cancel_stock_orders(c_sell, "(before low-cash sell)")
             alpaca("DELETE", f"/v2/positions/{c_sell}")
             sold_pos = next((p for p in pos_details if p["symbol"] == c_sell), {})
             record_trade("sell", c_sell, None, sold_pos.get("price"), sold_pos.get("value"),
                          sold_pos.get("owner","shared").lower(),
-                         reason=f"low-cash: both AIs agreed — {(claude_decision or {}).get('sell_reason','')}",
+                         reason=f"low-cash: Claude decision — {(claude_decision or {}).get('sell_reason','')}",
                          pnl_usd=sold_pos.get("pnl_usd"), pnl_pct=(sold_pos.get("pnl_pct",0)/100 if sold_pos.get("pnl_pct") else None))
             shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != c_sell]
             shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != c_sell]
@@ -2818,27 +2864,22 @@ Respond ONLY with JSON:
         except Exception as e:
             log(f"❌ Sell {c_sell}: {e}")
 
-    elif c_action == "hold" and g_action == "hold":
-        log(f"🤝 Both AIs agree: HOLD all positions — not worth selling yet")
+    elif c_action == "hold":
+        log(f"🔵 Claude decision: HOLD all positions — not worth selling yet")
+        if g_action != "hold":
+            log(f"   (Grok's read was: {g_action} {g_sell} — advisory only)")
         log(f"   Best position: {max(pos_details, key=lambda x: x['pnl_pct'])['symbol'] if pos_details else 'none'}")
-
-    elif c_sell != g_sell and c_sell != "NONE" and g_sell != "NONE":
-        log(f"⚠️ AIs disagree on what to sell (Claude={c_sell} Grok={g_sell}) — HOLDING")
-        log(f"   Will wait for clearer signal or auto stop-loss/take-profit")
 
     # ── NEXT STRATEGY LOG ───────────────────────────────────
     c_next = (claude_decision or {}).get("next_buy_target", "")
     g_next = (grok_decision   or {}).get("next_buy_target", "")
 
-    log(f"📋 NEXT BUY TARGETS (ready when cash available):")
-    if c_next: log(f"   🔵 Claude: {c_next} — {(claude_decision or {}).get('next_buy_reason','')[:80]}")
-    if g_next: log(f"   🔴 Grok:   {g_next} — {(grok_decision   or {}).get('next_buy_reason','')[:80]}")
+    log(f"📋 NEXT BUY TARGET (ready when cash available):")
+    if c_next: log(f"   🔵 Claude (decision):  {c_next} — {(claude_decision or {}).get('next_buy_reason','')[:80]}")
+    if g_next: log(f"   🔴 Grok (advisory):    {g_next} — {(grok_decision   or {}).get('next_buy_reason','')[:80]}")
 
-    if c_next == g_next and c_next:
-        log(f"   🤝 AGREED: Both targeting {c_next} — will buy first chance!")
+    if c_next:
         shared_state["next_buy_target"] = c_next
-    elif c_next or g_next:
-        shared_state["next_buy_target"] = c_next or g_next
 
     log("=" * 50)
     log(f"💸 Low cash cycle complete | Cash: ${cash:.2f} | Positions: {len(positions)}")
