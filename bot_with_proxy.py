@@ -33,9 +33,11 @@ shared_state: dict = {
     "claude_positions":    [],
     "grok_positions":      [],
     "bearish_watchlist":   [],
-    # Fund allocation
-    "claude_allocation":   0.50,
-    "grok_allocation":     0.50,
+    # Fund allocation — Claude is sole decision-maker; Grok is advisory-only
+    # (see rebalance_allocations() in portfolio_manager.py, which no longer
+    # moves these away from 1.0/0.0)
+    "claude_allocation":   1.0,
+    "grok_allocation":     0.0,
     "growth_reserve":      0.0,
     # Performance tracking
     "claude_daily_pnl":    0.0,
@@ -2399,18 +2401,14 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
     g_trades = [(t.get("symbol"),t.get("confidence"),t.get("direction","long"))
                 for t in (grok_r1 or {}).get("proposed_trades",[])]
 
-    log("🔵 Round 2 — Claude autonomous review...")
-    log("🔴 Round 2 — Grok autonomous review...")
+    log("🔵 Round 2 — Claude autonomous review (sole decision-maker)...")
+    log("🔴 Grok is advisory-only this cycle — no independent budget/trades")
 
-    c_review_prompt = f"""Your autonomous trades: {c_trades}. Grok's trades: {g_trades}.
-Your budget: ${pool['claude']:.2f}. Confirm your best 1-2 trades (owner=claude).
-No overlap with Grok if possible. Min $8. Confidence 80%+.
+    c_review_prompt = f"""Your autonomous trades: {c_trades}. Grok's second opinion (advisory only — you have final say): {g_trades}.
+Your budget: ${pool['claude']:.2f}. You are the sole decision-maker for stock trades.
+Confirm your best 1-2 trades (owner=claude). Weigh Grok's ideas above as supporting input where they
+strengthen your conviction, but you are not required to follow them. Min $8. Confidence 80%+.
 JSON: {{"refined_trades":[{{"action":"buy|sell","symbol":"NVDA","notional_usd":15.0,"confidence":85,"f":"flags","r":"<8w>","owner":"claude"}}]}}"""
-
-    g_review_prompt = f"""Your autonomous trades: {g_trades}. Claude's trades: {c_trades}.
-Your budget: ${pool['grok']:.2f}. Confirm your best 1-2 trades (owner=grok).
-Use Twitter sentiment. No overlap with Claude. Min $8. Confidence 80%+.
-JSON: {{"refined_trades":[{{"action":"buy|sell","symbol":"NVDA","notional_usd":15.0,"confidence":85,"f":"flags","r":"<8w>","owner":"grok"}}]}}"""
 
     # Re-check health here (not the c_ok/g_ok from before Round 1) — a
     # credits_exhausted failure in Round 1 flips claude_healthy to False
@@ -2418,12 +2416,13 @@ JSON: {{"refined_trades":[{{"action":"buy|sell","symbol":"NVDA","notional_usd":1
     claude_r2 = (ask_with_retry(ask_claude_guarded, c_review_prompt,
         "You are Claude confirming your autonomous trades. ONLY valid JSON under 500 chars.")
         if shared_state.get("claude_healthy", True) else None)
-    grok_r2   = (ask_with_retry(ask_grok_guarded, g_review_prompt,
-        "You are Grok confirming your autonomous trades. ONLY valid JSON under 500 chars.")
-        if shared_state.get("grok_healthy", True) else None)
+    # Grok no longer gets an independent Round 2 budget call — its Round 1
+    # proposals (g_trades, above) already feed Claude's decision as advisory
+    # context. grok_allocation is pinned at 0.0, so any owner="grok" trade
+    # would be sized to $0 and rejected in execute_trades() anyway.
+    grok_r2 = None
 
     if claude_r2: log(f"🔵 Claude autonomous: {len(claude_r2.get('refined_trades',[]))} trades confirmed")
-    if grok_r2:   log(f"🔴 Grok autonomous:   {len(grok_r2.get('refined_trades',[]))} trades confirmed")
 
     # ── COLLABORATIVE BIG-TICKET CHECK (Round 3) ─────────────────
     # Only fires when BOTH AIs agree at 95%+ with news + 5 signals
@@ -2486,7 +2485,9 @@ JSON: {{"refined_trades":[{{"action":"buy|sell","symbol":"NVDA","notional_usd":1
 
     # Combine autonomous + collaborative trades
     c_ref   = (claude_r2 or {}).get("refined_trades", c_proposals[:2])
-    g_ref   = (grok_r2   or {}).get("refined_trades", g_proposals[:2])
+    # Grok is advisory-only — no independent trades of its own outside the
+    # rare Round-3 collaborative gate above.
+    g_ref   = []
     all_trades = c_ref + g_ref + collab_trades
 
     # Deduplicate — collab takes priority over autonomous for same symbol
@@ -3030,7 +3031,8 @@ Respond ONLY with JSON:
         log(f"❌ Grok low-cash: {e}")
 
     # ── DECISION LOGIC ──────────────────────────────────────
-    # Only sell if BOTH AIs agree on same symbol
+    # Claude is the sole decision-maker; Grok's read is advisory context,
+    # logged alongside Claude's call but never required to act.
     c_sell = (claude_decision or {}).get("sell_recommendation", "none").upper()
     g_sell = (grok_decision   or {}).get("sell_recommendation", "none").upper()
     c_action = (claude_decision or {}).get("action", "hold").lower()
@@ -3070,18 +3072,20 @@ Respond ONLY with JSON:
             except Exception as e:
                 log(f"❌ Sell {p['symbol']}: {e}")
 
-    # If both AIs agree to sell same symbol AND it's not already auto-sold
-    if c_sell == g_sell and c_sell != "NONE" and c_sell in pos_symbols and not sold_something:
-        log(f"🤝 Both AIs agree: SELL {c_sell} to free up cash")
+    # Claude decides whether to sell; Grok's agreement (or not) is logged
+    # as supporting context only, and is never required to act.
+    if c_sell != "NONE" and c_sell in pos_symbols and not sold_something:
+        grok_note = ("Grok agrees" if c_sell == g_sell
+                     else f"Grok says {g_sell or 'HOLD'} (advisory only)")
+        log(f"🔵 Claude decision: SELL {c_sell} to free up cash ({grok_note})")
         log(f"   Claude reason: {(claude_decision or {}).get('sell_reason','')}")
-        log(f"   Grok reason:   {(grok_decision   or {}).get('sell_reason','')}")
         try:
-            cancel_stock_orders(c_sell, "(before low-cash agreed sell)")
+            cancel_stock_orders(c_sell, "(before low-cash sell)")
             alpaca("DELETE", f"/v2/positions/{c_sell}")
             sold_pos = next((p for p in pos_details if p["symbol"] == c_sell), {})
             record_trade("sell", c_sell, None, sold_pos.get("price"), sold_pos.get("value"),
                          sold_pos.get("owner","shared").lower(),
-                         reason=f"low-cash: both AIs agreed — {(claude_decision or {}).get('sell_reason','')}",
+                         reason=f"low-cash: Claude decision — {(claude_decision or {}).get('sell_reason','')}",
                          pnl_usd=sold_pos.get("pnl_usd"), pnl_pct=(sold_pos.get("pnl_pct",0)/100 if sold_pos.get("pnl_pct") else None))
             shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != c_sell]
             shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != c_sell]
@@ -3090,27 +3094,22 @@ Respond ONLY with JSON:
         except Exception as e:
             log(f"❌ Sell {c_sell}: {e}")
 
-    elif c_action == "hold" and g_action == "hold":
-        log(f"🤝 Both AIs agree: HOLD all positions — not worth selling yet")
+    elif c_action == "hold":
+        log(f"🔵 Claude decision: HOLD all positions — not worth selling yet")
+        if g_action != "hold":
+            log(f"   (Grok's read was: {g_action} {g_sell} — advisory only)")
         log(f"   Best position: {max(pos_details, key=lambda x: x['pnl_pct'])['symbol'] if pos_details else 'none'}")
-
-    elif c_sell != g_sell and c_sell != "NONE" and g_sell != "NONE":
-        log(f"⚠️ AIs disagree on what to sell (Claude={c_sell} Grok={g_sell}) — HOLDING")
-        log(f"   Will wait for clearer signal or auto stop-loss/take-profit")
 
     # ── NEXT STRATEGY LOG ───────────────────────────────────
     c_next = (claude_decision or {}).get("next_buy_target", "")
     g_next = (grok_decision   or {}).get("next_buy_target", "")
 
-    log(f"📋 NEXT BUY TARGETS (ready when cash available):")
-    if c_next: log(f"   🔵 Claude: {c_next} — {(claude_decision or {}).get('next_buy_reason','')[:80]}")
-    if g_next: log(f"   🔴 Grok:   {g_next} — {(grok_decision   or {}).get('next_buy_reason','')[:80]}")
+    log(f"📋 NEXT BUY TARGET (ready when cash available):")
+    if c_next: log(f"   🔵 Claude (decision):  {c_next} — {(claude_decision or {}).get('next_buy_reason','')[:80]}")
+    if g_next: log(f"   🔴 Grok (advisory):    {g_next} — {(grok_decision   or {}).get('next_buy_reason','')[:80]}")
 
-    if c_next == g_next and c_next:
-        log(f"   🤝 AGREED: Both targeting {c_next} — will buy first chance!")
+    if c_next:
         shared_state["next_buy_target"] = c_next
-    elif c_next or g_next:
-        shared_state["next_buy_target"] = c_next or g_next
 
     log("=" * 50)
     log(f"💸 Low cash cycle complete | Cash: ${cash:.2f} | Positions: {len(positions)}")
