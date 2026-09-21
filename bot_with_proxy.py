@@ -165,7 +165,7 @@ from market_data import (
     _compute_breakout, compute_indicators, get_chart_section,
     get_news_context, get_fear_greed_index, get_earnings_calendar,
     get_market_context, get_spy_trend, get_biggest_gainers,
-    get_recent_ipos, get_market_mode,
+    get_recent_ipos, get_market_mode, get_penny_stock_movers,
 )
 import market_data as _market_data
 
@@ -2182,6 +2182,31 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
     if ipo_syms:
         log(f"🆕 IPOs in play: {ipo_syms}")
 
+    # ── Sub-$5 opportunities: scan + Grok social/news research ──
+    # Deliberately separate from RULES["universe"] (which stays
+    # "no OTC/penny tickers") — this is an explicit, higher-risk
+    # opportunistic channel Claude sees as extra context, not a change
+    # to the core watchlist.
+    penny_candidates = []
+    penny_research   = ""
+    try:
+        penny_candidates = get_penny_stock_movers()
+    except Exception as pe:
+        log(f"⚠️ Penny stock scan failed: {pe}")
+
+    if penny_candidates and shared_state.get("grok_healthy", True):
+        try:
+            log(f"🔴 Grok researching {len(penny_candidates)} sub-$5 mover(s) on X/news...")
+            penny_research = ask_grok_guarded(
+                prompt_builder.build_penny_research_prompt(penny_candidates),
+                prompt_builder.build_penny_research_system(),
+            )
+            if penny_research:
+                log(f"🔴 Penny stock research: {len(penny_research)} chars returned")
+        except Exception as pre:
+            log(f"⚠️ Penny stock research failed: {pre}")
+            penny_research = ""
+
     # Crypto trading has been split out of the stock decision cycle —
     # see binance_crypto.py's standalone entrypoint. No crypto context
     # is built or piggybacked onto the stock R1 call any more.
@@ -2210,6 +2235,8 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
         features        = features,
         projections     = shared_state.get("last_projections", {}),
         crypto_context  = "",
+        penny_stocks    = penny_candidates,
+        penny_research  = penny_research,
     )
     log(f"🧠 Prompt mode: {situation_mode.upper().replace('_',' ')}")
 
