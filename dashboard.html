@@ -315,28 +315,16 @@ html, body {
 }
 .mini-bar { margin-top: 5px; height: 6px; width: 100%; display: block; border-radius: 3px; overflow: hidden; }
 
-/* ─── Row 2 — AI battle + services ──────────────────────────── */
+/* ─── Row 2 — stock performance + services ──────────────────── */
 .row2 { flex: 0 0 auto; display: grid; grid-template-columns: 1.5fr 1fr; gap: 8px; }
-.pool-bar { height: 6px; border-radius: 3px; background: var(--grok); overflow: hidden; margin: 0 0 10px; display: flex; flex: 0 0 auto; }
-.pool-bar .seg-claude { background: var(--claude); height: 100%; }
-.battle-split { display: flex; align-items: stretch; gap: 12px; flex: 1 1 auto; min-height: 0; }
-.fighter-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
-.fighter-divider { width: 1px; background: var(--rule); flex: 0 0 auto; }
-.fighter-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; margin-bottom: 4px; }
-.fighter-head .swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
-.fighter-head .swatch.claude { background: var(--claude); }
-.fighter-head .swatch.grok   { background: var(--grok); }
-.lead-tag {
-  font-size: 8px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
-  color: var(--good); border: 1px solid color-mix(in oklab, var(--good) 45%, var(--rule));
-  border-radius: 3px; padding: 1px 5px; margin-left: 2px;
-}
-.fighter-pnl { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; margin-bottom: 6px; }
+.decision-line { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; margin-bottom: 10px; }
+.decision-line .swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; background: var(--claude); }
+.decision-line #grok-review-tag { font-weight: 500; color: var(--ink-3); margin-left: 2px; }
 .fighter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 10px; margin-bottom: 8px; }
 .fighter-grid div { display: flex; flex-direction: column; }
 .fighter-grid b { font-size: 12px; font-variant-numeric: tabular-nums; }
 .fighter-grid span { font-size: 8.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.05em; }
-.mini-spark { height: 26px; width: 100%; display: block; margin-top: auto; }
+.perf-grid b { font-size: 19px; }
 
 .health-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; flex: 0 0 auto; }
 .h-chip {
@@ -538,38 +526,21 @@ html, body {
     </div>
   </div>
 
-  <!-- ── Row 2: AI battle + services ─────────────────────────── -->
+  <!-- ── Row 2: performance + services ───────────────────────── -->
   <div class="row2">
     <section class="panel">
       <div class="panel-head">
-        <h2>AI <span class="accent-text">battle</span></h2>
-        <span class="panel-meta" id="battle-meta">—</span>
+        <h2>Stock <span class="accent-text">performance</span></h2>
+        <span class="panel-meta" id="perf-meta">—</span>
       </div>
-      <div class="pool-bar" id="pool-bar"><div class="seg-claude" id="pool-seg-claude" style="width:50%"></div></div>
-      <div class="battle-split">
-        <div class="fighter-col" data-ai="claude">
-          <div class="fighter-head"><span class="swatch claude"></span>Claude<span class="lead-tag" id="lead-claude" hidden>leading</span></div>
-          <div class="fighter-pnl" id="claude-pnl">—</div>
-          <div class="fighter-grid">
-            <div><b id="claude-trades">0</b><span>trades</span></div>
-            <div><b id="claude-wr">—</b><span>win rate</span></div>
-            <div><b id="claude-wins">0</b><span>wins</span></div>
-            <div><b id="claude-open">0</b><span>open</span></div>
-          </div>
-          <svg class="mini-spark" id="claude-spark" preserveAspectRatio="none"></svg>
-        </div>
-        <div class="fighter-divider"></div>
-        <div class="fighter-col" data-ai="grok">
-          <div class="fighter-head"><span class="swatch grok"></span>Grok<span class="lead-tag" id="lead-grok" hidden>leading</span></div>
-          <div class="fighter-pnl" id="grok-pnl">—</div>
-          <div class="fighter-grid">
-            <div><b id="grok-trades">0</b><span>trades</span></div>
-            <div><b id="grok-wr">—</b><span>win rate</span></div>
-            <div><b id="grok-wins">0</b><span>wins</span></div>
-            <div><b id="grok-open">0</b><span>open</span></div>
-          </div>
-          <svg class="mini-spark" id="grok-spark" preserveAspectRatio="none"></svg>
-        </div>
+      <div class="decision-line" id="decision-line">
+        <span class="swatch claude"></span>Claude decides<span id="grok-review-tag">· Grok reviews</span>
+      </div>
+      <div class="fighter-grid perf-grid">
+        <div><b id="perf-pnl">—</b><span>total P&amp;L</span></div>
+        <div><b id="perf-trades">0</b><span>trades</span></div>
+        <div><b id="perf-wr">—</b><span>win rate</span></div>
+        <div><b id="perf-open">0</b><span>open</span></div>
       </div>
     </section>
 
@@ -585,7 +556,7 @@ html, body {
       </div>
       <div class="svc-info">
         <div class="svc-row"><span>Strategy</span><span id="svc-strategy">—</span></div>
-        <div class="svc-row"><span>Pool split (C/G)</span><span id="svc-pool">—</span></div>
+        <div class="svc-row"><span>Decision model</span><span>Claude primary · Grok support</span></div>
       </div>
     </section>
   </div>
@@ -599,7 +570,7 @@ html, body {
       </table>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2>Crypto</h2><span class="panel-meta" id="crypto-meta"></span></div>
+      <div class="panel-head"><h2>Crypto <span class="accent-text">(winding down)</span></h2><span class="panel-meta" id="crypto-meta"></span></div>
       <table class="pos-table" id="crypto-table">
         <tbody id="crypto-rows"><tr><td class="pos-empty" colspan="3">no open crypto positions</td></tr></tbody>
       </table>
@@ -843,29 +814,18 @@ function renderBanner(stats) {
   }
 }
 
-function renderBattle(lb) {
-  if (!lb || lb.error) {
-    setT('battle-meta', 'unavailable');
+function renderPerformance(perf) {
+  if (!perf || perf.error) {
+    setT('perf-meta', 'unavailable');
     return;
   }
-  setT('battle-meta', `${lb.total_closed || 0} closes`);
-  const claudePct = (lb.pool_split?.claude_pct * 100) || 50;
-  const grokPct = (lb.pool_split?.grok_pct * 100) || (100 - claudePct);
-  document.getElementById('pool-seg-claude').style.width = claudePct.toFixed(0) + '%';
-  setT('svc-pool', `${claudePct.toFixed(0)}/${grokPct.toFixed(0)}`);
-
-  const cSide = lb.claude || {}, gSide = lb.grok || {};
-  const cPnl = parseFloat(cSide.total_pnl || 0), gPnl = parseFloat(gSide.total_pnl || 0);
-  for (const [ai, side, pnl] of [['claude', cSide, cPnl], ['grok', gSide, gPnl]]) {
-    setT(`${ai}-pnl`, side.trades ? fmtSigned(pnl) : '—', pnl > 0 ? 'good' : pnl < 0 ? 'bad' : '');
-    setT(`${ai}-trades`, side.trades || 0);
-    setT(`${ai}-wr`, side.trades ? (side.win_rate || 0).toFixed(0) + '%' : '—');
-    setT(`${ai}-wins`, side.wins || 0);
-    setT(`${ai}-open`, side.open_positions || 0);
-  }
-  const bothTraded = cSide.trades && gSide.trades;
-  document.getElementById('lead-claude').hidden = !(bothTraded && cPnl > gPnl);
-  document.getElementById('lead-grok').hidden = !(bothTraded && gPnl > cPnl);
+  setT('perf-meta', `${perf.total_closed || 0} closes`);
+  const pnl = parseFloat(perf.total_pnl || 0);
+  setT('perf-pnl', perf.total_closed ? fmtSigned(pnl) : '—', pnl > 0 ? 'good' : pnl < 0 ? 'bad' : '');
+  setT('perf-trades', perf.total_closed || 0);
+  setT('perf-wr', perf.total_closed ? (perf.win_rate || 0).toFixed(0) + '%' : '—');
+  setT('perf-open', perf.open_positions || 0);
+  document.getElementById('grok-review-tag').hidden = !perf.grok_active;
 }
 
 function renderStrategy(strategist) {
@@ -1197,8 +1157,6 @@ function renderMiniBars(svgId, points, bars) {
 
 function renderCharts() {
   renderHeroBars();
-  renderMiniBars('claude-spark', buildPnlSeries('claude'), 16);
-  renderMiniBars('grok-spark', buildPnlSeries('grok'), 16);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1223,7 +1181,7 @@ async function fetchAll() {
     renderTicker(stats, crypto);
     renderHealth(stats, crypto, strategist, perf);
     renderBanner(stats);
-    renderBattle(leaderboard);
+    renderPerformance(leaderboard);
     renderStrategy(strategist);
     renderStocks(stats);
     renderCrypto(crypto);

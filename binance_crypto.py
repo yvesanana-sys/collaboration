@@ -4486,3 +4486,131 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                 self._log(f"   ❌ Crypto buy error {prop['symbol']}: {e}")
 
         return new_positions
+
+
+# ══════════════════════════════════════════════════════════════
+# ── Standalone entrypoint ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# Runs this module as its own crypto-only bot, independent of
+# bot_with_proxy.py's stock trading loop. NovaTrade's main process is
+# stocks-only now (see bot_with_proxy.py's CRYPTO_TRADING_ENABLED
+# flag, which stays False there) — nothing here starts automatically
+# as part of that process. To trade crypto, run this file directly,
+# either locally or as its own deployed service:
+#     python3 binance_crypto.py
+# It needs its own env vars: BINANCE_KEY, BINANCE_SECRET,
+# ANTHROPIC_KEY (required — Claude is the sole decision-maker here
+# too), and optionally GROK_KEY (support/risk-review only, same
+# division of labor as the stock bot).
+
+def _standalone_main():
+    """Entry point for running crypto trading as its own process/service."""
+    import sys
+    import threading
+    import ai_clients
+    import portfolio_manager
+    from prompt_builder import PromptBuilder
+
+    def _log(msg):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{now}] [CRYPTO-BOT] {msg}", flush=True)
+
+    if not (BINANCE_KEY and BINANCE_SECRET):
+        _log("❌ BINANCE_KEY / BINANCE_SECRET not set — cannot run standalone crypto bot")
+        sys.exit(1)
+    if not (os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY")):
+        _log("❌ ANTHROPIC_KEY not set — Claude is required (Grok is support-only, never trades solo)")
+        sys.exit(1)
+    if not os.environ.get("GROK_KEY"):
+        _log("⚠️ GROK_KEY not set — running with Claude only, no support/risk-review pass")
+
+    # Own shared_state, trade history, and rules — independent of the
+    # stock bot's globals, even if both happen to run on the same host.
+    crypto_shared_state = {
+        "claude_healthy": True, "claude_fail_count": 0, "claude_fail_reason": None,
+        "claude_credits_ok": True, "last_claude_fail": None,
+        "grok_healthy": True, "grok_fail_count": 0, "grok_fail_reason": None,
+        "grok_credits_ok": True, "last_grok_fail": None,
+        "equity": 0,  # No stock-side equity to cross-reference in standalone mode
+    }
+    crypto_trade_history = []
+    crypto_rules = {"failover_max_retries": 3}
+
+    ai_clients._set_context(_log, shared_state_ref=crypto_shared_state, rules_ref=crypto_rules)
+    portfolio_manager._set_context(_log, crypto_shared_state, crypto_trade_history, crypto_rules)
+
+    trader = CryptoTrader()
+    trader._shared_state = crypto_shared_state
+    pb = PromptBuilder()
+
+    def ask_claude_guarded(prompt, system):
+        if not crypto_shared_state.get("claude_healthy", True):
+            return None
+        return ai_clients.safe_ask_claude(prompt, system)
+
+    def ask_grok_guarded(prompt, system):
+        if not crypto_shared_state.get("grok_healthy", True):
+            return None
+        return ai_clients.safe_ask_grok(prompt, system)
+
+    _log("🚀 NovaTrade Crypto Bot — standalone, Claude-primary / Grok-support")
+    _log(f"   Universe: {list(CRYPTO_UNIVERSE) if 'CRYPTO_UNIVERSE' in globals() else 'see CRYPTO_RULES'}")
+
+    # Minimal health endpoint so this can be deployed as its own Railway
+    # service later without further changes — optional, never blocks the
+    # trading loop if Flask isn't available or the port can't bind.
+    try:
+        from flask import Flask, jsonify
+        health_app = Flask(__name__)
+
+        @health_app.route("/health")
+        def _health():
+            return jsonify({
+                "status":         "ok",
+                "enabled":        trader.is_enabled(),
+                "cycle_count":    trader.cycle_count,
+                "open_positions": len(trader.positions),
+            })
+
+        port = int(os.environ.get("PORT", 8081))
+        threading.Thread(
+            target=lambda: health_app.run(host="0.0.0.0", port=port, use_reloader=False),
+            daemon=True,
+        ).start()
+        _log(f"🩺 Health endpoint on :{port}/health")
+    except Exception as he:
+        _log(f"⚠️ Health endpoint not started: {he}")
+
+    last_run  = None
+    boot_time = datetime.now(timezone.utc)
+    while True:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            due = ((last_run is None and (now_utc - boot_time).total_seconds() >= 30) or
+                   (last_run is not None and (now_utc - last_run).total_seconds() >= 3600))
+            if due:
+                last_run = now_utc
+                trader.run_crypto_cycle(
+                    total_equity      = 0,
+                    ask_claude_fn     = ask_claude_guarded,
+                    ask_grok_fn       = ask_grok_guarded,
+                    spy_trend         = "neutral",
+                    prompt_builder    = pb,
+                    record_trade_fn   = portfolio_manager.record_trade,
+                    pol_text          = "",
+                    stock_projections = {},
+                )
+            else:
+                exits = trader.run_exit_monitor(
+                    record_trade_fn = portfolio_manager.record_trade,
+                    prompt_builder  = pb,
+                )
+                if exits:
+                    _log(f"🪙 {exits} autonomous exit(s)")
+        except Exception as e:
+            _log(f"❌ Loop error: {e}")
+        time.sleep(300)  # 5-minute tick, matches the stock bot's cadence
+
+
+if __name__ == "__main__":
+    _standalone_main()
