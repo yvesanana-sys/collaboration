@@ -116,7 +116,7 @@ shared_state: dict = {
     "last_liquidation":    "",
     "liquidation_result":  None,
     "next_buy_target":     None,
-    "trading_brief":       "",
+    "trading_brief":       {},
     "last_rebalance_day":  "",
     "last_rebalance_week": "",
     "last_reset_month":    "",
