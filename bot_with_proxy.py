@@ -71,6 +71,8 @@ shared_state: dict = {
     "claude_fail_reason":  "",
     "grok_fail_reason":    "",
     "failover_mode":       False,
+    "grok_balance":            None,   # {remaining_balance, spent_balance, total_granted} or None
+    "grok_balance_checked_at": None,
     # Sleep/wake
     "ai_sleeping":         False,
     "sleep_reason":        "",
@@ -166,6 +168,7 @@ from market_data import (
     get_news_context, get_fear_greed_index, get_earnings_calendar,
     get_market_context, get_spy_trend, get_biggest_gainers,
     get_recent_ipos, get_market_mode, get_penny_stock_movers,
+    get_under_25_movers,
 )
 import market_data as _market_data
 
@@ -690,9 +693,16 @@ def stats():
             "claude_healthy":     shared_state["claude_healthy"],
             "claude_credits_ok":  shared_state["claude_credits_ok"],
             "claude_fail_reason": shared_state["claude_fail_reason"],
+            "last_claude_fail":   shared_state.get("last_claude_fail"),
             "grok_healthy":       shared_state["grok_healthy"],
             "grok_credits_ok":    shared_state["grok_credits_ok"],
             "grok_fail_reason":   shared_state["grok_fail_reason"],
+            "last_grok_fail":     shared_state.get("last_grok_fail"),
+            "grok_balance":            shared_state.get("grok_balance"),
+            "grok_balance_checked_at": shared_state.get("grok_balance_checked_at"),
+            "penny_candidates":        shared_state.get("last_penny_candidates", []),
+            "wider_candidates":        shared_state.get("last_wider_candidates", []),
+            "opportunity_scan_at":     shared_state.get("last_opportunity_scan_at"),
             "failover_mode":      shared_state["failover_mode"],
             "watch_mode_active":  shared_state["watch_mode_active"],
             "ai_sleeping":        shared_state["ai_sleeping"],
@@ -2182,29 +2192,43 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
     if ipo_syms:
         log(f"🆕 IPOs in play: {ipo_syms}")
 
-    # ── Sub-$5 opportunities: scan + Grok social/news research ──
+    # ── Sub-$5 + under-$25 opportunities: scan + Grok research ──
     # Deliberately separate from RULES["universe"] (which stays
-    # "no OTC/penny tickers") — this is an explicit, higher-risk
-    # opportunistic channel Claude sees as extra context, not a change
-    # to the core watchlist.
+    # "no OTC/penny tickers") — these are explicit, higher-risk
+    # opportunistic channels Claude sees as extra context, not a
+    # change to the core watchlist.
     penny_candidates = []
+    wider_candidates = []
     penny_research   = ""
     try:
         penny_candidates = get_penny_stock_movers()
     except Exception as pe:
         log(f"⚠️ Penny stock scan failed: {pe}")
+    try:
+        wider_candidates = get_under_25_movers()
+    except Exception as we:
+        log(f"⚠️ Under-$25 scan failed: {we}")
 
-    if penny_candidates and shared_state.get("grok_healthy", True):
+    # Cache latest scans for the dashboard — informational only, not
+    # re-read by the trading logic itself.
+    shared_state["last_penny_candidates"] = penny_candidates
+    shared_state["last_wider_candidates"] = wider_candidates
+    shared_state["last_opportunity_scan_at"] = datetime.now().isoformat()
+
+    # One combined Grok research call covers both lists (dedup by
+    # symbol) — no reason to spend two AI calls on overlapping names.
+    research_candidates = list({c["symbol"]: c for c in (penny_candidates + wider_candidates)}.values())
+    if research_candidates and shared_state.get("grok_healthy", True):
         try:
-            log(f"🔴 Grok researching {len(penny_candidates)} sub-$5 mover(s) on X/news...")
+            log(f"🔴 Grok researching {len(research_candidates)} sub-$25 mover(s) on X/news...")
             penny_research = ask_grok_guarded(
-                prompt_builder.build_penny_research_prompt(penny_candidates),
+                prompt_builder.build_penny_research_prompt(research_candidates),
                 prompt_builder.build_penny_research_system(),
             )
             if penny_research:
-                log(f"🔴 Penny stock research: {len(penny_research)} chars returned")
+                log(f"🔴 Opportunity research: {len(penny_research)} chars returned")
         except Exception as pre:
-            log(f"⚠️ Penny stock research failed: {pre}")
+            log(f"⚠️ Opportunity research failed: {pre}")
             penny_research = ""
 
     # Crypto trading has been split out of the stock decision cycle —
@@ -2237,6 +2261,7 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
         crypto_context  = "",
         penny_stocks    = penny_candidates,
         penny_research  = penny_research,
+        wider_stocks    = wider_candidates,
     )
     log(f"🧠 Prompt mode: {situation_mode.upper().replace('_',' ')}")
 
@@ -4429,11 +4454,13 @@ def trading_loop():
     log("⏱️  Boot time recorded — crypto starts in 2.5 min (staggered)")
 
     # ── Background monitors (no AI needed) ──────────────────
-    cash_check_interval = 60    # Check cash every 60 seconds
-    trend_scan_interval = 3600  # Trend scan every 60 minutes
-    last_cash_check     = 0
-    last_known_cash     = 0
-    last_trend_scan     = 0     # Run first scan 1 hour after start
+    cash_check_interval  = 60    # Check cash every 60 seconds
+    trend_scan_interval  = 3600  # Trend scan every 60 minutes
+    grok_bal_interval    = 1800  # Grok balance check every 30 minutes
+    last_cash_check      = 0
+    last_known_cash      = 0
+    last_trend_scan      = 0     # Run first scan 1 hour after start
+    last_grok_bal_check  = 0
 
     # Initialize deposit tracking
     try:
@@ -4505,6 +4532,19 @@ def trading_loop():
 
                 except Exception as ce:
                     pass  # Silent — cash monitor never crashes the main loop
+
+            # ── GROK BALANCE CHECK (no trading, best-effort) ────
+            # Runs 24/7 (not gated to market hours) so a top-up outside
+            # market hours shows up on the dashboard right away. Failure
+            # is silent and never affects trading — see get_grok_balance().
+            if (now_unix - last_grok_bal_check) >= grok_bal_interval:
+                last_grok_bal_check = now_unix
+                try:
+                    bal = _ai_clients.get_grok_balance()
+                    shared_state["grok_balance"] = bal
+                    shared_state["grok_balance_checked_at"] = datetime.now().isoformat()
+                except Exception:
+                    pass  # Silent — never affects trading
 
             # ── CORE RESERVE HOURLY CHECK (rule-based, no AI) ───
             # Walled-off long-term wealth compounder. Watches BTC + SPY
