@@ -356,7 +356,13 @@ html, body {
 .svc-row span:last-child { color: var(--ink); font-weight: 600; font-family: var(--font-mono); text-align: right; }
 
 /* ─── Row 3 — stocks / activity ──────────────────────────────── */
-.row3 { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.row3 { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.opp-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+.opp-table td { padding: 3px 0; border-bottom: 1px dotted var(--rule); font-variant-numeric: tabular-nums; }
+.opp-table tr:last-child td { border-bottom: none; }
+.opp-table .sym { font-weight: 700; }
+.opp-table td.r { text-align: right; font-family: var(--font-mono); }
+.opp-band { font-size: 7.5px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); margin-left: 4px; border: 1px solid var(--rule); border-radius: 3px; padding: 0 3px; }
 .row3 .panel { overflow-y: auto; }
 .pos-table { width: 100%; border-collapse: collapse; font-size: 11px; }
 .pos-table td { padding: 4px 0; border-bottom: 1px dotted var(--rule); font-variant-numeric: tabular-nums; }
@@ -442,6 +448,7 @@ html, body {
 @media (max-width: 1180px) {
   .row1 { grid-template-columns: 1fr; }
   .row2 { grid-template-columns: 1fr; }
+  .row3 { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
 }
 @media (max-width: 700px) {
   .row3 { grid-template-columns: 1fr; }
@@ -550,16 +557,24 @@ html, body {
       <div class="svc-info">
         <div class="svc-row"><span>Strategy</span><span id="svc-strategy">—</span></div>
         <div class="svc-row"><span>Decision model</span><span>Claude primary · Grok support</span></div>
+        <div class="svc-row"><span>Claude credits</span><span id="svc-claude-credits">—</span></div>
+        <div class="svc-row"><span>Grok credits</span><span id="svc-grok-credits">—</span></div>
       </div>
     </section>
   </div>
 
-  <!-- ── Row 3: stocks / activity ─────────────────────────────── -->
+  <!-- ── Row 3: stocks / opportunities / activity ────────────── -->
   <div class="row3">
     <section class="panel">
       <div class="panel-head"><h2>Stocks</h2><span class="panel-meta" id="stock-meta"></span></div>
       <table class="pos-table" id="stock-table">
         <tbody id="stock-rows"><tr><td class="pos-empty" colspan="3">no open stock positions</td></tr></tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Opportunities</h2><span class="panel-meta" id="opp-meta"></span></div>
+      <table class="opp-table" id="opp-table">
+        <tbody id="opp-rows"><tr><td class="pos-empty" colspan="2">no candidates this scan</td></tr></tbody>
       </table>
     </section>
     <section class="panel">
@@ -764,6 +779,47 @@ function renderHealth(stats, strategist, perf) {
   const dataOk = !stats?.error;
   dataEl.querySelector('.h-val').textContent = dataOk ? 'ok' : 'partial';
   dataEl.className = 'h-chip ' + (dataOk ? '' : 'warn');
+
+  // AI credits — Claude has no balance API with the key this bot has,
+  // so it's reactive status only (from real API error responses).
+  // Grok gets the same status, plus a best-effort $ balance when available.
+  const claudeCreditsOk = stats?.claude_credits_ok !== false;
+  setT('svc-claude-credits',
+    claudeCreditsOk ? 'ok' : `EXHAUSTED since ${tsToLocal(stats?.last_claude_fail)}`,
+    claudeCreditsOk ? '' : 'bad');
+
+  const gb = stats?.grok_balance;
+  const grokCreditsOk = stats?.grok_credits_ok !== false;
+  if (gb && typeof gb.remaining_balance === 'number') {
+    setT('svc-grok-credits', `${fmt$(gb.remaining_balance)} left`, gb.remaining_balance < 5 ? 'bad' : gb.remaining_balance < 20 ? 'warn' : 'good');
+  } else {
+    setT('svc-grok-credits',
+      grokCreditsOk ? 'ok (balance unavailable)' : `EXHAUSTED since ${tsToLocal(stats?.last_grok_fail)}`,
+      grokCreditsOk ? '' : 'bad');
+  }
+}
+
+function renderOpportunities(stats) {
+  const penny = stats?.penny_candidates || [];
+  const wider = stats?.wider_candidates || [];
+  const bySymbol = {};
+  for (const c of penny) bySymbol[c.symbol] = { ...c, bands: ['<$5'] };
+  for (const c of wider) {
+    if (bySymbol[c.symbol]) bySymbol[c.symbol].bands.push('<$25');
+    else bySymbol[c.symbol] = { ...c, bands: ['<$25'] };
+  }
+  const rows = Object.values(bySymbol).sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+  const tbody = document.getElementById('opp-rows');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td class="pos-empty" colspan="2">no candidates this scan</td></tr>';
+    setT('opp-meta', '');
+    return;
+  }
+  tbody.innerHTML = rows.map(c => `<tr>
+    <td><span class="sym">${c.symbol}</span>${c.bands.map(b => `<span class="opp-band">${b}</span>`).join('')}</td>
+    <td class="r ${c.change > 0 ? 'good' : c.change < 0 ? 'bad' : ''}">$${c.price.toFixed(2)} · ${fmtPct(c.change)}</td>
+  </tr>`).join('');
+  setT('opp-meta', `${rows.length} · ${tsToLocal(stats?.opportunity_scan_at)}`);
 }
 
 function renderBanner(stats) {
@@ -1118,6 +1174,7 @@ async function fetchAll() {
     renderPerformance(leaderboard);
     renderStrategy(strategist);
     renderStocks(stats);
+    renderOpportunities(stats);
     ALL_TRADES = hist?.trades || [];
     renderCloses();
     renderActivity();
