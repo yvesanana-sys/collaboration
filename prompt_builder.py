@@ -740,6 +740,7 @@ class PromptBuilder:
                  crypto_context: str = "",
                  penny_stocks=None,
                  penny_research: str = "",
+                 wider_stocks=None,
                  ai_name: str = ""):   # ai_name enables playbook injection
         """
         Build the Round 1 collaborative session prompt.
@@ -838,6 +839,26 @@ PENNY STOCK RULES — these are HIGHER RISK than the normal universe:
 Include as a normal proposed_trades entry only if it clears the bar above.
 """
 
+        # ── Under-$25 opportunity section (wider net, same research pass) ──
+        wider_block = ""
+        if wider_stocks:
+            wider_lines = "\n".join(
+                f"  {c['symbol']}: ${c['price']:.2f} ({c['change']:+.1f}% today, {c.get('exchange','?')})"
+                for c in wider_stocks
+            )
+            wider_block = f"""
+=== 🔎 UNDER-$25 OPPORTUNITIES (top {len(wider_stocks)}, wider net, exchange-listed only) ===
+Today's biggest movers priced up to $25 (broader than the sub-$5 list above —
+use this to catch real opportunities the narrow sub-$5 scan misses, including
+any of these that are themselves under $5):
+{wider_lines}
+
+Grok's social/news research covers these too (see above) — same rules apply:
+real catalyst required, skeptical of hype-only moves, 80%+ confidence bar,
+normal position sizing. Include as a normal proposed_trades entry only if it
+clears that bar.
+"""
+
         # 7. Assemble the full prompt
         # Performance vs targets
         trading_pool  = pool.get("trading", equity * 0.85)
@@ -878,6 +899,7 @@ Trading Pool: ${pool['trading']:.2f}
 {f"=== {lessons} ===" if lessons else ""}
 {crypto_block}
 {penny_block}
+{wider_block}
 === YOUR TASK [{mode.upper().replace('_',' ')} MODE] ===
 FOCUS: {focus}
 SPY: {spy_trend.upper()} {'— NO NEW BUYS' if spy_trend == 'bear' else '— Full trading active'}

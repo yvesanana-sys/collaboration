@@ -386,3 +386,40 @@ def check_ai_health():
     except Exception as e:
         log(f"⚠️ check_ai_health: {e}")
         return True, True, None
+
+def get_grok_balance():
+    """
+    Best-effort check of remaining xAI API credit balance, using the
+    same GROK_KEY already used for trading calls — no separate
+    Management API credential needed.
+
+    NOTE: this hits an endpoint that isn't part of xAI's documented
+    chat-completions surface and may not be stable — it fails soft
+    (returns None) on any error or unexpected response shape, and is
+    never called from a trading code path, so a change on xAI's side
+    can only make this display "unknown," never affect trading.
+
+    Returns dict {remaining_balance, spent_balance, total_granted}
+    (USD floats) on success, or None.
+    """
+    if not GROK_KEY:
+        return None
+    try:
+        res = requests.get(
+            "https://api.x.ai/v1/api-key",
+            headers={"Authorization": f"Bearer {GROK_KEY}"},
+            timeout=10,
+        )
+        if not res.ok:
+            return None
+        data = res.json()
+        if "remaining_balance" not in data:
+            return None
+        return {
+            "remaining_balance": float(data.get("remaining_balance", 0) or 0),
+            "spent_balance":     float(data.get("spent_balance", 0) or 0),
+            "total_granted":     float(data.get("total_granted", 0) or 0),
+        }
+    except Exception as e:
+        log(f"⚠️ Grok balance check failed (non-fatal): {e}")
+        return None

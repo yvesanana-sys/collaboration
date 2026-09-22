@@ -715,6 +715,72 @@ def get_penny_stock_movers():
         log(f"⚠️ Penny stock scan failed: {e}")
     return []
 
+def get_under_25_movers(max_results=3):
+    """
+    Wider companion to get_penny_stock_movers(): scans today's movers
+    for exchange-listed stocks priced up to $25 (vs. the strict sub-$5
+    band), capped to the top `max_results` by absolute % move.
+
+    Rationale: a strict sub-$5-only filter on top-20/top-20 movers often
+    comes up empty (cheap stocks aren't reliably among the day's biggest
+    % movers). Widening the band to $25 gives a much larger, more liquid
+    pool to pick from — and since it's sorted by move size, any genuine
+    sub-$5 names in that pool still surface naturally. Same OTC-exclusion
+    / tradability cross-check as get_penny_stock_movers, same "not an
+    exhaustive scan" caveat (bounded by the movers screener's top 20+20).
+    """
+    try:
+        headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+        url     = f"{DATA_URL}/v1beta1/screener/stocks/movers?top=20&market_type=stocks"
+        res     = requests.get(url, headers=headers, timeout=10)
+        if not res.ok:
+            return []
+        data   = res.json()
+        movers = data.get("gainers", []) + data.get("losers", [])
+
+        candidates = []
+        for m in movers:
+            sym   = m.get("symbol", "")
+            price = m.get("price")
+            pct   = float(m.get("percent_change", 0) or 0)
+            if not sym or price is None:
+                continue
+            price = float(price)
+            if not (0.10 <= price <= 25.0):
+                continue
+            candidates.append({"symbol": sym, "price": price, "change": pct})
+
+        if not candidates:
+            return []
+
+        assets_res = requests.get(
+            f"{BASE_URL}/v2/assets?status=active&asset_class=us_equity",
+            headers=headers, timeout=15
+        )
+        if not assets_res.ok:
+            return []
+        by_symbol = {a.get("symbol"): a for a in assets_res.json()}
+
+        safe = []
+        for c in candidates:
+            a = by_symbol.get(c["symbol"])
+            if not a or not a.get("tradable"):
+                continue
+            if (a.get("exchange") or "").upper() == "OTC":
+                continue
+            c["exchange"] = a.get("exchange")
+            safe.append(c)
+
+        safe.sort(key=lambda x: abs(x["change"]), reverse=True)
+        top = safe[:max_results]
+        if top:
+            parts = [f"{t['symbol']} ${t['price']:.2f} ({t['change']:+.1f}%)" for t in top]
+            log(f"🔍 Under-$25 movers today (top {max_results}, exchange-listed): {parts}")
+        return top
+    except Exception as e:
+        log(f"⚠️ Under-$25 scan failed: {e}")
+    return []
+
 def get_recent_ipos(min_days=30, max_days=180):
     """
     Fetch genuine recent IPOs using Alpaca's listed_at date field.
