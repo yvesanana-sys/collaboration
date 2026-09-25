@@ -156,10 +156,7 @@ CRYPTO_RULES = {
     # ── Position sizing (tier-based) ─────────────────────────
     # More aggressive at small equity — needed to compound to goal
     "max_positions":        3,       # Aggressive — 3 concurrent crypto positions (was 2)
-    "min_trade_usdt":       10.0,    # Binance.US minimum notional ($10)
-    # Order floor: min notional + buffer so fees/price ticks between
-    # sizing and fill never push an order under the exchange minimum.
-    "min_order_usdt":       10.50,
+    "min_trade_usdt":       8.0,     # Binance.US minimum
     # ── Entry filters ─────────────────────────────────────────
     "min_confidence":       60,      # Aggressive — lowered to 60 (was 65)
     "vol_spike_multiplier": 1.5,     # Volume must be 1.5x average to confirm breakout
@@ -197,27 +194,22 @@ CRYPTO_RULES = {
 # ── Tier-based risk sizing ─────────────────────────────────────
 # At small equity we must take bigger % risks to compound toward goal
 # As equity grows, risk per trade shrinks (protecting gains)
-# tp_pct: quick-flip take-profit override (classic-strategy positions
-# only — Turtle keeps its own Donchian/2N exit, never a fixed TP). At
-# small wallet size we bank any real gain fast and redeploy the cash
-# instead of waiting for the flat 8% CRYPTO_RULES["take_profit_pct"].
-# None at the top tier = no override, existing 8% tp_price stands.
 CRYPTO_TIERS = [
     # AGGRESSIVE PROFILE + DISCOVERY MODE ENABLED
     # coins list is ADVISORY (prefer these) — AI can buy anything from scan
     # if confidence ≥ 70%. No hard tier restrictions on buys.
-    {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3, "tp_pct": 0.015,
+    {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3,
      "coins": None,  # DISCOVERY MODE — AI can pick from top market movers
-     "note": "Tier 1 — AGGRESSIVE + DISCOVERY: 30% risk, 3 positions, any trending coin, 1.5% quick TP"},
-    {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3, "tp_pct": 0.03,
+     "note": "Tier 1 — AGGRESSIVE + DISCOVERY: 30% risk, 3 positions, any trending coin"},
+    {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3,
      "coins": None,
-     "note": "Tier 2 — 25% risk, 3 positions, full discovery, 3% quick TP"},
-    {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4, "tp_pct": 0.05,
+     "note": "Tier 2 — 25% risk, 3 positions, full discovery"},
+    {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4,
      "coins": None,
-     "note": "Tier 3 — 20% risk, 4 positions, full discovery, 5% quick TP"},
-    {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5, "tp_pct": None,
+     "note": "Tier 3 — 20% risk, 4 positions, full discovery"},
+    {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5,
      "coins": None,
-     "note": "Tier 4 — 15% risk, 5 positions, full discovery, standard 8% TP (patient)"},
+     "note": "Tier 4 — 15% risk, 5 positions, full discovery"},
 ]
 
 def effective_fees(has_bnb: bool = False) -> dict:
@@ -254,15 +246,6 @@ def get_crypto_tier(wallet_value: float) -> dict:
         if t["min_equity"] <= wallet_value < t["max_equity"]:
             return t
     return CRYPTO_TIERS[-1]
-
-
-def get_crypto_quick_take_profit_pct(wallet_value: float):
-    """
-    Small-wallet quick-flip take-profit override, or None at the top
-    tier (meaning: use the existing fixed 8% tp_price / trailing logic
-    as-is). Single source of truth for run_exit_monitor.
-    """
-    return get_crypto_tier(wallet_value).get("tp_pct")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1795,46 +1778,6 @@ def get_live_asset_balance(symbol: str) -> float:
         return 0.0
 
 
-def reconcile_ghost_exit(symbol: str, entry_time) -> dict:
-    """
-    A tracked position's live Binance balance dropped to zero/dust without
-    the bot selling it — almost always a broker-side STOP_LOSS order that
-    filled directly on the exchange (survives bot restarts/redeploys by
-    design). Query Binance's own fill history since entry to recover the
-    real exit price/qty/fees so the loss can still be recorded, instead of
-    the position just vanishing from trade history.
-
-    Returns {} if no matching SELL fill is found (caller should fall back
-    to an estimate using the current mark price rather than lose the
-    trade entirely).
-    """
-    try:
-        start_ms = int(entry_time.timestamp() * 1000)
-        trades = binance_get("/api/v3/myTrades",
-                              {"symbol": symbol, "startTime": start_ms, "limit": 100},
-                              signed=True)
-        sells = [t for t in (trades or [])
-                 if not t.get("isBuyer") and float(t.get("qty", 0)) > 0]
-        if not sells:
-            return {}
-        total_qty   = sum(float(t["qty"]) for t in sells)
-        total_quote = sum(float(t["quoteQty"]) for t in sells)
-        total_fee   = sum(float(t.get("commission", 0)) for t in sells
-                           if t.get("commissionAsset") in ("USDT", "USD", "USDC"))
-        if total_qty <= 0:
-            return {}
-        return {
-            "qty":             total_qty,
-            "avg_price":       total_quote / total_qty,
-            "gross_proceeds":  total_quote,
-            "fee_usd":         total_fee,
-            "last_fill_time":  max(int(t["time"]) for t in sells),
-        }
-    except Exception as e:
-        print(f"[CRYPTO] ⚠️ reconcile_ghost_exit({symbol}) failed: {e}", flush=True)
-        return {}
-
-
 def place_crypto_sell(symbol: str, qty: float,
                       limit_price: float = None,
                       force_limit: bool = False) -> dict:
@@ -2343,11 +2286,6 @@ class CryptoTrader:
                 if status != "NEW" or filled_qty > 0:
                     continue
 
-                # Protective STOP_LOSS orders rest at the broker by design
-                # (survive bot outages) — never auto-cancel them as stale.
-                if "STOP" in order.get("type", ""):
-                    continue
-
                 age_mins = (time.time() * 1000 - order_time) / 60000
                 threshold = 30 if side == "BUY" else 60
                 if age_mins < threshold:
@@ -2367,16 +2305,6 @@ class CryptoTrader:
         if not self.positions:
             return 0
 
-        # ── Quick-flip take-profit tier (computed once per cycle, not
-        # per-position, to avoid extra API calls). Falls back to None
-        # (no override — existing 8% tp_price stands) on any failure.
-        quick_tp = None
-        try:
-            wallet_value = get_full_wallet().get("total_value", 0)
-            quick_tp = get_crypto_quick_take_profit_pct(wallet_value)
-        except Exception as we:
-            self._log(f"   ⚠️ Quick-TP wallet lookup failed: {we}")
-
         exits = 0
         for symbol, pos in list(self.positions.items()):
             try:
@@ -2384,53 +2312,18 @@ class CryptoTrader:
 
                 # ── Ghost position cleanup ───────────────────────
                 # If wallet balance for this symbol is dust ($ < $1.50)
-                # or zero, the position was sold outside the bot — almost
-                # always a broker-side STOP_LOSS order filling directly on
-                # Binance. Reconcile against Binance's own fill history so
-                # the loss still lands in trade history/performance/the
-                # AI's memory instead of vanishing (see reconcile_ghost_exit).
+                # or zero, the position was sold outside the bot (manual
+                # sale, prior liquidation). Clear the tracker silently
+                # so we don't spam logs every cycle and don't fire
+                # ghost stop/TP exits on a phantom holding.
                 try:
                     asset = symbol.replace("USDT", "")
                     live_qty = get_live_asset_balance(symbol)
                     live_val = live_qty * current if current > 0 else 0
                     if live_qty == 0 or 0 < live_val < 1.5:
-                        recon = reconcile_ghost_exit(symbol, pos.entry_time)
-                        if recon:
-                            pnl_usd = round(recon["gross_proceeds"] - recon["fee_usd"]
-                                             - pos.entry_price * recon["qty"], 2)
-                            pnl_pct = round((recon["avg_price"] / pos.entry_price - 1) * 100, 2)
-                            self._log(f"   🧹 {symbol}: ghost position — reconciled broker-side "
-                                      f"exit @ ${recon['avg_price']:.6f} | P&L: ${pnl_usd:+.2f} "
-                                      f"({pnl_pct:+.2f}%) — likely stop-loss fill")
-                        else:
-                            # No matching fill found on Binance — still record an
-                            # ESTIMATE off the current mark rather than lose the
-                            # trade silently. Clearly tagged as inexact.
-                            pnl_usd = round((current - pos.entry_price) * pos.qty, 2)
-                            pnl_pct = pos.pnl_pct(current)
-                            self._log(f"   🧹 {symbol}: ghost position detected "
-                                      f"(live qty={live_qty:.8f}, ~${live_val:.4f}) — no Binance "
-                                      f"fill found, recording ESTIMATE P&L: ${pnl_usd:+.2f} "
-                                      f"({pnl_pct:+.2f}%)")
-                        if record_trade_fn:
-                            try:
-                                record_trade_fn(
-                                    action       = "stop_loss",
-                                    symbol       = symbol,
-                                    qty          = recon.get("qty", pos.qty) if recon else pos.qty,
-                                    price        = recon.get("avg_price", current) if recon else current,
-                                    notional     = round((recon.get("avg_price", current) if recon else current)
-                                                          * (recon.get("qty", pos.qty) if recon else pos.qty), 2),
-                                    owner        = pos.owner,
-                                    pnl_usd      = pnl_usd,
-                                    pnl_pct      = pnl_pct / 100,
-                                    strategy     = "crypto",
-                                    entry_price  = pos.entry_price,
-                                    reason       = "crypto:stop_loss (broker-side"
-                                                   + ("" if recon else ", estimated") + ")",
-                                )
-                            except Exception as rte:
-                                self._log(f"   ⚠️ ghost-exit record_trade failed: {rte}")
+                        self._log(f"   🧹 {symbol}: ghost position detected "
+                                  f"(live qty={live_qty:.8f}, ~${live_val:.4f}) — "
+                                  f"clearing tracker (sold outside bot)")
                         del self.positions[symbol]
                         continue
                 except Exception as ge:
@@ -2466,11 +2359,6 @@ class CryptoTrader:
                         exit_reason = f"turtle_2N_stop ({pnl:.2f}%)"
                     else:
                         exit_reason = f"stop_loss ({pnl:.2f}%)"
-                elif (exit_reason is None and pos.strategy_type != "turtle"
-                      and quick_tp is not None and pnl >= quick_tp * 100):
-                    # Small-wallet velocity override — bank any real gain
-                    # above the tier floor instead of holding for 8%.
-                    exit_reason = f"take_profit (quick tier {pnl:.2f}%)"
                 elif exit_reason is None and pos.should_take_profit(current):
                     exit_reason = f"take_profit ({pnl:.2f}%)"
                 elif exit_reason is None and pos.should_time_exit():
@@ -2548,41 +2436,8 @@ class CryptoTrader:
             ghost_errors = ("ZERO_BALANCE", "DUST_BALANCE", "QTY_ROUNDED_TO_ZERO")
             if isinstance(result, dict) and result.get("error") in ghost_errors:
                 err = result.get("error")
-                recon = reconcile_ghost_exit(pos.symbol, pos.entry_time)
-                if recon:
-                    pnl_usd = round(recon["gross_proceeds"] - recon["fee_usd"]
-                                     - pos.entry_price * recon["qty"], 2)
-                    pnl_pct = round((recon["avg_price"] / pos.entry_price - 1) * 100, 2)
-                    exit_price = recon["avg_price"]
-                    exit_qty   = recon["qty"]
-                    self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — reconciled "
-                              f"broker-side exit @ ${exit_price:.6f} | P&L: ${pnl_usd:+.2f} "
-                              f"({pnl_pct:+.2f}%)")
-                else:
-                    exit_price = current_price
-                    exit_qty   = pos.qty
-                    pnl_usd = round((current_price - pos.entry_price) * pos.qty, 2)
-                    pnl_pct = pos.pnl_pct(current_price)
-                    self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — no Binance fill "
-                              f"found, recording ESTIMATE P&L: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)")
-                if record_trade_fn:
-                    try:
-                        record_trade_fn(
-                            action       = reason.split("(")[0].strip(),
-                            symbol       = pos.symbol,
-                            qty          = exit_qty,
-                            price        = exit_price,
-                            notional     = round(exit_price * exit_qty, 2),
-                            owner        = pos.owner,
-                            pnl_usd      = pnl_usd,
-                            pnl_pct      = pnl_pct / 100,
-                            strategy     = "crypto",
-                            entry_price  = pos.entry_price,
-                            reason       = f"crypto:{reason} (ghost, "
-                                           + ("reconciled)" if recon else "estimated)"),
-                        )
-                    except Exception as rte:
-                        self._log(f"   ⚠️ ghost-exit record_trade failed: {rte}")
+                self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — "
+                          f"removing tracker (likely sold outside bot)")
                 del self.positions[pos.symbol]
                 return True  # Treat as success to prevent infinite retries
 
@@ -2833,17 +2688,6 @@ class CryptoTrader:
         tier_coins    = tier["coins"]  # None = all universe unlocked
         trade_budget  = round(total_available * risk_pct, 2)
         CRYPTO_RULES["max_positions"] = tier_max_pos
-
-        # ── Floor the suggested budget at the exchange minimum ──
-        # A raw risk_pct slice of a small wallet can round below what
-        # Binance.US will actually accept (e.g. 30% of $19.64 = $5.89
-        # vs. a $10 minimum). If the wallet can afford the floor, ask
-        # the AI for a legal order size instead of one it can't place.
-        if (trade_budget < CRYPTO_RULES["min_order_usdt"]
-                and total_available >= CRYPTO_RULES["min_order_usdt"]):
-            self._log(f"   📐 Budget floored ${trade_budget:.2f} → "
-                      f"${CRYPTO_RULES['min_order_usdt']:.2f} (wallet can afford the exchange minimum)")
-            trade_budget = CRYPTO_RULES["min_order_usdt"]
 
         self._log(f"   📊 {tier['note']}")
         self._log(f"   💰 Risk per trade: {risk_pct*100:.0f}% = ${trade_budget:.2f} USDT")
@@ -3709,26 +3553,8 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             # AI pools are split AFTER reserve is removed
             claude_pool = round(tradeable_usdt * CLAUDE_POOL_PCT, 2)
             grok_pool   = round(tradeable_usdt * GROK_POOL_PCT,   2)
-            # ── Availability-aware split ─────────────────────────
-            # On a small wallet a 50/50 split can leave BOTH slices
-            # below the order floor — then neither AI can trade at
-            # all. Give the full pool to one AI instead, alternating
-            # each cycle so neither is permanently favored.
-            _floor = CRYPTO_RULES["min_order_usdt"]
-            if (claude_pool < _floor and grok_pool < _floor
-                    and tradeable_usdt >= _floor):
-                turn = getattr(self, "_pool_turn", "claude")
-                if turn == "claude":
-                    claude_pool, grok_pool = round(tradeable_usdt, 2), 0.0
-                    self._pool_turn = "grok"
-                else:
-                    claude_pool, grok_pool = 0.0, round(tradeable_usdt, 2)
-                    self._pool_turn = "claude"
-                self._log(f"   🥊 Split would starve both AIs (< ${_floor:.2f} each) — "
-                          f"full pool ${tradeable_usdt:.2f} to {turn.title()} this cycle")
-            else:
-                self._log(f"   🥊 Pool split: Claude=${claude_pool:.2f} | "
-                          f"Grok=${grok_pool:.2f} (of ${tradeable_usdt:.2f} tradeable USDT)")
+            self._log(f"   🥊 Pool split: Claude=${claude_pool:.2f} | "
+                      f"Grok=${grok_pool:.2f} (of ${tradeable_usdt:.2f} tradeable USDT)")
         else:
             claude_pool = tradeable_usdt
             grok_pool   = tradeable_usdt
@@ -3758,24 +3584,11 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                         continue
                     self._log(f"   🌟 {sym} discovered via market scan — new opportunity!")
                 if conf < CRYPTO_RULES["min_confidence"]:
-                    self._log(f"   ⛔ {sym} REJECT: confidence {conf} < {CRYPTO_RULES['min_confidence']}")
                     continue
                 if sym in self.positions:
-                    self._log(f"   ⛔ {sym} REJECT: already held")
                     continue
                 if notional < CRYPTO_RULES["min_trade_usdt"]:
-                    # Floor-or-explain: if this AI's slice of the wallet can
-                    # cover the exchange minimum, size up instead of silently
-                    # dropping a proposal the AI was never told was too small.
-                    _ai_pool = (claude_pool if ai_name == "claude" else grok_pool) if ENABLE_AI_COMPETITION else crypto_pool
-                    if _ai_pool >= CRYPTO_RULES["min_order_usdt"]:
-                        self._log(f"   📐 {sym} notional ${notional:.2f} floored → "
-                                  f"${CRYPTO_RULES['min_order_usdt']:.2f} (below ${CRYPTO_RULES['min_trade_usdt']:.2f} min, wallet can cover it)")
-                        notional = CRYPTO_RULES["min_order_usdt"]
-                    else:
-                        self._log(f"   ⛔ {sym} REJECT: notional ${notional:.2f} < ${CRYPTO_RULES['min_trade_usdt']:.2f} min "
-                                  f"and pool ${_ai_pool:.2f} can't cover the exchange floor")
-                        continue
+                    continue
 
                 # Validate against projection
                 proj = self._projections.get(sym, {})
@@ -3830,10 +3643,7 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
 
                 proposals.append({
                     "symbol":    sym,
-                    # Floor at min_order_usdt so pool-fraction sizing can
-                    # never produce a sub-minimum order the exchange rejects.
-                    "notional":  max(CRYPTO_RULES["min_order_usdt"],
-                                     min(notional, max(pool_for_sizing, total_sellable) * 0.6)),
+                    "notional":  min(notional, max(pool_for_sizing, total_sellable) * 0.6),
                     "entry":     entry_px,
                     "tp":        tp_px,
                     "stop":      stop_px,
@@ -3885,9 +3695,9 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             # try its picks instead.
             if ENABLE_AI_COMPETITION and owner in ("claude", "grok"):
                 ai_pool_avail = claude_pool if owner == "claude" else grok_pool
-                if ai_pool_avail < CRYPTO_RULES["min_order_usdt"]:
+                if ai_pool_avail < CRYPTO_RULES["min_trade_usdt"]:
                     self._log(f"   🥊 {owner.title()} pool exhausted "
-                              f"(${ai_pool_avail:.2f} < ${CRYPTO_RULES['min_order_usdt']}) "
+                              f"(${ai_pool_avail:.2f} < ${CRYPTO_RULES['min_trade_usdt']}) "
                               f"— skipping {sym}, giving slot to other AI")
                     continue
                 # Cap notional to AI's own pool — never overspend
@@ -3895,12 +3705,6 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                     notional = round(ai_pool_avail * 0.95, 2)  # 95% leaves room for fees
                     self._log(f"   🥊 {owner.title()} sizing {sym} to ${notional:.2f} "
                               f"(pool cap)")
-                # Re-floor after the cap: a 95% haircut on a small pool can
-                # dip under the exchange minimum even though the pool covers it.
-                if notional < CRYPTO_RULES["min_order_usdt"] <= ai_pool_avail:
-                    notional = CRYPTO_RULES["min_order_usdt"]
-                    self._log(f"   🥊 {owner.title()} sizing {sym} floored to "
-                              f"${notional:.2f} (min order)")
 
             # ── TURTLE ENTRY GATE (crypto) ──────────────────────
             # If THIS AI's playbook is Turtle, the only valid entry is a
@@ -3913,7 +3717,8 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             try:
                 import strategic_brain as _sb_gate
                 _ai_for_gate = owner if owner in ("claude", "grok") else "claude"
-                _cs_gate     = _sb_gate.load_strategy_for(_ai_for_gate, "crypto") or {}
+                _ps_gate     = _sb_gate.load_strategy(_ai_for_gate)
+                _cs_gate     = _ps_gate.get("current_strategy", {}) or {}
                 _playbook_is_turtle = (_cs_gate.get("strategy_type") == "turtle")
             except Exception as _pb_err:
                 # Can't load playbook → fail OPEN (don't block trading on
@@ -4065,17 +3870,6 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                             self._log(f"   🐢 TURTLE armed: 2N stop=${pos_kwargs['stop_price_override']:.6f} (ATR=${_atr_val:.4f})")
                     pos = CryptoPosition(**pos_kwargs)
                     self.positions[sym] = pos
-                    # ── Broker-side protective stop (survives bot outages) ──
-                    # Failure is non-fatal: software stop monitor still active.
-                    try:
-                        _stopres = place_crypto_stop_market(sym, pos.qty, pos.stop_price)
-                        if isinstance(_stopres, dict) and _stopres.get("orderId"):
-                            pos.exit_order_id = _stopres["orderId"]
-                            self._log(f"   [STOP] Broker stop resting @ ${pos.stop_price:.6f} (order {_stopres['orderId']})")
-                        else:
-                            self._log(f"   [STOP] NOT placed for {sym}: {_stopres} -- software stop still active")
-                    except Exception as _se:
-                        self._log(f"   [STOP] error for {sym}: {_se} -- software stop still active")
                     crypto_pool -= notional
                     # In competition mode, also debit the owner's slice
                     # so subsequent proposals from the same AI see the
@@ -4355,32 +4149,18 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                 if sym not in CRYPTO_UNIVERSE:
                     continue
                 if conf < CRYPTO_RULES["min_confidence"]:
-                    self._log(f"   ⛔ {sym} REJECT (R1): confidence {conf} < {CRYPTO_RULES['min_confidence']}")
                     continue
                 if sym in self.positions:
-                    self._log(f"   ⛔ {sym} REJECT (R1): already held")
                     continue
                 if notional < CRYPTO_RULES["min_trade_usdt"]:
-                    # Same floor-or-explain as run_crypto_cycle — this path
-                    # runs on every stock-loop R1 cycle, more often than the
-                    # hourly cycle, so a silent drop here is easy to miss.
-                    if crypto_pool >= CRYPTO_RULES["min_order_usdt"]:
-                        self._log(f"   📐 {sym} notional ${notional:.2f} floored (R1) → "
-                                  f"${CRYPTO_RULES['min_order_usdt']:.2f} (below ${CRYPTO_RULES['min_trade_usdt']:.2f} min, wallet can cover it)")
-                        notional = CRYPTO_RULES["min_order_usdt"]
-                    else:
-                        self._log(f"   ⛔ {sym} REJECT (R1): notional ${notional:.2f} < ${CRYPTO_RULES['min_trade_usdt']:.2f} min "
-                                  f"and pool ${crypto_pool:.2f} can't cover the exchange floor")
-                        continue
+                    continue
                 proj = self._projections.get(sym, {})
                 if proj.get("error") or not proj.get("viable"):
                     self._log(f"   🪙 {sym} proj not viable — skip")
                     continue
                 proposals.append({
                     "symbol":    sym,
-                    # Same floor as the main path — never size under the minimum
-                    "notional":  max(CRYPTO_RULES["min_order_usdt"],
-                                     min(notional, crypto_pool * 0.6)),
+                    "notional":  min(notional, crypto_pool * 0.6),
                     "entry":     entry or proj["proj_low"],
                     "tp":        tp    or proj["proj_high"],
                     "conf":      conf,
@@ -4415,7 +4195,8 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
             try:
                 import strategic_brain as _sb_gate2
                 _ai_for_gate2 = owner2 if owner2 in ("claude", "grok") else "claude"
-                _cs_gate_2    = _sb_gate2.load_strategy_for(_ai_for_gate2, "crypto") or {}
+                _ps_gate2     = _sb_gate2.load_strategy(_ai_for_gate2)
+                _cs_gate_2    = _ps_gate2.get("current_strategy", {}) or {}
                 _playbook_is_turtle_2 = (_cs_gate_2.get("strategy_type") == "turtle")
             except Exception as _pb2_err:
                 self._log(f"   ⚠️ Turtle gate (path 2): couldn't load playbook for {sym2_pre}: {_pb2_err} — fail-open")
@@ -4465,17 +4246,6 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                             self._log(f"   🐢 TURTLE armed (path 2): 2N stop=${pos_kwargs2['stop_price_override']:.6f}")
                     pos = CryptoPosition(**pos_kwargs2)
                     self.positions[sym] = pos
-                    # ── Broker-side protective stop (survives bot outages) ──
-                    # Failure is non-fatal: software stop monitor still active.
-                    try:
-                        _stopres = place_crypto_stop_market(sym, pos.qty, pos.stop_price)
-                        if isinstance(_stopres, dict) and _stopres.get("orderId"):
-                            pos.exit_order_id = _stopres["orderId"]
-                            self._log(f"   [STOP] Broker stop resting @ ${pos.stop_price:.6f} (order {_stopres['orderId']})")
-                        else:
-                            self._log(f"   [STOP] NOT placed for {sym}: {_stopres} -- software stop still active")
-                    except Exception as _se:
-                        self._log(f"   [STOP] error for {sym}: {_se} -- software stop still active")
                     crypto_pool -= prop["notional"]
                     new_positions += 1
                     self._log(f"   ✅ Crypto order {result['orderId']} | "
@@ -4486,131 +4256,3 @@ JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{tr
                 self._log(f"   ❌ Crypto buy error {prop['symbol']}: {e}")
 
         return new_positions
-
-
-# ══════════════════════════════════════════════════════════════
-# ── Standalone entrypoint ─────────────────────────────────────
-# ══════════════════════════════════════════════════════════════
-# Runs this module as its own crypto-only bot, independent of
-# bot_with_proxy.py's stock trading loop. NovaTrade's main process is
-# stocks-only now (see bot_with_proxy.py's CRYPTO_TRADING_ENABLED
-# flag, which stays False there) — nothing here starts automatically
-# as part of that process. To trade crypto, run this file directly,
-# either locally or as its own deployed service:
-#     python3 binance_crypto.py
-# It needs its own env vars: BINANCE_KEY, BINANCE_SECRET,
-# ANTHROPIC_KEY (required — Claude is the sole decision-maker here
-# too), and optionally GROK_KEY (support/risk-review only, same
-# division of labor as the stock bot).
-
-def _standalone_main():
-    """Entry point for running crypto trading as its own process/service."""
-    import sys
-    import threading
-    import ai_clients
-    import portfolio_manager
-    from prompt_builder import PromptBuilder
-
-    def _log(msg):
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{now}] [CRYPTO-BOT] {msg}", flush=True)
-
-    if not (BINANCE_KEY and BINANCE_SECRET):
-        _log("❌ BINANCE_KEY / BINANCE_SECRET not set — cannot run standalone crypto bot")
-        sys.exit(1)
-    if not (os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY")):
-        _log("❌ ANTHROPIC_KEY not set — Claude is required (Grok is support-only, never trades solo)")
-        sys.exit(1)
-    if not os.environ.get("GROK_KEY"):
-        _log("⚠️ GROK_KEY not set — running with Claude only, no support/risk-review pass")
-
-    # Own shared_state, trade history, and rules — independent of the
-    # stock bot's globals, even if both happen to run on the same host.
-    crypto_shared_state = {
-        "claude_healthy": True, "claude_fail_count": 0, "claude_fail_reason": None,
-        "claude_credits_ok": True, "last_claude_fail": None,
-        "grok_healthy": True, "grok_fail_count": 0, "grok_fail_reason": None,
-        "grok_credits_ok": True, "last_grok_fail": None,
-        "equity": 0,  # No stock-side equity to cross-reference in standalone mode
-    }
-    crypto_trade_history = []
-    crypto_rules = {"failover_max_retries": 3}
-
-    ai_clients._set_context(_log, shared_state_ref=crypto_shared_state, rules_ref=crypto_rules)
-    portfolio_manager._set_context(_log, crypto_shared_state, crypto_trade_history, crypto_rules)
-
-    trader = CryptoTrader()
-    trader._shared_state = crypto_shared_state
-    pb = PromptBuilder()
-
-    def ask_claude_guarded(prompt, system):
-        if not crypto_shared_state.get("claude_healthy", True):
-            return None
-        return ai_clients.safe_ask_claude(prompt, system)
-
-    def ask_grok_guarded(prompt, system):
-        if not crypto_shared_state.get("grok_healthy", True):
-            return None
-        return ai_clients.safe_ask_grok(prompt, system)
-
-    _log("🚀 NovaTrade Crypto Bot — standalone, Claude-primary / Grok-support")
-    _log(f"   Universe: {list(CRYPTO_UNIVERSE) if 'CRYPTO_UNIVERSE' in globals() else 'see CRYPTO_RULES'}")
-
-    # Minimal health endpoint so this can be deployed as its own Railway
-    # service later without further changes — optional, never blocks the
-    # trading loop if Flask isn't available or the port can't bind.
-    try:
-        from flask import Flask, jsonify
-        health_app = Flask(__name__)
-
-        @health_app.route("/health")
-        def _health():
-            return jsonify({
-                "status":         "ok",
-                "enabled":        trader.is_enabled(),
-                "cycle_count":    trader.cycle_count,
-                "open_positions": len(trader.positions),
-            })
-
-        port = int(os.environ.get("PORT", 8081))
-        threading.Thread(
-            target=lambda: health_app.run(host="0.0.0.0", port=port, use_reloader=False),
-            daemon=True,
-        ).start()
-        _log(f"🩺 Health endpoint on :{port}/health")
-    except Exception as he:
-        _log(f"⚠️ Health endpoint not started: {he}")
-
-    last_run  = None
-    boot_time = datetime.now(timezone.utc)
-    while True:
-        try:
-            now_utc = datetime.now(timezone.utc)
-            due = ((last_run is None and (now_utc - boot_time).total_seconds() >= 30) or
-                   (last_run is not None and (now_utc - last_run).total_seconds() >= 3600))
-            if due:
-                last_run = now_utc
-                trader.run_crypto_cycle(
-                    total_equity      = 0,
-                    ask_claude_fn     = ask_claude_guarded,
-                    ask_grok_fn       = ask_grok_guarded,
-                    spy_trend         = "neutral",
-                    prompt_builder    = pb,
-                    record_trade_fn   = portfolio_manager.record_trade,
-                    pol_text          = "",
-                    stock_projections = {},
-                )
-            else:
-                exits = trader.run_exit_monitor(
-                    record_trade_fn = portfolio_manager.record_trade,
-                    prompt_builder  = pb,
-                )
-                if exits:
-                    _log(f"🪙 {exits} autonomous exit(s)")
-        except Exception as e:
-            _log(f"❌ Loop error: {e}")
-        time.sleep(300)  # 5-minute tick, matches the stock bot's cadence
-
-
-if __name__ == "__main__":
-    _standalone_main()
