@@ -562,6 +562,14 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 
 ## Bug Fix Log
 
+### Bug Fix — 2026-09-25
+**Error:** [BEHAVIORAL] SPY trend cache: NEUTRAL | price=$0.00 — indicator fetch broken (6 zero-reads/hour)
+**Root Cause:** `spy_trend` initialized to lowercase `"neutral"` in `shared_state` dict, but `get_spy_trend()` in `market_data.py` returns uppercase values (`"NEUTRAL"`, `"BULLISH"`, `"BEARISH"`). Case mismatch prevented cache updates; stale $0.00 price persisted across cycles.
+**Fix:** Changed `shared_state["spy_trend"]` initialization from `"neutral"` to `"NEUTRAL"` (uppercase) to match `market_data.get_spy_trend()` output format.
+**File:** bot_with_proxy.py (line ~110)
+**Status:** ✅ PR opened
+
+
 ### Bug Fix — 2026-06-03
 **Error:** Claude/Grok proposing crypto USDT pairs in stock execution cycle
 **Fix:** Added `is_crypto_ticker()` validator function and `STOCK_EXEC_FORBIDDEN_PATTERNS` list to filter crypto stablecoins (USDT, USDC, BUSD, TUSD) before Alpaca order submission. Prevents malformed "Skip USDT" errors when AI recommends BTC/ETH crosses during market analysis spillover.
