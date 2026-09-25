@@ -2416,10 +2416,12 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                 log(f"⚠️ Already own {symbol}"); continue
             # Dynamic position sizing — scale with equity, not fixed AI suggestion
             def _dynamic_notional(eq, cash_avail, owner_budget):
-                if eq < 200:
-                    target = round(eq * 0.20, 2)   # 20% of equity
-                elif eq < 500:
-                    target = round(eq * 0.15, 2)   # 15% of equity
+                if eq < 500:
+                    # Maximize cash use while small — match the tier
+                    # risk_pct already shown to the AI in the prompt
+                    # (was a flatter 20%/15% cap that left cash sitting
+                    # idle across multiple trades to fully deploy).
+                    target = round(eq * get_stock_tier(eq)["risk_pct"], 2)
                 elif eq < 2000:
                     target = round(eq * 0.12, 2)   # 12% of equity
                 else:
@@ -2612,12 +2614,22 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
 # [check_ai_health → moved to ai_clients.py]
 def get_cash_thresholds(equity):
     """Return cash thresholds (sleep/watch/active) scaled to equity."""
-    sleep_thresh  = RULES["cash_sleep_threshold"]  # Always $8
-    watch_thresh  = max(
-        RULES["threshold_floor"],
-        round(equity * RULES["threshold_equity_pct"], 2)
-    )
-    active_thresh = round(watch_thresh * RULES["threshold_active_mult"], 2)
+    sleep_thresh = RULES["cash_sleep_threshold"]  # Always $8
+
+    if equity < 500:
+        # Maximize cash use while the account is small: wake for a real
+        # decision cycle as soon as there's enough cash to size a trade
+        # (min trade is $8), instead of waiting for it to build up to the
+        # standard $20-30 watch/active bands — that left cash sitting
+        # idle for cycles at a time. Reverts to standard scaling at $500+.
+        watch_thresh  = 12.0
+        active_thresh = 15.0
+    else:
+        watch_thresh  = max(
+            RULES["threshold_floor"],
+            round(equity * RULES["threshold_equity_pct"], 2)
+        )
+        active_thresh = round(watch_thresh * RULES["threshold_active_mult"], 2)
 
     return {
         "sleep":  sleep_thresh,
