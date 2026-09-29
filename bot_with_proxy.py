@@ -598,3 +598,602 @@ def liquidate_endpoint():
                 "warning":         "Sells all free spot coins to USDT via market orders. Staked assets (FET/AUDIO/KAVA) are left untouched.",
                 "usdt_now":        round(usdt_now, 2),
                 "usdt_after_sale": usdt_after,
+                "spot_to_sell":    spot_to_sell,
+                "spot_to_skip":    spot_to_skip,
+                "staked_protected": staked_summary,
+                "staked_total_value": round(total_staked, 2),
+                "tip":             "Claim staking rewards separately from Binance.US → Earn → Staking",
+                "execute_url":     "/liquidate?confirm=yes",
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # ── EXECUTE liquidation ───────────────────────────────────
+    log("🔴 LIQUIDATION REQUESTED via /liquidate endpoint")
+    log("   Converting all crypto holdings to USDT for pure trading...")
+
+    try:
+        result = liquidate_all_to_usdt(log_fn=log)
+
+        # Store liquidation timestamp so bot knows to trade fresh
+        shared_state["last_liquidation"] = datetime.now(timezone.utc).isoformat()
+        shared_state["liquidation_result"] = result
+
+        return jsonify({
+            "status":      "LIQUIDATION EXECUTED",
+            "coins_sold":  result["sold"],
+            "skipped":     result["skipped"],
+            "usdt_gained": result["usdt_gained"],
+            "usdt_final":  result["usdt_final"],
+            "failures":    result["failed"],
+            "note":        (
+                "All free spot coins sold to USDT. "
+                "Staked assets (FET/AUDIO/KAVA) untouched — still earning APY. "
+                "Claim staking rewards from Binance.US → Earn → Staking for extra USDT."
+            ),
+        })
+    except Exception as e:
+        log(f"❌ Liquidation error: {e}")
+        return jsonify({"error": str(e), "status": "FAILED"}), 500
+    """
+    Check PDT (Pattern Day Trader) status.
+    Shows day trades used, remaining, intraday buys, and projection guidance.
+    GET /pdt
+    """
+    try:
+        account = alpaca("GET", "/v2/account")
+        equity  = float(account.get("equity", 55))
+        status  = get_pdt_status(equity)
+
+        # Add projection-based guidance for each intraday buy
+        guidance = {}
+        projections = shared_state.get("last_projections", {})
+        for sym in status.get("intraday_buys", []):
+            proj = projections.get(sym, {})
+            if proj and not proj.get("error"):
+                guidance[sym] = {
+                    "bias":       proj.get("bias", "unknown"),
+                    "confidence": proj.get("confidence", 0),
+                    "proj_high":  proj.get("proj_high"),
+                    "proj_low":   proj.get("proj_low"),
+                    "recommendation": (
+                        "HOLD OVERNIGHT — bullish projection, protect with trail stop"
+                        if proj.get("bias") == "bullish"
+                        else "CONSIDER SELLING — bearish projection despite PDT cost"
+                        if proj.get("bias") == "bearish"
+                        else "HOLD — neutral, set tight stop"
+                    ),
+                }
+        status["projection_guidance"] = guidance
+
+        # Active hold plans
+        hold_plans = {k.replace("pdt_hold_", ""): v
+                      for k, v in shared_state.items()
+                      if k.startswith("pdt_hold_")}
+        status["active_hold_plans"] = hold_plans
+
+        status["explanation"] = (
+            "PDT rule: accounts < $25,000 limited to 3 day trades per 5 business days. "
+            "Day trade = buying AND selling same stock same day. "
+            "Violation = account restricted for 90 days."
+        )
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/stats")
+def stats():
+    try:
+        account   = alpaca_get("/v2/account")
+        positions = alpaca_get("/v2/positions")
+        equity    = float(account["equity"])
+        features  = check_account_features(account, equity)
+        pool      = get_trading_pool(equity)
+        autonomy  = get_autonomy_status(equity)
+        return jsonify({
+            "bot":              BOT_NAME,
+            "equity":           equity,
+            "cash":             float(account["cash"]),
+            "pnl":              round(equity - RULES["total_budget"], 2),
+            "pnl_pct":          round((equity - RULES["total_budget"]) / RULES["total_budget"] * 100, 2),
+            "mode":             "REAL",
+            "growth_reserve":   round(pool["reserve"], 2),
+            "trading_pool":     round(pool["trading"], 2),
+            "claude_budget":    round(pool["claude"], 2),
+            "grok_budget":      round(pool["grok"], 2),
+            "claude_allocation": shared_state["claude_allocation"],
+            "grok_allocation":   shared_state["grok_allocation"],
+            "claude_daily_pnl":  shared_state["claude_daily_pnl"],
+            "grok_daily_pnl":    shared_state["grok_daily_pnl"],
+            "claude_weekly_pnl": shared_state["claude_weekly_pnl"],
+            "grok_weekly_pnl":   shared_state["grok_weekly_pnl"],
+            "claude_total_pnl":  shared_state["claude_total_pnl"],
+            "grok_total_pnl":    shared_state["grok_total_pnl"],
+            "claude_healthy":     shared_state["claude_healthy"],
+            "claude_credits_ok":  shared_state["claude_credits_ok"],
+            "claude_fail_reason": shared_state["claude_fail_reason"],
+            "last_claude_fail":   shared_state.get("last_claude_fail"),
+            "grok_healthy":       shared_state["grok_healthy"],
+            "grok_credits_ok":    shared_state["grok_credits_ok"],
+            "grok_fail_reason":   shared_state["grok_fail_reason"],
+            "last_grok_fail":     shared_state.get("last_grok_fail"),
+            "grok_balance":            shared_state.get("grok_balance"),
+            "grok_balance_checked_at": shared_state.get("grok_balance_checked_at"),
+            "penny_candidates":        shared_state.get("last_penny_candidates", []),
+            "wider_candidates":        shared_state.get("last_wider_candidates", []),
+            "opportunity_scan_at":     shared_state.get("last_opportunity_scan_at"),
+            "failover_mode":      shared_state["failover_mode"],
+            "watch_mode_active":  shared_state["watch_mode_active"],
+            "ai_sleeping":        shared_state["ai_sleeping"],
+            "sleep_reason":       shared_state["sleep_reason"],
+            "wake_reason":        shared_state["wake_reason"],
+            "stops_fired_today":  shared_state["stops_fired_today"],
+            "ai_wake_instructions": shared_state.get("ai_wake_instructions", []),
+            "cash_thresholds":    get_cash_thresholds(equity),
+            "can_short":          features["can_short"],
+            "short_progress":    features["short_progress_pct"],
+            "autonomy_mode":     shared_state["autonomy_mode"],
+            "claude_owns":       shared_state["claude_positions"],
+            "grok_owns":         shared_state["grok_positions"],
+            "positions": [
+                {"symbol": p["symbol"], "qty": p["qty"],
+                 "pnl": round(float(p["unrealized_pl"]), 2),
+                 "pnl_pct": round(float(p["unrealized_plpc"]) * 100, 2),
+                 "owner": "claude" if p["symbol"] in shared_state["claude_positions"]
+                          else "grok" if p["symbol"] in shared_state["grok_positions"]
+                          else "shared"}
+                for p in positions
+            ]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/binance_history")
+def binance_history_endpoint():
+    """Binance trade history — fetched from exchange, saved to volume."""
+    try:
+        stats  = get_binance_history_stats()
+        trades = _load_binance_history()
+        limit  = int(request.args.get("limit", 50))
+        return jsonify({
+            "stats":  stats,
+            "trades": list(reversed(trades))[:limit],
+            "file":   "/data/binance_trade_history.json",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/history")
+def history():
+    """
+    Full trade history — last N trades (default 100, max 500).
+    Query params:
+      ?limit=50        — return last N trades
+      ?symbol=NVDA     — filter by ticker
+      ?action=sell     — filter by action type
+      ?owner=claude    — filter by AI owner
+    """
+    try:
+        limit   = min(int(request.args.get("limit", 100)), 500)
+        symbol  = request.args.get("symbol", "").upper()
+        action  = request.args.get("action", "").lower()
+        owner   = request.args.get("owner", "").lower()
+
+        trades = list(reversed(trade_history))  # newest first
+
+        if symbol: trades = [t for t in trades if t.get("symbol") == symbol]
+        if action: trades = [t for t in trades if t.get("action","").startswith(action)]
+        if owner:  trades = [t for t in trades if t.get("owner") == owner]
+
+        trades = trades[:limit]
+
+        return jsonify({
+            "count":  len(trades),
+            "total_recorded": len(trade_history),
+            "trades": trades,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/performance")
+def performance():
+    """
+    Trading performance analytics derived from trade_history.
+    Returns win rate, avg P&L, best/worst trades, per-symbol breakdown,
+    per-AI breakdown, and trend of trade quality over time.
+    """
+    try:
+        sells = [t for t in trade_history if t.get("pnl_usd") is not None]
+        buys  = [t for t in trade_history if t.get("action") == "buy"]
+
+        total_trades  = len(sells)
+        wins          = [t for t in sells if t.get("pnl_usd", 0) > 0]
+        losses        = [t for t in sells if t.get("pnl_usd", 0) <= 0]
+        win_rate      = round(len(wins) / total_trades * 100, 1) if total_trades else 0
+        total_pnl     = round(sum(t.get("pnl_usd", 0) for t in sells), 2)
+        avg_win       = round(sum(t.get("pnl_usd", 0) for t in wins) / len(wins), 2) if wins else 0
+        avg_loss      = round(sum(t.get("pnl_usd", 0) for t in losses) / len(losses), 2) if losses else 0
+        profit_factor = round(abs(sum(t.get("pnl_usd",0) for t in wins)) /
+                              abs(sum(t.get("pnl_usd",0) for t in losses)), 2) if losses and wins else None
+
+        best_trade  = max(sells, key=lambda t: t.get("pnl_usd", 0), default=None)
+        worst_trade = min(sells, key=lambda t: t.get("pnl_usd", 0), default=None)
+
+        # Per-symbol breakdown
+        sym_stats = {}
+        for t in sells:
+            sym = t.get("symbol","?")
+            if sym not in sym_stats:
+                sym_stats[sym] = {"trades": 0, "wins": 0, "total_pnl": 0.0,
+                                  "avg_pnl_pct": [], "strategies": []}
+            sym_stats[sym]["trades"]    += 1
+            sym_stats[sym]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                sym_stats[sym]["wins"] += 1
+            if t.get("pnl_pct") is not None:
+                sym_stats[sym]["avg_pnl_pct"].append(t["pnl_pct"])
+            if t.get("strategy"):
+                sym_stats[sym]["strategies"].append(t["strategy"])
+
+        symbol_summary = {}
+        for sym, s in sym_stats.items():
+            symbol_summary[sym] = {
+                "trades":    s["trades"],
+                "wins":      s["wins"],
+                "win_rate":  round(s["wins"]/s["trades"]*100, 1) if s["trades"] else 0,
+                "total_pnl": round(s["total_pnl"], 2),
+                "avg_pnl_pct": round(sum(s["avg_pnl_pct"])/len(s["avg_pnl_pct"]), 2)
+                               if s["avg_pnl_pct"] else None,
+                "strategy_used": max(set(s["strategies"]), key=s["strategies"].count)
+                                 if s["strategies"] else None,
+            }
+
+        # Per-AI breakdown
+        ai_stats = {}
+        for t in sells:
+            owner = t.get("owner", "unknown")
+            if owner not in ai_stats:
+                ai_stats[owner] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            ai_stats[owner]["trades"]    += 1
+            ai_stats[owner]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                ai_stats[owner]["wins"] += 1
+
+        ai_summary = {}
+        for owner, s in ai_stats.items():
+            ai_summary[owner] = {
+                "trades":    s["trades"],
+                "wins":      s["wins"],
+                "win_rate":  round(s["wins"]/s["trades"]*100, 1) if s["trades"] else 0,
+                "total_pnl": round(s["total_pnl"], 2),
+            }
+
+        # Exit reason breakdown
+        reason_counts = {}
+        for t in sells:
+            r = t.get("action", "sell")
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+
+        # Strategy A vs B performance
+        strat_stats = {}
+        for t in sells:
+            s = t.get("strategy") or "unknown"
+            if s not in strat_stats:
+                strat_stats[s] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            strat_stats[s]["trades"]    += 1
+            strat_stats[s]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                strat_stats[s]["wins"] += 1
+
+        strat_summary = {}
+        for s, d in strat_stats.items():
+            strat_summary[s] = {
+                "trades":    d["trades"],
+                "win_rate":  round(d["wins"]/d["trades"]*100, 1) if d["trades"] else 0,
+                "total_pnl": round(d["total_pnl"], 2),
+            }
+
+        # SPY trend performance (were trades better in bull vs bear market?)
+        spy_stats = {}
+        for t in sells:
+            trend = t.get("spy_trend", "neutral")
+            if trend not in spy_stats:
+                spy_stats[trend] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            spy_stats[trend]["trades"]    += 1
+            spy_stats[trend]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                spy_stats[trend]["wins"] += 1
+
+        spy_summary = {
+            k: {"trades": v["trades"],
+                "win_rate": round(v["wins"]/v["trades"]*100,1) if v["trades"] else 0,
+                "total_pnl": round(v["total_pnl"],2)}
+            for k, v in spy_stats.items()
+        }
+
+        return jsonify({
+            "summary": {
+                "total_closed_trades": total_trades,
+                "total_buys":          len(buys),
+                "win_rate_pct":        win_rate,
+                "total_pnl":           total_pnl,
+                "avg_win":             avg_win,
+                "avg_loss":            avg_loss,
+                "profit_factor":       profit_factor,
+            },
+            "best_trade":      best_trade,
+            "worst_trade":     worst_trade,
+            "by_symbol":       symbol_summary,
+            "by_ai":           ai_summary,
+            "by_strategy":     strat_summary,
+            "by_exit_reason":  reason_counts,
+            "by_spy_trend":    spy_summary,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/leaderboard")
+def leaderboard():
+    """
+    Stock trading performance summary.
+    Claude is the sole decision-maker now — Grok only reviews Claude's
+    proposals (support/risk-check), so there's no more head-to-head
+    competition to score. This reports overall stock performance plus
+    whether Grok's review pass is currently active.
+    """
+    try:
+        closes = [t for t in trade_history
+                  if t.get("pnl_usd") is not None
+                  and not (t.get("symbol") or "").upper().endswith(("USDT", "USDC", "BUSD"))]
+        wins      = sum(1 for t in closes if (t.get("pnl_usd") or 0) > 0)
+        total_pnl = sum(t.get("pnl_usd") or 0 for t in closes)
+        win_rate  = round(wins / len(closes) * 100, 1) if closes else 0.0
+
+        recent_trades = [{
+            "symbol":  t.get("symbol"),
+            "action":  t.get("action"),
+            "pnl_usd": t.get("pnl_usd"),
+            "pnl_pct": t.get("pnl_pct"),
+            "time":    t.get("time"),
+        } for t in closes[-10:]]
+
+        open_positions = len(shared_state.get("claude_positions", [])) + len(shared_state.get("grok_positions", []))
+
+        return jsonify({
+            "decision_model":  "claude_primary_grok_support",
+            "grok_active":     bool(GROK_KEY) and shared_state.get("grok_healthy", True),
+            "reserve":         _get_reserve_info(),
+            "total_pnl":       round(total_pnl, 2),
+            "total_closed":    len(closes),
+            "wins":            wins,
+            "win_rate":        win_rate,
+            "open_positions":  open_positions,
+            "recent_trades":   recent_trades,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _get_reserve_info():
+    """
+    Compute current wallet-scaling reserve based on combined wallet value.
+    Returns dict with combined_wallet, reserve_pct, reserve_usd, label.
+    Pulls live equity numbers — never raises.
+    """
+    try:
+        # Stocks
+        try:
+            acct = alpaca("GET", "/v2/account") or {}
+            stock_eq = float(acct.get("equity", 0) or 0)
+        except Exception:
+            stock_eq = 0.0
+        # Crypto
+        try:
+            wallet = binance_crypto.get_full_wallet() or {}
+            crypto_eq = float(wallet.get("total_value", 0) or 0)
+            usdt_free = float(wallet.get("usdt_free", 0) or 0)
+        except Exception:
+            crypto_eq, usdt_free = 0.0, 0.0
+        combined = stock_eq + crypto_eq
+        pct = binance_crypto.get_wallet_reserve_pct(combined)
+        return {
+            "combined_wallet":  round(combined, 2),
+            "stock_equity":     round(stock_eq, 2),
+            "crypto_equity":    round(crypto_eq, 2),
+            "reserve_pct":      pct,
+            "reserve_usd":      round(usdt_free * pct, 2),
+            "tradeable_usdt":   round(usdt_free * (1 - pct), 2),
+            "free_threshold":   getattr(binance_crypto, "RESERVE_FREE_THRESHOLD", 1000.0),
+            "cap_pct":          getattr(binance_crypto, "RESERVE_CAP_PCT", 0.30),
+            "label":            binance_crypto.get_wallet_reserve_label(combined),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.route("/memory")
+def memory_endpoint():
+    """
+    AI Memory inspection endpoint — surfaces what the AIs have learned.
+
+    Returns:
+      total_closed, total_wins, win_rate_overall — aggregate performance
+      lessons_count, symbols_tracked              — memory size
+      ai_patterns      → per-AI win rates and best setups
+      market_regimes   → bull/bear/neutral performance
+      top_symbols      → 10 most-traded symbols with stats
+      recent_lessons   → 8 most recent lesson entries
+      last_save_iso    → when memory was last persisted to /data
+      memory_file      → path on Railway volume
+
+    Example: /memory → JSON with full learning state
+    """
+    try:
+        if not hasattr(prompt_builder, "memory"):
+            return jsonify({"error": "memory not initialized"}), 500
+        return jsonify(prompt_builder.memory.get_stats())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/core_reserve")
+def core_reserve_endpoint():
+    """
+    Core Reserve status — long-term wealth compounder, walled off from AIs.
+
+    Returns the current reserve composition (BTC/SPY/cash split), target
+    allocation, P&L vs total contributions, ATH and entry prices for both
+    BTC and SPY, recent contingency events (defensive trims, opportunity
+    buys, take-profits, rebalances), and activation status.
+
+    The tactical AIs cannot see this data. It's surfaced only on the
+    dashboard so the user can monitor what the long-term layer is doing.
+    """
+    try:
+        if not HAVE_CORE_RESERVE or not core_reserve:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(core_reserve.get_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/evolution")
+def evolution_endpoint():
+    """
+    AI Evolution status — current tier, P&L, eligibility for next tier.
+
+    Pass A: surfaces tier 0 status for both AIs, plus rivalry standings
+    and hard-banned phrase list (transparency).
+    Pass B (future): will also show pending prompt proposals, audit log,
+    and apply/revert history.
+    """
+    try:
+        if not HAVE_AI_EVOLUTION or not ai_evolution:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        # Translate prompt_builder memory stats into the shape ai_evolution expects
+        c_stats = {"trades": 0, "total_pnl": 0.0}
+        g_stats = {"trades": 0, "total_pnl": 0.0}
+        try:
+            mem_stats = prompt_builder.memory.get_stats()
+            ai_p      = mem_stats.get("ai_patterns", {})
+            for ai, dest in (("claude", c_stats), ("grok", g_stats)):
+                p = ai_p.get(ai, {})
+                w = int(p.get("wins", 0) or 0)
+                l = int(p.get("losses", 0) or 0)
+                dest["trades"]    = w + l
+                dest["total_pnl"] = float(p.get("total_pnl_usd", 0) or 0)
+        except Exception:
+            pass
+        result = ai_evolution.get_full_status(c_stats, g_stats)
+        result["enabled"] = True
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/strategy")
+def strategy_overview_endpoint():
+    """
+    Strategic brain overview — current state, model registry, both strategies.
+
+    Phase A: Returns enabled=False with state info. Strategists are
+    dormant (no API calls, no strategy writes). Useful for verifying
+    the integration is wired correctly.
+    Phase B: Returns full strategist activity, recent activations,
+    cost tracking, and links to per-AI strategy files.
+    """
+    try:
+        if not HAVE_STRATEGIC_BRAIN or not strategic_brain:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(strategic_brain.get_full_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/strategy/<ai_name>")
+def strategy_ai_endpoint(ai_name):
+    """
+    Per-AI strategy file — current strategy + performance + history.
+
+    Phase A: Returns the default Tier-0 strategy (auto-created at boot).
+    No API calls, no actual writes. Reading is free.
+
+    URL params:
+      /strategy/claude — Claude's strategy file
+      /strategy/grok   — Grok's strategy file
+
+    Returns 404 for any other ai_name.
+    """
+    try:
+        if ai_name not in ("claude", "grok"):
+            return jsonify({"error": f"unknown AI '{ai_name}'"}), 404
+        if not HAVE_STRATEGIC_BRAIN or not strategic_brain:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(strategic_brain.load_strategy(ai_name))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/projection")
+def projection_endpoint():
+    """
+    Live daily range projections for all universe symbols (or a single symbol).
+    Uses the 5-layer model from projection_engine.py.
+
+    Query params:
+      ?symbol=NVDA  — single symbol projection
+      ?full=1       — include layer_details breakdown
+    """
+    try:
+        symbol  = request.args.get("symbol","").upper()
+        full    = request.args.get("full","0") == "1"
+        symbols = [symbol] if symbol else RULES["universe"]
+        results = {}
+
+        for sym in symbols:
+            try:
+                bars = get_bars(sym)
+                ind  = compute_indicators(bars)
+                proj = get_projection(sym, bars, ind=ind)
+                if not full:
+                    proj.pop("layer_details", None)
+                results[sym] = proj
+            except Exception as e:
+                results[sym] = {"symbol": sym, "error": str(e)}
+
+        # Cache for bot autonomous use
+        shared_state["last_projections"] = {k: v for k, v in results.items() if not v.get("error")}
+        shared_state["last_proj_time"]   = datetime.now().isoformat()
+
+        return jsonify({
+            "projections":      results,
+            "formatted_prompt": proj_format_for_ai(results, include_low_conf=True),
+            "accuracy": {
+                "hit_count":    shared_state["proj_hit_count"],
+                "total_count":  shared_state["proj_total_count"],
+                "accuracy_pct": shared_state["proj_accuracy_pct"],
+            },
+            "cached_at":    shared_state["last_proj_time"],
+            "symbol_count": len(results),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/prompt_memory")
+def prompt_memory_endpoint():
+    """
+    Live view of the adaptive prompt memory — lessons learned from closed trades.
+    Shows win rates by situation mode, AI patterns, regime stats, recent lessons.
+    GET /prompt_memory
+    """
+    try:
+        return jsonify(prompt_builder.get_memory_stats())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/crypto_status")
+def crypto_status_endpoint():
+    """
+    Live Binance.US crypto trading status.
+    Shows open positions, P&L, projections, recent trades, rules.
+    GET /crypto_status
+    """
+    try:
+        return jsonify(crypto_trader.get_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
