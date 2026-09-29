@@ -1,6 +1,6 @@
 """
 pdt_manager.py — NovaTrade PDT Manager
-═══════════════════════════════════════
+════════════════════════════════
 Pattern Day Trader rule management.
 Tracks intraday buys, prevents PDT violations,
 runs AI council for hold/exit decisions.
@@ -70,6 +70,14 @@ def get_stock_tier(equity: float) -> dict:
             return t
     return RULES["stock_tiers"][-1]
 
+def get_quick_take_profit_pct(equity: float):
+    """
+    Small-account quick-flip take-profit override, or None at the top
+    tier (meaning: use the existing per-strategy A/B/T exit logic as-is).
+    Single source of truth for every stock exit-check call site.
+    """
+    return get_stock_tier(equity).get("tp_pct")
+
 def reset_intraday_buys_if_new_day():
     """
     Call at start of each trading day to reset PDT daily tracking.
@@ -122,7 +130,7 @@ def run_pdt_hold_council(symbol: str, pos: dict,
         log(f"   Entry=${entry_price} | Now=${current_price} | "
             f"P&L={pnl_pct:+.1f}% (${pnl_usd:+.2f}) | PDT {used}/3")
 
-        # ── Build multi-day projection data ──────────────────
+        # ── Build multi-day projection data ───────────────
         bars = get_bars(symbol, days=60)
         ind  = compute_indicators(bars)
 
@@ -176,7 +184,7 @@ def run_pdt_hold_council(symbol: str, pos: dict,
 
         plateau = simulated[min(plateau_day, len(simulated)-1)]
 
-        # ── Build simulation prompt for both AIs ─────────────
+        # ── Build simulation prompt for both AIs ───────────
         sim_rows = "\n".join(
             f"  Day +{d['day']}: est=${d['anchor']:.2f} "
             f"range=[${d['proj_low']:.2f}–${d['proj_high']:.2f}] "
@@ -220,7 +228,7 @@ Respond in JSON:
   "confidence": 75, "rationale": "brief", "daily_triggers": {{"sell_if_above": 388.0, "sell_if_below": 379.0}},
   "reassess_note": "Exit early if RSI > 72 or MACD crosses negative"}}"""
 
-        # ── Ask both AIs ──────────────────────────────────────
+        # ── Ask both AIs ────────────────────────
         log(f"   🔵 Claude running hold simulation...")
         log(f"   🔴 Grok running hold simulation...")
 
@@ -253,7 +261,7 @@ Respond in JSON:
         except Exception as e:
             log(f"   ⚠️ Grok hold council failed: {e}")
 
-        # ── Collaborate — merge both plans ────────────────────
+        # ── Collaborate — merge both plans ──────────────
         if not claude_plan and not grok_plan:
             log(f"   ⚠️ Both AIs failed — using projection-based fallback")
             return _pdt_fallback_plan(symbol, entry_price, current_price,
@@ -318,7 +326,7 @@ Respond in JSON:
             if triggers["sell_if_below"] > 0:
                 log(f"   📉 Trigger: sell immediately if price < ${triggers['sell_if_below']}")
 
-        # ── Store the plan ────────────────────────────────────
+        # ── Store the plan ───────────────────────
         now_et   = datetime.now(ZoneInfo("America/New_York"))
         plan_key = f"pdt_hold_{symbol}"
         agreed_plan.update({
@@ -410,14 +418,14 @@ def check_pdt_hold_plans():
         action = None
         reason = ""
 
-        # ── Check all exit conditions ─────────────────────────
+        # ── Check all exit conditions ─────────────────
         if curr >= exit_tgt and exit_tgt > 0:
             action = "sell"
             reason = f"🎯 PDT hold plan: exit target ${exit_tgt} HIT at ${curr:.2f} (+{pnl_pct:.1f}%)"
 
         elif curr <= stop_px and stop_px > 0:
             action = "sell"
-            reason = f"🛑 PDT hold plan: stop ${stop_px} hit at ${curr:.2f} ({pnl_pct:.1f}%)"
+            reason = f"🔑 PDT hold plan: stop ${stop_px} hit at ${curr:.2f} ({pnl_pct:.1f}%)"
 
         elif triggers.get("sell_if_above", 0) and curr >= triggers["sell_if_above"]:
             action = "sell"
@@ -440,7 +448,7 @@ def check_pdt_hold_plans():
             shared_state[plan_key]["needs_reassess"] = True
             shared_state[plan_key]["price_at_plan"]  = curr  # Reset baseline
 
-        # ── Trail stop update ─────────────────────────────────
+        # ── Trail stop update ─────────────────────
         if plan.get("trail_stop") and action != "sell" and curr > stop_px:
             atr_val   = shared_state.get("last_projections", {}).get(
                 symbol, {}).get("atr", curr * 0.02)
@@ -488,7 +496,7 @@ def get_pdt_decision(symbol: str, equity: float,
     pnl_pct       = round((current_price - entry_price) / entry_price * 100, 2)
     is_profitable = current_price > entry_price
 
-    # ── If PDT safe, just sell normally ──────────────────────
+    # ── If PDT safe, just sell normally ──────────────
     if pdt_safe:
         return {
             "action":            "sell",

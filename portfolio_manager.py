@@ -1,6 +1,6 @@
 """
 portfolio_manager.py — NovaTrade Portfolio Manager
-═══════════════════════════════════════════════════
+════════════════════════════════════════════════════════
 Trade history persistence, gains tracking, autonomy tiers,
 pool calculations, rebalancing, and projection accuracy.
 
@@ -14,7 +14,7 @@ import statistics
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-# ── Volume file paths ─────────────────────────────────────────
+# ── Volume file paths ──────────────────────────
 TRADE_HISTORY_FILE  = "/data/trade_history.json"
 SHARED_STATE_FILE   = "/data/shared_state.json"
 SLEEP_STATE_FILE    = "/data/sleep_state.json"
@@ -88,7 +88,7 @@ BASE_URL      = "https://api.alpaca.markets"
 DATA_URL      = "https://data.alpaca.markets"
 BOT_NAME      = os.environ.get("BOT_NAME", "collaboration")
 
-# ── GitHub Auto-Deploy ────────────────────────────────────────
+# ── GitHub Auto-Deploy ────────────────────────
 # Set these in Railway environment variables to enable auto-push.
 # GITHUB_TOKEN: Personal Access Token with repo write access
 #   → github.com → Settings → Developer settings → Personal access tokens
@@ -103,7 +103,7 @@ RULES = {
     "trading_pool_pct":      0.85,
     "daily_loss_limit_pct":  0.05,
     "max_positions":         3,      # Aggressive — up to 3 concurrent positions (was 2)
-    # ── Stop / Profit targets (AGGRESSIVE PROFILE) ──────────
+    # ── Stop / Profit targets (AGGRESSIVE PROFILE) ────────
     # Moved from swing (20% TP) to aggressive scalping (8% TP)
     # Rationale: 1.6:1 R/R ratio + faster turnover = compounds quickly
     # Higher trade volume stress-tests auto-repair system
@@ -119,49 +119,69 @@ RULES = {
     "collab_min_trade_size":   1000,
     "collab_max_trade_pct":    0.40,
     "interval_minutes":        5,
-    # ── Exit strategies (AGGRESSIVE — faster turnover) ──────
+    # ── Exit strategies (AGGRESSIVE — faster turnover) ────
     # Strategy A: Fixed TP (good for breakout entries)
     "exit_A_take_profit":      0.08,  # 8% fixed TP (was 20% — bank wins fast)
     "exit_A_stop_loss":        0.05,  # 5% stop (was 10% — tighter)
-    "exit_A_time_stop_days":   3,     # 3-day time stop (was 5d)
+    "exit_A_time_stop_days":   1,     # 1-day time stop (was 3d — faster turnaround)
     # Strategy B: Trailing (lets winners run but with tight trail)
     "exit_B_trail_default":    0.025, # 2.5% trail below peak (was 8%)
     "exit_B_trail_volatile":   0.04,  # 4% trail for TSLA/MSTR/COIN (was 12%)
     "exit_B_trail_stable":     0.02,  # 2% trail for AAPL/MSFT (was 6%)
     "exit_B_trail_activates":  0.04,  # Trail activates at +4% (was +10%)
     "exit_B_stop_loss":        0.05,  # 5% hard stop (was 10%)
-    "exit_B_time_stop_days":   3,     # 3-day time stop (was 5d)
-    # ── Tier-based position sizing (stocks) ──────────────────
-    # More aggressive at small equity, shrinks as account grows
+    "exit_B_time_stop_days":   1,     # 1-day time stop (was 3d — faster turnaround)
+    # ── Tier-based position sizing (stocks) ──────────
+    # More aggressive at small equity, shrinks as account grows.
+    # tp_pct: quick-flip take-profit override used by check_exit_conditions
+    # et al. — at small equity we bank ANY real gain (net of the ~0%
+    # Alpaca commission) fast and redeploy the cash rather than waiting
+    # for the strategy-specific 8% target. None at the top tier means
+    # "no override" — fall back to the existing per-strategy A/B/T logic
+    # (fixed 8% TP / trailing / Turtle Donchian) unchanged.
+    # ── Wide-net tier focus lists ─────────────
+    # Widened 2026-09-18 (Claude-led, stocks-only strategy change): each
+    # tier now blends the original large-cap/momentum names with liquid,
+    # lower-priced stocks (airlines, telecom/value, EV, fintech, crypto
+    # miners) so a small account still gets a wide net, not just the
+    # handful of expensive mega-caps. Floor is "real, liquid, exchange
+    # -listed" (no OTC/penny tickers) rather than a strict $ minimum.
     "stock_tiers": [
-        {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3,
-         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB"],
-         "note": "Tier 1 — AGGRESSIVE SCAN: 8 stocks, 3 positions, 30% risk"},
-        {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3,
-         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB", "MSTR", "AMZN"],
-         "note": "Tier 2 — 10 stocks, 3 positions, 25% risk"},
-        {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4,
+        {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3, "tp_pct": 0.015,
+         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB",
+                   "F", "T", "SNAP", "NIO", "MARA", "HOOD"],
+         "note": "Tier 1 — AGGRESSIVE SCAN: 14 stocks (wide net incl. cheap names), 3 positions, 30% risk, 1.5% quick TP"},
+        {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3, "tp_pct": 0.03,
+         "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB",
+                   "F", "T", "SNAP", "NIO", "MARA", "HOOD",
+                   "MSTR", "AMZN", "INTC", "CSCO", "AAL", "CCL"],
+         "note": "Tier 2 — 20 stocks (wide net incl. cheap names), 3 positions, 25% risk, 3% quick TP"},
+        {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4, "tp_pct": 0.05,
          "focus": ["TSLA", "NVDA", "AMD", "META", "PLTR", "COIN", "SOFI", "RKLB", "MSTR", "AMZN", "GOOGL", "AAPL", "MSFT", "NFLX"],
-         "note": "Tier 3 — 14 stocks, 4 positions, 20% risk"},
-        {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5,
+         "note": "Tier 3 — 14 stocks, 4 positions, 20% risk, 5% quick TP"},
+        {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5, "tp_pct": 0.03,
          "focus": None,  # Full universe — let AI pick anything
-         "note": "Tier 4 — Full universe, 5 positions, 15% risk"},
+         "note": "Tier 4 — Full universe, 5 positions, 15% risk, 3% quick TP (bank small gains, turn around fast)"},
     ],
     # Volatile stocks (wider trail needed — 4% aggressive trail)
-    "volatile_stocks": ["TSLA","MSTR","COIN","RKLB","SOFI","AMD","NVDA","PLTR","NFLX"],
+    "volatile_stocks": ["TSLA","MSTR","COIN","RKLB","SOFI","AMD","NVDA","PLTR","NFLX",
+                         "SNAP","NIO","PLUG","CHPT","MARA","RIOT","HOOD","AFRM","UPST",
+                         "RIVN","LCID","DKNG","RBLX","U","PATH","OPEN","AAL","DAL","UAL",
+                         "CCL","WBD","PARA"],
     # Stable stocks (tighter trail — 2% aggressive trail)
-    "stable_stocks":   ["AAPL","MSFT","GOOGL","AMZN","META"],
-    # ── Breakout entry parameters ─────────────────────────────
+    "stable_stocks":   ["AAPL","MSFT","GOOGL","AMZN","META","F","T","VZ","INTC","CSCO",
+                         "PFE","KVUE","SIRI"],
+    # ── Breakout entry parameters ───────────────
     "breakout_periods":       20,     # 20-period high breakout
     "vol_spike_multiplier":   1.5,    # Volume must be 1.5x average
     "rsi_momentum_min":       55,     # RSI > 55 for momentum entry
     "rsi_oversold_max":       35,     # RSI < 35 for dip entry
-    # ── Drawdown protection ────────────────────────────────────
+    # ── Drawdown protection ────────────────
     "global_drawdown_pause":  0.40,   # Pause if equity drops 40%
-    # ── Cash threshold tiers ──────────────────────────────────
+    # ── Cash threshold tiers ────────────────
     "cash_sleep_threshold":    8,
     "cash_watch_base_pct":     0.04,
-    "cash_active_base_pct":    0.05,
+    "cash_active_base_pct":   0.05,
     "threshold_floor":         20,
     "threshold_equity_pct":    0.05,
     "threshold_active_mult":   1.5,   # Increased from 1.1 — prevents spurious wake-ups (self-repair 2026-04-09)
@@ -187,7 +207,7 @@ RULES = {
         {"equity": 2000, "autonomous_fund": 600, "collab_floor": 600, "description": "Tier 5 — $300 Claude + $300 Grok autonomous | $600+ collaborative + shorts"},
     ],
     "universe": [
-        # ── Individual stocks ───────────────────────────────────
+        # ── Individual stocks ──────────────────
         # Tier 1 (high-vol, big moves): TSLA first, NVDA second
         "TSLA","NVDA",
         # Tier 2 additions
@@ -196,11 +216,26 @@ RULES = {
         "AMZN","SOFI","MSTR","COIN","RKLB",
         # Tier 4 (full universe)
         "AAPL","MSFT","GOOGL","NFLX","CRM",
+        # ── Wide-net additions: cast beyond the usual mega-cap momentum names ──
+        # Financials
+        "JPM","V","MA","GS",
+        # Healthcare
+        "UNH","LLY","JNJ",
+        # Consumer / retail
+        "WMT","COST","DIS","SBUX","NKE",
+        # Industrials
+        "BA","CAT","DE",
+        # Energy
+        "XOM","CVX",
+        # Semis / tech beyond mega-cap
+        "ORCL","CSCO","INTC","QCOM","AVGO","SMCI","ARM",
+        # Growth / newer names
+        "SHOP","UBER","ABNB","SNOW",
         # ── ETFs (Turtle-friendly: clean trends, no earnings gaps) ──
         # Broad market: most liquid, cleanest trend behaviour
-        "SPY","QQQ","IWM",
+        "SPY","QQQ","IWM","DIA","VTI",
         # Sector ETFs: sector rotation is a classic Turtle edge
-        "XLK","XLF","XLE","XLV",
+        "XLK","XLF","XLE","XLV","XLY","XLI","XLB","XLU","XLP",
         # Commodities / store-of-value
         "GLD",
     ],
@@ -208,7 +243,7 @@ RULES = {
 
 
 
-# ── Trade History Log ─────────────────────────────────────
+# ── Trade History Log ────────────────────────
 # Persists in memory; last 500 trades kept
 # Each entry: buy or sell with full context for performance review
 
@@ -280,7 +315,7 @@ def record_trade(action, symbol, qty, price, notional, owner,
     except Exception:
         pass
 
-    # ── Feed prompt memory on every closed trade ──────────────
+    # ── Feed prompt memory on every closed trade ──────────
     # Sells/stops/TPs carry pnl — buys don't, so filter on pnl_usd presence
     if pnl_usd is not None and action in (
         "sell", "stop_loss", "take_profit", "trail_stop", "time_stop"
@@ -422,7 +457,7 @@ def _replay_trade_history_into_memory():
     AIs have a baseline of historical context on first ever boot.
     """
     global prompt_builder
-    # ── Stock trade replay (existing logic) ─────────────────────
+    # ── Stock trade replay (existing logic) ────────────
     if trade_history:
         exit_actions = {"sell", "stop_loss", "take_profit", "trail_stop", "time_stop"}
         replayed = 0
@@ -451,7 +486,7 @@ def _replay_trade_history_into_memory():
         except Exception as e:
             log(f"⚠️ Boot replay failed: {e}")
 
-    # ── Binance fill backfill (NEW) ─────────────────────────────
+    # ── Binance fill backfill (NEW) ──────────────
     # Only runs once — backfilled flag prevents re-runs.
     try:
         binance_trades = _load_binance_history() or []
@@ -467,7 +502,7 @@ def _replay_trade_history_into_memory():
     except Exception as e:
         log(f"⚠️ Binance backfill failed: {e}")
 
-    # ── Memory status report ────────────────────────────────────
+    # ── Memory status report ───────────────────
     try:
         mem = prompt_builder.memory
         if mem.total_closed > 0 or len(mem.lessons) > 0:
@@ -516,11 +551,10 @@ def get_trading_pool(equity):
         tier_data  = RULES["autonomy_tiers"][shared_state["autonomy_tier"] - 1]
         total_auto = tier_data["autonomous_fund"]
 
-        # Split autonomous fund by performance allocation
-        c_alloc = shared_state["claude_allocation"]
-        g_alloc = shared_state["grok_allocation"]
-        c_auto  = round(total_auto * c_alloc, 2)
-        g_auto  = round(total_auto * g_alloc, 2)
+        # Claude is the sole decision-maker — Grok is a support/review
+        # role only and no longer trades its own funded pool.
+        c_auto  = round(total_auto, 2)
+        g_auto  = 0.0
 
         # Collaborative pool = trading pool minus autonomous funds
         collab  = max(0, round(trading - total_auto, 2))
@@ -537,9 +571,10 @@ def get_trading_pool(equity):
             "tier":            shared_state["autonomy_tier"],
         }
     else:
-        # No autonomy yet — full trading pool is collaborative
-        claude = trading * shared_state["claude_allocation"]
-        grok   = trading * shared_state["grok_allocation"]
+        # No autonomy yet — Claude gets the full trading pool (sole
+        # decision-maker); Grok is support/review only, no funded pool.
+        claude = trading
+        grok   = 0.0
         return {
             "total":           equity,
             "reserve":         reserve,
@@ -657,7 +692,16 @@ def rebalance_allocations(daily=True):
     Rebalance fund allocation based on performance.
     Winner gets more funds, loser gets less.
     Performance window: daily + weekly.
+
+    Disabled — Claude is the sole stock decision-maker and Grok is
+    advisory-only, so there is no competing pool to rebalance. Kept as a
+    no-op (rather than removing call sites) so claude_allocation/grok_allocation
+    stay pinned at 1.0/0.0.
     """
+    period = "daily" if daily else "weekly"
+    log(f"⚖️ {period.upper()} REBALANCE — skipped (Grok is advisory-only, no pool to rebalance)")
+    return
+
     now_et = datetime.now(ZoneInfo("America/New_York"))
     today  = now_et.date()
     week   = now_et.isocalendar()[1]
@@ -845,7 +889,7 @@ def track_pnl(positions):
     shared_state["claude_weekly_pnl"] = round(shared_state.get("claude_weekly_pnl", 0) + c_pnl, 2)
     shared_state["grok_weekly_pnl"]   = round(shared_state.get("grok_weekly_pnl", 0) + g_pnl, 2)
 
-# ── Account Features ─────────────────────────────────────
+# ── Account Features ──────────────────────
 
 def check_account_features(account, equity=None):
     """Return feature flags dict; safe defaults on failure."""
@@ -868,7 +912,7 @@ def check_account_features(account, equity=None):
         log(f"⚠️ check_account_features: {e}")
         return {"can_short": False, "until_short": 2000, "equity": 0, "shorting_enabled": False, "short_progress_pct": 0, "is_margin": False}
 
-# ── Market Data ──────────────────────────────────────────
+# ── Market Data ──────────────────────────
 # [get_bars → moved to market_data.py / intelligence.py]
 # [get_intraday_bars → moved to market_data.py / intelligence.py]
 # [compute_intraday_indicators → moved to market_data.py / intelligence.py]
@@ -876,11 +920,11 @@ def check_account_features(account, equity=None):
 # [compute_indicators → moved to market_data.py / intelligence.py]
 # [get_chart_section → moved to market_data.py / intelligence.py]
 
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 # BINANCE TRADE HISTORY SYNC
 # Fetches real trade history from Binance.US, saves to volume.
 # AI can learn from actual past trades, not just this session.
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 
 BINANCE_HISTORY_FILE = "/data/binance_trade_history.json"
 

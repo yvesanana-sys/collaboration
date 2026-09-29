@@ -1,6 +1,6 @@
 """
 market_data.py — NovaTrade Market Data Module
-═══════════════════════════════════════════════
+═══════════════════════════════════════════
 All market data fetching: indicators, news, Fear & Greed,
 earnings calendar, market context, IPOs, gainers, SPY trend.
 
@@ -17,17 +17,17 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from projection_engine import get_projection
 
-# ── Alpaca credentials (read from env) ──────────────────────
+# ── Alpaca credentials (read from env) ───────────────
 ALPACA_KEY    = os.environ.get("ALPACA_KEY", "")
 ALPACA_SECRET = os.environ.get("ALPACA_SECRET", "")
 DATA_URL      = "https://data.alpaca.markets"
 BASE_URL      = "https://api.alpaca.markets"
 
-# ── EDGAR config ────────────────────────────────────────────
+# ── EDGAR config ──────────────────────────────
 EDGAR_USER_AGENT = "NovaTrade research bot contact@novatrade.local"
 EDGAR_HEADERS    = {"User-Agent": EDGAR_USER_AGENT, "Accept": "application/json"}
 
-# ── Shared references (set by bot on import) ─────────────────
+# ── Shared references (set by bot on import) ─────────────
 # These are injected by bot_with_proxy.py after import
 RULES        = {}
 log          = print   # Will be replaced by bot's log function
@@ -97,7 +97,7 @@ def compute_intraday_indicators(intraday_bars):
     if not intraday_bars or len(intraday_bars) < 3:
         return None
 
-    # ── VWAP ─────────────────────────────────────────────────
+    # ── VWAP ─────────────────────────────
     # VWAP = sum(typical_price * volume) / sum(volume)
     # Typical price = (H + L + C) / 3
     total_pv  = sum(((b["h"] + b["l"] + b["c"]) / 3) * b["v"]
@@ -105,7 +105,7 @@ def compute_intraday_indicators(intraday_bars):
     total_vol = sum(b["v"] for b in intraday_bars)
     vwap = round(total_pv / total_vol, 2) if total_vol > 0 else None
 
-    # ── Volume delta (buy vs sell pressure proxy) ─────────────
+    # ── Volume delta (buy vs sell pressure proxy) ─────────
     # Green candle (close > open) = buying pressure
     # Red candle (close < open)   = selling pressure
     buy_vol  = sum(b["v"] for b in intraday_bars if b["c"] >= b["o"])
@@ -115,12 +115,12 @@ def compute_intraday_indicators(intraday_bars):
     sell_pct = round(sell_vol / total_delta_vol * 100, 1) if total_delta_vol > 0 else 50
     vol_delta_bias = "BUYERS" if buy_pct > 60 else "SELLERS" if sell_pct > 60 else "NEUTRAL"
 
-    # ── Volume spike detection (intraday) ─────────────────────
+    # ── Volume spike detection (intraday) ─────────────
     avg_bar_vol  = total_delta_vol / len(intraday_bars) if intraday_bars else 0
     last_bar_vol = intraday_bars[-1]["v"] if intraday_bars else 0
     intraday_vol_ratio = round(last_bar_vol / avg_bar_vol, 1) if avg_bar_vol > 0 else 0
 
-    # ── Candlestick pattern detection (last 3 candles) ────────
+    # ── Candlestick pattern detection (last 3 candles) ────
     patterns = []
     bars = intraday_bars[-6:]  # Last 6 bars for context
 
@@ -135,7 +135,7 @@ def compute_intraday_indicators(intraday_bars):
         c0 = bars[-1]   # Current (latest)
         c1 = bars[-2]   # Previous
 
-        # ── Hammer / Hanging Man ──────────────────────────────
+        # ── Hammer / Hanging Man ──────────────────
         # Long lower wick (>2x body), small body, tiny upper wick
         if (range_(c0) > 0 and body(c0) > 0 and
             lower(c0) >= body(c0) * 2 and
@@ -144,7 +144,7 @@ def compute_intraday_indicators(intraday_bars):
             patterns.append(f"{pattern}(bullish reversal signal)" if is_bull(c0)
                             else f"{pattern}(bearish warning)")
 
-        # ── Shooting Star / Inverted Hammer ──────────────────
+        # ── Shooting Star / Inverted Hammer ────────────
         # Long upper wick (>2x body), small body, tiny lower wick
         if (range_(c0) > 0 and body(c0) > 0 and
             upper(c0) >= body(c0) * 2 and
@@ -153,28 +153,28 @@ def compute_intraday_indicators(intraday_bars):
             patterns.append(f"{pattern}(bearish reversal)" if is_bear(c0)
                             else f"{pattern}(potential reversal)")
 
-        # ── Doji (indecision) ────────────────────────────────
+        # ── Doji (indecision) ──────────────────
         if range_(c0) > 0 and body(c0) <= range_(c0) * 0.1:
             patterns.append("DOJI(indecision — watch next candle)")
 
-        # ── Bullish Engulfing ────────────────────────────────
+        # ── Bullish Engulfing ─────────────────
         if (is_bear(c1) and is_bull(c0) and
             c0["o"] <= c1["c"] and c0["c"] >= c1["o"]):
             patterns.append("BULLISH_ENGULFING(strong buy signal)")
 
-        # ── Bearish Engulfing ────────────────────────────────
+        # ── Bearish Engulfing ─────────────────
         if (is_bull(c1) and is_bear(c0) and
             c0["o"] >= c1["c"] and c0["c"] <= c1["o"]):
             patterns.append("BEARISH_ENGULFING(strong sell signal)")
 
-        # ── Liquidity grab / shakeout ────────────────────────
+        # ── Liquidity grab / shakeout ────────────
         # Big wick down but closes back up near open (the 8am NVDA pattern)
         if (range_(c0) > 0 and
             lower(c0) >= range_(c0) * 0.5 and
             c0["c"] >= (c0["o"] + c0["l"]) / 2):
             patterns.append("LIQUIDITY_GRAB(wick-down recovery — bullish)")
 
-        # ── Bearish wick grab (stop hunt up) ────────────────
+        # ── Bearish wick grab (stop hunt up) ──────────
         if (range_(c0) > 0 and
             upper(c0) >= range_(c0) * 0.5 and
             c0["c"] <= (c0["o"] + c0["h"]) / 2):
@@ -183,29 +183,29 @@ def compute_intraday_indicators(intraday_bars):
     if len(bars) >= 3:
         c0, c1, c2 = bars[-1], bars[-2], bars[-3]
 
-        # ── Three white soldiers (strong uptrend) ────────────
+        # ── Three white soldiers (strong uptrend) ────────
         if (is_bull(c0) and is_bull(c1) and is_bull(c2) and
             c0["c"] > c1["c"] > c2["c"] and
             c0["o"] > c1["o"] > c2["o"]):
             patterns.append("THREE_WHITE_SOLDIERS(strong bullish trend)")
 
-        # ── Three black crows (strong downtrend) ─────────────
+        # ── Three black crows (strong downtrend) ─────────
         if (is_bear(c0) and is_bear(c1) and is_bear(c2) and
             c0["c"] < c1["c"] < c2["c"] and
             c0["o"] < c1["o"] < c2["o"]):
             patterns.append("THREE_BLACK_CROWS(strong bearish trend)")
 
-        # ── Morning star (bullish reversal) ──────────────────
+        # ── Morning star (bullish reversal) ────────────
         if (is_bear(c2) and body(c1) <= range_(c1) * 0.3 and
             is_bull(c0) and c0["c"] > (c2["o"] + c2["c"]) / 2):
             patterns.append("MORNING_STAR(bullish reversal — high confidence)")
 
-        # ── Evening star (bearish reversal) ──────────────────
+        # ── Evening star (bearish reversal) ────────────
         if (is_bull(c2) and body(c1) <= range_(c1) * 0.3 and
             is_bear(c0) and c0["c"] < (c2["o"] + c2["c"]) / 2):
             patterns.append("EVENING_STAR(bearish reversal — high confidence)")
 
-    # ── Intraday support / resistance ─────────────────────────
+    # ── Intraday support / resistance ─────────────
     today_high = max(b["h"] for b in intraday_bars)
     today_low  = min(b["l"] for b in intraday_bars)
     current    = intraday_bars[-1]["c"]
@@ -213,7 +213,7 @@ def compute_intraday_indicators(intraday_bars):
                   else "BELOW_VWAP" if vwap and current < vwap * 0.999
                   else "AT_VWAP")
 
-    # ── OBV (On-Balance Volume) from intraday bars ────────────
+    # ── OBV (On-Balance Volume) from intraday bars ──────
     obv = 0
     obv_values = []
     for i, b in enumerate(intraday_bars):
@@ -329,7 +329,7 @@ def compute_indicators(bars):
     vol_ratio=round(volumes[-1]/avg_vol,2) if avg_vol else None
     mom_5d=round((closes[-1]-closes[-6])/closes[-6]*100,2) if len(closes)>=6 else None
 
-    # ── OBV (On-Balance Volume) — daily ──────────────────────
+    # ── OBV (On-Balance Volume) — daily ────────────
     # Rising OBV + rising price = healthy uptrend (volume confirms move)
     # Rising price + falling OBV = distribution (smart money selling)
     obv = 0
@@ -359,7 +359,7 @@ def compute_indicators(bars):
             "ema9":round(ema9,2),"ema21":round(ema21,2),
             "bb_pct":bb_pct,"vol_ratio":vol_ratio,"mom_5d":mom_5d,
             "obv_trend":obv_trend,"obv_divergence":obv_divergence,
-            # ── Breakout detection ────────────────────────────
+            # ── Breakout detection ─────────────────
             **_compute_breakout(bars, close, vol_ratio, rsi_v)}
 
 def get_chart_section():
@@ -551,7 +551,7 @@ def get_market_context():
 
 
 
-# ── SEC EDGAR Form 4 — Insider & Congressional Trade Tracker ──────
+# ── SEC EDGAR Form 4 — Insider & Congressional Trade Tracker ───────────
 # Official US government data. Free, no API key needed, real-time.
 # EDGAR policy: identify yourself in User-Agent header.
 # Rate limit: 10 req/sec — we use ~1/hour so no issue at all.
@@ -635,10 +635,150 @@ def get_biggest_gainers():
                         "in_universe": sym in RULES["universe"],
                     })
             if top:
-                log(f"📈 Biggest gainers today (>3%): {[(t['symbol'], f'+{t["change"]:.1f}%') for t in top]}")
+                parts = [f"{t['symbol']} +{t['change']:.1f}%" for t in top]
+                log(f"📈 Biggest gainers today (>3%): {parts}")
             return top
     except Exception as e:
         log(f"⚠️ Gainers fetch failed: {e}")
+    return []
+
+def get_penny_stock_movers():
+    """
+    Scan today's biggest movers (gainers + losers, same Alpaca screener
+    as get_biggest_gainers) for sub-$5, exchange-listed opportunities.
+
+    NOT an exhaustive scan of the whole under-$5 universe — Alpaca's
+    movers screener only returns today's top 20 gainers and top 20
+    losers, so this is a fast, bounded "what's moving that's cheap
+    right now" signal, not a full penny-stock market scan (that would
+    need a per-symbol price loop over thousands of tickers, which isn't
+    practical on a 5-minute cycle).
+
+    Excludes OTC/pink-sheet tickers — cross-checked against Alpaca's
+    tradable-assets list (one bulk call, no per-symbol network loop) so
+    only real exchange-listed names come back. Deliberately separate
+    from RULES["universe"]/stock_tiers, whose documented policy is
+    "no OTC/penny tickers" for the core curated list — this is an
+    explicit, higher-risk opportunistic channel on top of that.
+    """
+    try:
+        headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+        url     = f"{DATA_URL}/v1beta1/screener/stocks/movers?top=20&market_type=stocks"
+        res     = requests.get(url, headers=headers, timeout=10)
+        if not res.ok:
+            return []
+        data   = res.json()
+        movers = data.get("gainers", []) + data.get("losers", [])
+
+        candidates = []
+        for m in movers:
+            sym   = m.get("symbol", "")
+            price = m.get("price")
+            pct   = float(m.get("percent_change", 0) or 0)
+            if not sym or price is None:
+                continue
+            price = float(price)
+            if not (0.10 <= price < 5.0):   # skip sub-dime junk and anything >= $5
+                continue
+            candidates.append({"symbol": sym, "price": price, "change": pct})
+
+        if not candidates:
+            return []
+
+        # Cross-check tradability + exchange with one bulk assets call —
+        # no per-symbol network loop.
+        assets_res = requests.get(
+            f"{BASE_URL}/v2/assets?status=active&asset_class=us_equity",
+            headers=headers, timeout=15
+        )
+        if not assets_res.ok:
+            return []
+        by_symbol = {a.get("symbol"): a for a in assets_res.json()}
+
+        safe = []
+        for c in candidates:
+            a = by_symbol.get(c["symbol"])
+            if not a or not a.get("tradable"):
+                continue
+            if (a.get("exchange") or "").upper() == "OTC":
+                continue
+            c["exchange"] = a.get("exchange")
+            safe.append(c)
+
+        safe.sort(key=lambda x: abs(x["change"]), reverse=True)
+        top = safe[:8]
+        if top:
+            parts = [f"{t['symbol']} ${t['price']:.2f} ({t['change']:+.1f}%)" for t in top]
+            log(f"🔍 Sub-$5 movers today (exchange-listed): {parts}")
+        return top
+    except Exception as e:
+        log(f"⚠️ Penny stock scan failed: {e}")
+    return []
+
+def get_under_25_movers(max_results=3):
+    """
+    Wider companion to get_penny_stock_movers(): scans today's movers
+    for exchange-listed stocks priced up to $25 (vs. the strict sub-$5
+    band), capped to the top `max_results` by absolute % move.
+
+    Rationale: a strict sub-$5-only filter on top-20/top-20 movers often
+    comes up empty (cheap stocks aren't reliably among the day's biggest
+    % movers). Widening the band to $25 gives a much larger, more liquid
+    pool to pick from — and since it's sorted by move size, any genuine
+    sub-$5 names in that pool still surface naturally. Same OTC-exclusion
+    / tradability cross-check as get_penny_stock_movers, same "not an
+    exhaustive scan" caveat (bounded by the movers screener's top 20+20).
+    """
+    try:
+        headers = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+        url     = f"{DATA_URL}/v1beta1/screener/stocks/movers?top=20&market_type=stocks"
+        res     = requests.get(url, headers=headers, timeout=10)
+        if not res.ok:
+            return []
+        data   = res.json()
+        movers = data.get("gainers", []) + data.get("losers", [])
+
+        candidates = []
+        for m in movers:
+            sym   = m.get("symbol", "")
+            price = m.get("price")
+            pct   = float(m.get("percent_change", 0) or 0)
+            if not sym or price is None:
+                continue
+            price = float(price)
+            if not (0.10 <= price <= 25.0):
+                continue
+            candidates.append({"symbol": sym, "price": price, "change": pct})
+
+        if not candidates:
+            return []
+
+        assets_res = requests.get(
+            f"{BASE_URL}/v2/assets?status=active&asset_class=us_equity",
+            headers=headers, timeout=15
+        )
+        if not assets_res.ok:
+            return []
+        by_symbol = {a.get("symbol"): a for a in assets_res.json()}
+
+        safe = []
+        for c in candidates:
+            a = by_symbol.get(c["symbol"])
+            if not a or not a.get("tradable"):
+                continue
+            if (a.get("exchange") or "").upper() == "OTC":
+                continue
+            c["exchange"] = a.get("exchange")
+            safe.append(c)
+
+        safe.sort(key=lambda x: abs(x["change"]), reverse=True)
+        top = safe[:max_results]
+        if top:
+            parts = [f"{t['symbol']} ${t['price']:.2f} ({t['change']:+.1f}%)" for t in top]
+            log(f"🔍 Under-$25 movers today (top {max_results}, exchange-listed): {parts}")
+        return top
+    except Exception as e:
+        log(f"⚠️ Under-$25 scan failed: {e}")
     return []
 
 def get_recent_ipos(min_days=30, max_days=180):
@@ -662,7 +802,7 @@ def get_recent_ipos(min_days=30, max_days=180):
 
         assets = res.json()
 
-        # ── Filter to genuine recent IPOs using listed_at ────────
+        # ── Filter to genuine recent IPOs using listed_at ────
         # listed_at is the actual exchange listing date — reliable signal
         ipo_candidates = []
         for a in assets:
@@ -705,7 +845,7 @@ def get_recent_ipos(min_days=30, max_days=180):
         log(f"🆕 Genuine IPO candidates (listed {min_days}–{max_days}d ago): "
             f"{len(ipo_candidates)} stocks — sampling for volume/momentum...")
 
-        # ── Fetch bars to check volume + momentum ────────────────
+        # ── Fetch bars to check volume + momentum ──────────
         end   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         start = (datetime.now(timezone.utc) - timedelta(days=max_days + 5)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -763,7 +903,7 @@ def get_recent_ipos(min_days=30, max_days=180):
         log(f"⚠️ IPO detection failed: {e}")
         return []
 
-# ── Top Investor / Fund Tracking ─────────────────────────
+# ── Top Investor / Fund Tracking ───────────────
 # SEC CIK numbers for top investors (public 13F filings)
 TOP_INVESTORS = {
     "Cathie Wood (ARK)":      "0001697748",
@@ -788,11 +928,11 @@ def get_market_mode():
     weekday = now_et.weekday()   # 0=Mon … 4=Fri, 5=Sat, 6=Sun
     mins    = now_et.hour * 60 + now_et.minute
 
-    # ── Weekend: always sleep ─────────────────────────────────
+    # ── Weekend: always sleep ────────────────────
     if weekday >= 5:
         return "sleep", 60
 
-    # ── Weekday time-based mode ───────────────────────────────
+    # ── Weekday time-based mode ───────────────────
     if   mins < 510:               return "sleep",      60
     elif 510  <= mins < 570:       return "premarket",  20
     elif 570  <= mins < 630:       return "opening",     5
@@ -801,4 +941,4 @@ def get_market_mode():
     elif 960  <= mins < 1020:      return "afterhours", 20
     else:                          return "sleep",      60
 
-# ── Exit Conditions ──────────────────────────────────────
+# ── Exit Conditions ────────────────────────
