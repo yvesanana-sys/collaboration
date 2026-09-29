@@ -1197,3 +1197,1204 @@ def crypto_status_endpoint():
         return jsonify(crypto_trader.get_status())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/deploy", methods=["GET", "POST"])
+def deploy_endpoint():
+    """
+    Push all bot files to GitHub, triggering Railway auto-deploy.
+    GET  /deploy          — show deploy status / setup instructions
+    POST /deploy          — trigger immediate push to GitHub
+    POST /deploy?msg=text — push with custom commit message
+
+    Requires GITHUB_TOKEN + GITHUB_REPO env vars in Railway.
+    """
+    if request.method == "GET":
+        configured = bool(GITHUB_TOKEN and GITHUB_REPO)
+
+        # ?push=1 triggers deploy from browser — no POST needed
+        if request.args.get("push") == "1" and configured:
+            msg = request.args.get("msg", "NovaTrade auto-deploy via browser")
+            def _do_deploy():
+                github_push_all(commit_msg=msg)
+            threading.Thread(target=_do_deploy, daemon=True).start()
+            return jsonify({
+                "status":  "deploying",
+                "message": f"Pushing to {GITHUB_REPO}:{GITHUB_BRANCH}...",
+                "note":    "Check Railway logs in ~30s",
+            }), 202
+
+        return jsonify({
+            "configured":    configured,
+            "repo":          GITHUB_REPO or "not set",
+            "branch":        GITHUB_BRANCH,
+            "files":         _DEPLOY_FILES,
+            "deploy_url":    "Add ?push=1 to this URL to trigger deploy from browser",
+            "setup_required": {} if configured else {
+                "GITHUB_TOKEN": "Create at github.com/settings/tokens (repo scope)",
+                "GITHUB_REPO":  "Your repo e.g. yvesanana-sys/collaboration",
+            }
+        })
+
+    # POST — trigger deploy
+    try:
+        msg = None
+        if request.is_json:
+            msg = request.json.get("message")
+        if not msg:
+            msg = request.args.get("msg")
+
+        # Run in background thread — never blocks or crashes the bot
+        def _do_deploy():
+            github_push_all(commit_msg=msg)
+
+        t = threading.Thread(target=_do_deploy, daemon=True)
+        t.start()
+
+        return jsonify({
+            "status":  "deploying",
+            "message": f"Pushing to {GITHUB_REPO}:{GITHUB_BRANCH} in background...",
+            "note":    "Check Railway logs in ~30s for result",
+        }), 202
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+    try:
+        _repair_scan(msg)
+    except Exception:
+        pass
+    # Feed rolling buffer to Claude Code trigger for log snapshots
+    try:
+        if _CC_TRIGGER_AVAILABLE and _cc_trigger:
+            _cc_trigger.buffer_log_line(str(msg))
+    except Exception:
+        pass
+
+# ── Inject shared context into extracted modules ──────────────
+# Market data needs RULES + log + shared_state
+_market_data._set_context(RULES, log, shared_state_ref=shared_state)
+# GitHub deploy only needs log
+_github_deploy._set_context(log)
+# AI clients needs log + shared_state
+_ai_clients._set_context(log, shared_state_ref=shared_state)
+# Intelligence needs ask_grok + parse_json (now from ai_clients)
+_intelligence._set_context(RULES, log,
+                            ask_grok_fn   = ask_grok_guarded,
+                            parse_json_fn = parse_json)
+# PDT manager needs log, shared_state, RULES + all trading functions
+# NOTE: smart_sell, record_trade, get_cash_thresholds defined later — see late injection below
+# NOTE: sleep_manager also injected late (needs get_cash_thresholds)
+
+# ══════════════════════════════════════════════════════════════
+# GITHUB AUTO-DEPLOY
+# Bot can push updated files to GitHub, triggering Railway redeploy.
+# Requires GITHUB_TOKEN + GITHUB_REPO env vars in Railway.
+# ══════════════════════════════════════════════════════════════
+
+_DEPLOY_FILES = [
+    "bot_with_proxy.py",
+    "binance_crypto.py",
+    "projection_engine.py",
+    "prompt_builder.py",
+    "self_repair.py",
+    "dashboard.html",
+    "thesis_manager.py",
+    "wallet_intelligence.py",
+    "NOVATRADE_MASTER.md",
+    "market_data.py",
+    "intelligence.py",
+    "github_deploy.py",
+    "ai_clients.py",
+    "sleep_manager.py",
+    "pdt_manager.py",
+    "portfolio_manager.py",
+]
+
+# [github_get_file_sha → moved to github_deploy.py]
+# [github_push_file → moved to github_deploy.py]
+# [github_push_all → moved to github_deploy.py]
+# Known crypto base symbols — used by is_crypto_symbol() to route trades
+_CRYPTO_BASES = {
+    "BTC", "ETH", "XRP", "SOL", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC",
+    "MATIC", "ATOM", "NEAR", "ALGO", "UNI", "SHIB", "PEPE", "FET", "AUDIO",
+    "KAVA", "RVN", "USDT", "USDC", "BUSD", "BNB", "BCH", "ETC", "XLM", "TRX",
+    "VET", "SAND", "MANA", "AXS", "AAVE", "GRT", "FIL", "EOS", "CHZ", "FLOW",
+    "ICP", "APE", "HBAR", "XTZ", "ZEC", "ENJ", "GALA", "DASH", "QTUM", "OMG",
+    "CRV", "1INCH", "COMP", "YFI", "MKR", "SNX", "SUSHI", "BAT", "ZIL", "ONT",
+}
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """
+    Returns True if symbol is a crypto trading pair (not a stock).
+    These must ONLY be traded via Binance.US — never through Alpaca.
+    """
+    s = (symbol or "").upper().strip()
+    if s.endswith("USDT") or s.endswith("BUSD"):
+        return True
+    if "/" in s:   # BTC/USD format
+        base = s.split("/")[0]
+        return base in _CRYPTO_BASES
+    # Plain crypto base without pair suffix (e.g. "BTC" typed alone)
+    if s in _CRYPTO_BASES and len(s) <= 5:
+        return True
+    return False
+
+def alpaca(method, path, body=None, base=None):
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET,
+        "Content-Type": "application/json",
+    }
+    res = requests.request(method, (base or BASE_URL) + path, headers=headers, json=body)
+    res.raise_for_status()
+    return res.json()
+
+# ── Fund Allocation ──────────────────────────────────────
+# [get_trading_pool → portfolio_manager.py]
+# [check_autonomy_tier → portfolio_manager.py]
+# [get_autonomy_status → portfolio_manager.py]
+# [rebalance_autonomy_funds → portfolio_manager.py]
+# [rebalance_allocations → portfolio_manager.py]
+# [_save_all_persistent_state → portfolio_manager.py]
+# [update_gain_metrics → portfolio_manager.py]
+# [format_gains → portfolio_manager.py]
+# [track_pnl → portfolio_manager.py]
+# [check_account_features → portfolio_manager.py]
+def get_full_market_intelligence():
+    """
+    Gather ALL market intelligence:
+    - Technical indicators
+    - News (24h)
+    - Politician trades (public disclosure)
+    - Top investor portfolios (13F filings)
+    - Biggest gainers today
+    - Smart money analysis (combined scoring)
+    """
+    log("📡 Gathering full market intelligence...")
+    chart_section = get_chart_section()
+    news          = get_news_context()
+    market_ctx    = get_market_context()
+
+    log("🏛️ Fetching politician trades...")
+    pol_text, pol_trades = get_politician_trades()
+    pol_signals   = analyze_politician_signals(pol_trades, chart_section)
+
+    log("💼 Fetching top investor portfolios...")
+    inv_text, inv_holdings = get_top_investor_portfolios()
+
+    log("📈 Fetching biggest gainers...")
+    gainers = get_biggest_gainers()
+
+    log("🆕 Detecting recent IPOs...")
+    ipos = get_recent_ipos()
+
+    log("🧠 Running smart money analysis...")
+    smart_money = analyze_smart_money(pol_signals, inv_holdings, gainers)
+
+    if smart_money["triple_confirmation"]:
+        log(f"🔥 TRIPLE CONFIRMATION stocks: {smart_money['triple_confirmation']}")
+    if smart_money["top_collab"]:
+        log(f"⭐ Top collaborative candidates: {smart_money['top_collab']}")
+
+    return {
+        "chart_section": chart_section,
+        "news":          news,
+        "market_ctx":    market_ctx,
+        "pol_text":      pol_text,
+        "pol_trades":    pol_trades,
+        "pol_signals":   pol_signals,
+        "inv_text":      inv_text,
+        "inv_holdings":  inv_holdings,
+        "gainers":       gainers,
+        "ipos":          ipos,
+        "smart_money":   smart_money,
+    }
+
+# [get_news_context → moved to market_data.py / intelligence.py]
+# [get_fear_greed_index → moved to market_data.py / intelligence.py]
+# [get_earnings_calendar → moved to market_data.py / intelligence.py]
+# [_trim_trade_history_to_6months → portfolio_manager.py]
+def estimate_fees(notional):
+    return round(max(notional * 0.0000278, 0.01) + min(notional * 0.000145, 7.27), 4)
+
+def min_profitable_exit(entry_price: float, fee_pct: float = 0.0003,
+                         min_profit_pct: float = 0.005) -> float:
+    """Calculate minimum sell price that covers fees and slippage."""
+    return round(entry_price * (1 + fee_pct + min_profit_pct), 2)
+
+# ── AI Calls ─────────────────────────────────────────────
+# [ask_claude → moved to ai_clients.py]
+# [ask_grok → moved to ai_clients.py]
+# [clean_json_str → moved to ai_clients.py]
+# [_expand_r1_keys → moved to ai_clients.py]
+# [parse_json → moved to ai_clients.py]
+# [ask_with_retry → moved to ai_clients.py]
+def is_market_open():
+    return alpaca("GET", "/v2/clock").get("is_open", False)
+
+# [get_market_mode → moved to market_data.py / intelligence.py]
+def get_trail_pct(symbol):
+    """Get volatility-adjusted trailing stop percentage for a stock"""
+    if symbol in RULES["volatile_stocks"]:
+        return RULES["exit_B_trail_volatile"]   # 8% for volatile
+    elif symbol in RULES["stable_stocks"]:
+        return RULES["exit_B_trail_stable"]     # 3% for stable
+    return RULES["exit_B_trail_default"]        # 5% default
+
+def stock_turtle_check_entry(symbol: str, system: int = 1) -> dict:
+    """
+    Check if a STOCK is a valid Turtle entry RIGHT NOW.
+    Fetches daily bars via existing get_bars helper.
+    Returns same shape as binance_crypto.turtle_check_entry().
+    """
+    try:
+        from turtle_math import compute_turtle_signal
+    except ImportError as e:
+        return {"eligible": False, "reason": f"turtle_math import failed: {e}",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    try:
+        # get_bars is imported at top of bot_with_proxy.py from market_data.
+        # 90 days of daily bars: plenty for 55-day Donchian + ATR(20).
+        bars = get_bars(symbol, days=90)
+    except Exception as e:
+        return {"eligible": False, "reason": f"bar fetch failed: {e}",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    if not bars or len(bars) < 56:
+        return {"eligible": False, "reason": f"insufficient history ({len(bars) if bars else 0}/56 bars)",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    sig = compute_turtle_signal(bars, system=system)
+    if sig is None:
+        return {"eligible": False, "reason": "could not compute signal",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    period = 20 if system == 1 else 55
+    if sig["entry_signal"]:
+        return {"eligible": True,
+                "reason": f"{period}d breakout: ${sig['current_close']:.2f} > ${sig['entry_level']:.2f}",
+                "entry_level": sig["entry_level"], "stop_price": sig["stop_price"],
+                "atr": sig["atr"], "system": system,
+                "donchian_high": sig["entry_level"]}
+    return {"eligible": False,
+            "reason": f"no {period}d breakout: ${sig['current_close']:.2f} ≤ ${sig['entry_level']:.2f}",
+            "entry_level": sig["entry_level"], "stop_price": sig["stop_price"],
+            "atr": sig["atr"], "system": system,
+            "donchian_high": sig["entry_level"]}
+
+
+def stock_turtle_check_exit(symbol: str, entry_price: float, atr_at_entry: float,
+                           system: int = 1) -> dict:
+    """Check if a Turtle stock position should be closed now."""
+    try:
+        from turtle_math import should_turtle_exit
+    except ImportError as e:
+        return {"should_exit": False, "reason": f"turtle_math import failed: {e}",
+                "exit_level": None}
+    try:
+        bars = get_bars(symbol, days=90)
+    except Exception as e:
+        return {"should_exit": False, "reason": f"bar fetch failed: {e}", "exit_level": None}
+    if not bars:
+        return {"should_exit": False, "reason": "no bars", "exit_level": None}
+    return should_turtle_exit(bars, entry_price, atr_at_entry, system=system)
+
+
+def is_turtle_active_for_stocks() -> bool:
+    """
+    Returns True iff EITHER AI's STOCK playbook has strategy_type='turtle'.
+    Stocks are shared between Claude and Grok, so we activate Turtle on
+    stocks whenever either AI's stock playbook says so. Reads the
+    per-asset-class playbook — the crypto playbook (mean-reversion)
+    must never influence how stocks pick trades.
+    """
+    try:
+        import strategic_brain as _sb
+        for ai_name in ("claude", "grok"):
+            try:
+                cs = _sb.load_strategy_for(ai_name, "stock") or {}
+                if cs.get("strategy_type") == "turtle":
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False
+
+
+def assign_exit_strategy(symbol, strategy, entry_price, confidence=80, rationale="",
+                        atr_at_entry=None, donchian_high=None, system=1):
+    """
+    Assign exit strategy to a position when it's opened.
+    Strategy A = fixed take-profit (fast trades, news-driven)
+    Strategy B = trailing stop (momentum/trend plays, let winners run)
+    Strategy T = Turtle (2N ATR stop + Donchian breakdown exit, no TP)
+    """
+    trail_pct = get_trail_pct(symbol)
+    cfg = {
+        "strategy":    strategy,
+        "entry_price": entry_price,
+        "peak_price":  entry_price,   # Tracks highest price seen
+        "entry_date":  datetime.now().strftime("%Y-%m-%d"),
+        "trail_pct":   trail_pct,
+        "confidence":  confidence,
+        "rationale":   rationale[:100],
+    }
+    if strategy == "T":
+        cfg["atr_at_entry"]  = atr_at_entry
+        cfg["donchian_high"] = donchian_high
+        cfg["turtle_system"] = system
+        if atr_at_entry:
+            stop_price = round(entry_price - (2 * atr_at_entry), 4)
+            cfg["stop_price"] = stop_price
+            log(f"📋 {symbol} exit strategy: T (Turtle System {system}, 2N stop ${stop_price:.2f}, ATR=${atr_at_entry:.2f}) — {rationale[:60]}")
+        else:
+            log(f"📋 {symbol} exit strategy: T (Turtle, no ATR recorded) — {rationale[:60]}")
+    elif strategy == "A":
+        log(f"📋 {symbol} exit strategy: A (fixed {RULES['exit_A_take_profit']*100:.0f}% TP) — {rationale[:60]}")
+    else:
+        log(f"📋 {symbol} exit strategy: B (trailing {trail_pct*100:.0f}% stop, {RULES['exit_B_time_stop_days']}d time) — {rationale[:60]}")
+    shared_state["position_exits"][symbol] = cfg
+
+def decide_exit_strategy_solo(symbol, trade_data, bars, ind):
+    """
+    Single AI decides exit strategy autonomously.
+    Called when one AI is making an autonomous trade.
+    Claude uses technical signals, Grok uses momentum signals.
+    """
+    # Heuristic rules (fast, no API call needed for autonomous trades)
+    # Read from new compact "flags" field — or legacy "signals" list for back-compat
+    flags_raw   = trade_data.get("f") or trade_data.get("flags") or ""
+    signals_raw = trade_data.get("signals", [])
+    # Merge both into one lowercase string for keyword matching
+    signals_str = (flags_raw + " " + " ".join(signals_raw)).lower()
+
+    # Strategy B signals (trailing — let it run)
+    b_signals = [
+        ind and ind.get("mom_5d", 0) and abs(ind["mom_5d"]) > 3,  # Strong momentum
+        "ipo"        in signals_str,   # IPO momentum
+        "momentum"   in signals_str,   # Momentum play
+        "breakout"   in signals_str,   # Breakout
+        ind and ind.get("vol_ratio", 1) > 1.5,                    # High volume
+    ]
+
+    # Strategy A signals (fixed — take profit quickly)
+    a_signals = [
+        "news"       in signals_str,   # News-driven (can reverse fast)
+        "politician" in signals_str,   # Politician signal
+        "earnings"   in signals_str,   # Earnings play
+    ]
+
+    b_count = sum(1 for s in b_signals if s)
+    a_count = sum(1 for s in a_signals if s)
+
+    if b_count >= 2:
+        return "B", f"momentum signals ({b_count} B-signals) → let it run"
+    elif a_count >= 2:
+        return "A", f"news/event driven ({a_count} A-signals) → take quick profit"
+    else:
+        # Default: high confidence = B (trust the signal), low = A (take what you can)
+        conf = trade_data.get("confidence", 80)
+        if conf >= 88:
+            return "B", f"high confidence {conf}% → trailing stop"
+        else:
+            return "A", f"moderate confidence {conf}% → fixed take-profit"
+
+# [get_spy_trend → moved to market_data.py / intelligence.py]
+# [record_intraday_buy → pdt_manager.py]
+# [is_day_trade → pdt_manager.py]
+# [get_stock_tier → pdt_manager.py]
+# [reset_intraday_buys_if_new_day → pdt_manager.py]
+# [check_pdt_safe → pdt_manager.py]
+# [run_pdt_hold_council → pdt_manager.py]
+# [_pdt_fallback_plan → pdt_manager.py]
+# [check_pdt_hold_plans → pdt_manager.py]
+# [get_pdt_decision → pdt_manager.py]
+# [get_pdt_status → pdt_manager.py]
+
+# ══════════════════════════════════════════════════════════════
+# BROKER-SIDE PROTECTIVE STOPS (P0b)
+# Every long stock position gets a real resting STOP order at
+# Alpaca so downside protection survives bot restarts/outages.
+# A resting stop HOLDS the shares — every sell/close path must
+# cancel it first (see cancel_stock_orders calls in exit paths).
+# ══════════════════════════════════════════════════════════════
+
+def _is_option_symbol(symbol):
+    """OCC option symbols end in C/P + 8-digit strike (e.g. AAPL240119C00190000)."""
+    return len(symbol) > 12 and symbol[-9] in ("C", "P") and symbol[-8:].isdigit()
+
+def get_open_stock_orders(symbol=None):
+    """List open Alpaca orders, optionally filtered to one symbol."""
+    try:
+        path = "/v2/orders?status=open&limit=500"
+        if symbol:
+            path += f"&symbols={symbol}"
+        return alpaca("GET", path) or []
+    except Exception as e:
+        log(f"⚠️ [STOP] open-orders fetch failed ({symbol or 'all'}): {e}")
+        return []
+
+def cancel_stock_orders(symbol, why=""):
+    """Cancel ALL open orders for a symbol. Returns count cancelled.
+    Never raises — safe to call unconditionally before any sell/close."""
+    n = 0
+    for o in get_open_stock_orders(symbol):
+        try:
+            alpaca("DELETE", f"/v2/orders/{o['id']}")
+            log(f"   [STOP] Cancelled {o.get('type','?')} {o.get('side','?')} "
+                f"order for {symbol} (id={str(o.get('id',''))[:8]}...) {why}")
+            n += 1
+        except Exception as ce:
+            log(f"   ⚠️ [STOP] Cancel failed {symbol} {str(o.get('id',''))[:8]}: {ce}")
+    return n
+
+def compute_protective_stop_price(symbol, entry_price):
+    """Stop level mirroring the software exit logic: Turtle 2N stop if
+    assigned in position_exits, else the universal hard stop."""
+    cfg = shared_state.get("position_exits", {}).get(symbol, {})
+    sp = cfg.get("stop_price")
+    if sp and sp > 0:
+        return sp
+    return entry_price * (1 - RULES["exit_A_stop_loss"])
+
+def place_stock_protective_stop(symbol, qty, stop_price):
+    """Submit a resting STOP sell at Alpaca. Tries GTC first, falls back
+    to DAY (fractional GTC support varies). Non-fatal on failure — the
+    software stop monitor stays active either way. Returns order or None."""
+    if _is_option_symbol(symbol):
+        log(f"   [STOP] {symbol} looks like an option — software-managed only")
+        return None
+    if qty != int(qty):
+        log(f"   [STOP] {symbol} qty={qty} is fractional — Alpaca rejects stop "
+            f"orders on fractional share quantities, software stop still active")
+        return None
+    # Alpaca price increments: $0.01 at/above $1, $0.0001 below
+    stop_price = round(stop_price, 2) if stop_price >= 1 else round(stop_price, 4)
+    if stop_price <= 0 or qty <= 0:
+        log(f"   [STOP] invalid stop for {symbol} (qty={qty}, stop={stop_price}) — skipped")
+        return None
+    for tif in ("gtc", "day"):
+        try:
+            order = alpaca("POST", "/v2/orders", {
+                "symbol": symbol, "qty": str(qty),
+                "side": "sell", "type": "stop",
+                "stop_price": str(stop_price),
+                "time_in_force": tif,
+            })
+            log(f"   [STOP] Broker stop resting for {symbol}: {qty} @ ${stop_price} "
+                f"({tif.upper()}, order {str(order.get('id',''))[:8]}...)")
+            return order
+        except Exception as se:
+            log(f"   [STOP] {tif.upper()} stop rejected for {symbol}: {str(se)[:120]}")
+    log(f"   [STOP] NOT placed for {symbol} -- software stop still active")
+    return None
+
+def _arm_stop_after_buy(order, symbol, fallback_entry=0):
+    """After a BUY submits, wait briefly for the fill and place the broker
+    stop. Unfilled orders are picked up by ensure_protective_stops later."""
+    try:
+        time.sleep(2)
+        od = alpaca("GET", f"/v2/orders/{order['id']}")
+        filled_qty = float(od.get("filled_qty") or 0)
+        if od.get("status") == "filled" and filled_qty > 0:
+            entry = float(od.get("filled_avg_price") or 0) or fallback_entry
+            if entry > 0:
+                place_stock_protective_stop(
+                    symbol, filled_qty,
+                    compute_protective_stop_price(symbol, entry))
+                return
+        log(f"   [STOP] {symbol} buy not filled yet ({od.get('status','?')}) — "
+            f"stop deferred to reconciler")
+    except Exception as e:
+        log(f"   [STOP] arm-after-buy error {symbol}: {e} — reconciler will cover")
+
+def ensure_protective_stops(positions):
+    """Reconciler — runs every cycle. (1) Cancels DANGLING stop orders
+    (symbol no longer held) so a triggered stray stop can never sell
+    shares we don't have. (2) Places a missing stop for any long stock
+    position without one (catches late limit fills, restarts, manual
+    cancels). (3) Cleans tracker state for positions that vanished —
+    stop filled at the broker while the bot was down."""
+    try:
+        open_orders = get_open_stock_orders()
+        held = {p["symbol"]: p for p in positions}
+
+        # 1. Dangling stop sells → cancel
+        for o in open_orders:
+            if "stop" in (o.get("type") or "") and o.get("side") == "sell" \
+                    and o.get("symbol") not in held:
+                try:
+                    alpaca("DELETE", f"/v2/orders/{o['id']}")
+                    log(f"   [STOP] Cancelled DANGLING stop for {o.get('symbol')} "
+                        f"(no position — exit/stop already filled)")
+                except Exception as ce:
+                    log(f"   ⚠️ [STOP] Dangling cancel failed {o.get('symbol')}: {ce}")
+
+        # 2. Unprotected longs → place stop
+        stop_syms = {o.get("symbol") for o in open_orders
+                     if "stop" in (o.get("type") or "") and o.get("side") == "sell"}
+        sell_syms = {o.get("symbol") for o in open_orders if o.get("side") == "sell"}
+        for sym, p in held.items():
+            if _is_option_symbol(sym):
+                continue
+            qty = float(p.get("qty", 0) or 0)
+            if qty <= 0:
+                continue  # shorts stay software-managed for now
+            if sym in stop_syms:
+                continue  # already protected
+            if sym in sell_syms:
+                continue  # an exit sell is already working — never double-sell
+            qty_avail = float(p.get("qty_available", qty) or 0)
+            if qty_avail <= 0:
+                log(f"   [STOP] {sym}: no available qty (held by other orders) — skipped")
+                continue
+            entry = float(p.get("avg_entry_price", 0) or 0)
+            if entry <= 0:
+                continue
+            place_stock_protective_stop(sym, qty_avail,
+                                        compute_protective_stop_price(sym, entry))
+
+        # 3. Vanished positions → clean trackers
+        open_syms = {o.get("symbol") for o in open_orders}
+        for sym in list(shared_state.get("position_exits", {}).keys()):
+            if sym not in held and sym not in open_syms:
+                log(f"   [STOP] {sym} tracked but no position/orders — "
+                    f"broker stop likely filled; cleaning trackers")
+                shared_state["position_exits"].pop(sym, None)
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != sym]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != sym]
+    except Exception as e:
+        log(f"⚠️ ensure_protective_stops error: {e}")
+
+def smart_sell(symbol, reason, pos):
+    """Execute a smart limit sell, fall back to market order.
+    Checks PDT rule + uses projections to decide hold-overnight vs sell."""
+    # ── PDT projection-based decision ────────────────────────
+    try:
+        account       = alpaca("GET", "/v2/account")
+        equity        = float(account.get("equity", 55))
+        current_price = float(pos.get("current_price", 0)) or \
+                        float(pos.get("avg_entry_price", 0))
+        entry_price   = float(pos.get("avg_entry_price", 0))
+        projections   = shared_state.get("last_projections", {})
+
+        pdt = get_pdt_decision(symbol, equity, current_price,
+                               entry_price, projections)
+
+        if pdt["action"] == "hold_overnight":
+            log(f"🌙 PDT HOLD: {pdt['reason']}")
+            log(f"   Day trades: {pdt['pdt_used']}/3 used | "
+                f"Proj: {pdt['proj_bias'].upper()} | "
+                f"Tomorrow: {pdt.get('expected_tomorrow', 'N/A')}")
+
+            # Run hold council if not already planned for this symbol
+            plan_key = f"pdt_hold_{symbol}"
+            if plan_key not in shared_state:
+                log(f"   🤝 Triggering PDT hold council for {symbol}...")
+                # Council runs in background — AIs will be called
+                shared_state[f"pdt_council_pending_{symbol}"] = {
+                    "symbol": symbol, "pos": pos, "reason": reason
+                }
+            else:
+                existing = shared_state[plan_key]
+                log(f"   📋 Existing hold plan: exit=${existing.get('exit_target')} "
+                    f"in {existing.get('hold_days')}d | "
+                    f"stop=${existing.get('stop_price')}")
+
+            # Update stop if tighter
+            if pdt.get("new_stop") and symbol in shared_state.get("position_exits", {}):
+                old_stop = shared_state["position_exits"][symbol].get("stop_price", 0)
+                new_stop = pdt["new_stop"]
+                if new_stop > old_stop:
+                    shared_state["position_exits"][symbol]["stop_price"] = new_stop
+                    log(f"   🛡️ Trail stop updated: ${old_stop} → ${new_stop}")
+            return False
+
+        # Override: sell despite PDT (losing + bearish)
+        if pdt.get("override"):
+            log(f"⚠️ PDT OVERRIDE: {pdt['reason']}")
+
+        # PDT-safe or override → count it if it's a day trade
+        if is_day_trade(symbol):
+            used = shared_state.get("day_trade_count", 0)
+            shared_state["day_trade_count"] = used + 1
+            today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+            shared_state.setdefault("day_trade_dates", []).append(today)
+            shared_state["day_trade_dates"] = shared_state["day_trade_dates"][-5:]
+            log(f"📋 PDT: day trade #{used+1}/3 — {symbol}")
+
+    except Exception as e:
+        log(f"⚠️ PDT check error: {e} — proceeding with sell")
+
+    # ── Cancel any resting broker stop first — it HOLDS the shares and
+    # would block every sell method below (and could double-sell later).
+    cancel_stock_orders(symbol, "(before exit sell)")
+
+    last_err = None
+    # Method 1: Limit sell at mid-price
+    try:
+        snap_url = f"{DATA_URL}/v2/stocks/{symbol}/quotes/latest"
+        headers  = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+        snap_res = requests.get(snap_url, headers=headers, timeout=5)
+        if snap_res.ok:
+            quote = snap_res.json().get("quote", {})
+            bid   = float(quote.get("bp", 0))
+            ask   = float(quote.get("ap", 0))
+            if bid > 0 and ask > 0:
+                sell_price = round((bid + ask) / 2, 2)
+                qty = pos.get("qty", pos.get("qty_available", "1"))
+                alpaca("POST", "/v2/orders", {
+                    "symbol": symbol, "qty": str(qty),
+                    "side": "sell", "type": "limit",
+                    "limit_price": str(sell_price),
+                    "time_in_force": "day",
+                })
+                log(f"✅ LIMIT SELL {symbol} {qty} @ ${sell_price} — {reason}")
+                shared_state.get("failed_sells", {}).pop(symbol, None)
+                return True
+    except Exception as e:
+        last_err = str(e)
+        log(f"   ⚠️ Method 1 (limit) failed: {last_err[:80]}")
+    # Method 2: Market via DELETE
+    try:
+        alpaca("DELETE", f"/v2/positions/{symbol}")
+        log(f"✅ MARKET SELL {symbol} (DELETE) — {reason}")
+        shared_state.get("failed_sells", {}).pop(symbol, None)
+        return True
+    except Exception as e:
+        last_err = str(e)
+        log(f"   ⚠️ Method 2 (DELETE) failed: {last_err[:80]}")
+    # Method 3: Market via POST
+    try:
+        qty = pos.get("qty", pos.get("qty_available", "1"))
+        alpaca("POST", "/v2/orders", {
+            "symbol": symbol, "qty": str(qty),
+            "side": "sell", "type": "market", "time_in_force": "day",
+        })
+        log(f"✅ MARKET SELL {symbol} (POST) — {reason}")
+        shared_state.get("failed_sells", {}).pop(symbol, None)
+        return True
+    except Exception as e:
+        last_err = str(e)
+        log(f"   ⚠️ Method 3 (POST market) failed: {last_err[:80]}")
+    # Method 4: Notional sell
+    try:
+        market_val = float(pos.get("market_value", 0))
+        if market_val > 0:
+            alpaca("POST", "/v2/orders", {
+                "symbol": symbol,
+                "notional": str(round(market_val, 2)),
+                "side": "sell", "type": "market", "time_in_force": "day",
+            })
+            log(f"✅ NOTIONAL SELL {symbol} ${market_val:.2f} — {reason}")
+            shared_state.get("failed_sells", {}).pop(symbol, None)
+            return True
+    except Exception as e:
+        last_err = str(e)
+        log(f"   ⚠️ Method 4 (notional) failed: {last_err[:80]}")
+    # All methods failed — mark restricted after 3 attempts
+    log(f"❌ ALL SELL METHODS FAILED for {symbol}: {last_err}")
+    if "403" in str(last_err) or "Forbidden" in str(last_err):
+        if "failed_sells" not in shared_state:
+            shared_state["failed_sells"] = {}
+        fails = shared_state["failed_sells"].get(symbol, 0) + 1
+        shared_state["failed_sells"][symbol] = fails
+        if fails >= 3:
+            if "restricted_positions" not in shared_state:
+                shared_state["restricted_positions"] = set()
+            shared_state["restricted_positions"].add(symbol)
+            log(f"🔒 {symbol} marked RESTRICTED after {fails} failed attempts — close manually in Alpaca")
+            shared_state["failed_sells"].pop(symbol, None)
+    return False
+
+def check_exit_conditions(positions, equity):
+    """
+    Strategy-aware exit system.
+    Each position uses whichever strategy was assigned at entry:
+    Strategy A: Fixed 7% take-profit + 4% stop + no time limit
+    Strategy B: Trailing stop + 4% hard stop + 3-day time stop
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    quick_tp = get_quick_take_profit_pct(equity)
+
+    for pos in positions:
+        symbol       = pos["symbol"]
+        pnl_pct      = float(pos["unrealized_plpc"])
+        pnl_usd      = float(pos["unrealized_pl"])
+        current_price = float(pos["current_price"])
+        owner        = "Claude" if symbol in shared_state["claude_positions"] else "Grok"
+
+        # Get exit config for this position
+        exit_cfg  = shared_state["position_exits"].get(symbol, {})
+        strategy  = exit_cfg.get("strategy", "A")
+        entry_price = exit_cfg.get("entry_price", current_price)
+        entry_date  = exit_cfg.get("entry_date", today)
+        trail_pct   = exit_cfg.get("trail_pct", RULES["exit_B_trail_default"])
+
+        # ── UNIVERSAL: Hard stop-loss (both strategies) ───────
+        if pnl_pct <= -RULES["exit_A_stop_loss"]:
+            log(f"🛑 [{owner}] STOP LOSS {symbol} ({pnl_pct*100:.1f}%) strategy={strategy}")
+            if smart_sell(symbol, "stop loss", pos):
+                record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                             float(pos.get("market_value", 0)), owner.lower(),
+                             reason="stop loss triggered", pnl_usd=pnl_usd,
+                             pnl_pct=pnl_pct, strategy=strategy,
+                             entry_price=entry_price)
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                shared_state["position_exits"].pop(symbol, None)
+            continue
+
+        # ── UNIVERSAL: Quick take-profit, all strategies ──────
+        # Bank any real gain instead of waiting for the strategy-specific
+        # 8% target — maximize round-trips and keep cash working.
+        # Applies to Turtle (strategy T) too now — every tier has a
+        # tp_pct (see portfolio_manager.py stock_tiers), so this always
+        # fires before the A/B/T-specific logic below gets a chance to
+        # hold out for a bigger, slower move.
+        if quick_tp is not None and pnl_pct >= quick_tp:
+            log(f"⚡ [{owner}] QUICK TP {symbol} +{pnl_pct*100:.1f}% >= {quick_tp*100:.1f}% "
+                f"(tier: equity ${equity:.0f}) | +${pnl_usd:.2f}")
+            if smart_sell(symbol, "quick take-profit (small-account velocity)", pos):
+                record_trade("take_profit", symbol, pos.get("qty"), current_price,
+                             float(pos.get("market_value", 0)), owner.lower(),
+                             reason=f"quick take-profit (tier tp={quick_tp*100:.1f}%)",
+                             pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy=strategy,
+                             entry_price=entry_price)
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                shared_state["position_exits"].pop(symbol, None)
+            continue
+
+        # ── STRATEGY T: Turtle (2N ATR stop + Donchian breakdown) ─
+        # Turtle bypasses A/B entirely. The ONLY two exit conditions are:
+        #   1. Price hits the 2N stop set at entry (a 1-unit loss)
+        #   2. Price closes below the 10-day Donchian low (or 20-day for System 2)
+        # No fixed TP. No trailing. No time stop.
+        if strategy == "T":
+            t_atr    = exit_cfg.get("atr_at_entry")
+            t_system = exit_cfg.get("turtle_system", 1)
+            if t_atr and t_atr > 0:
+                try:
+                    t_exit = stock_turtle_check_exit(symbol, entry_price, t_atr, system=t_system)
+                except Exception as _te:
+                    log(f"   ⚠️ [T] {symbol}: exit check failed: {_te}")
+                    t_exit = {"should_exit": False, "reason": "exit check error"}
+
+                if t_exit.get("should_exit"):
+                    reason = t_exit.get("reason", "turtle exit")
+                    log(f"🐢 [T] [{owner}] TURTLE EXIT {symbol} {pnl_pct*100:+.1f}% — {reason}")
+                    if smart_sell(symbol, f"turtle exit — {reason}", pos):
+                        # Distinguish stop vs trend-end for recording
+                        is_stop = "2N stop" in reason
+                        record_trade("stop_loss" if is_stop else "take_profit",
+                                     symbol, pos.get("qty"), current_price,
+                                     float(pos.get("market_value", 0)), owner.lower(),
+                                     reason=f"turtle {reason}",
+                                     pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="T",
+                                     entry_price=entry_price)
+                        shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                        shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                        shared_state["position_exits"].pop(symbol, None)
+                else:
+                    # Show current 2N stop level for log clarity
+                    stop2n = entry_price - (2 * t_atr)
+                    log(f"   🐢 [T] {symbol}: {pnl_pct*100:+.2f}% | 2N stop=${stop2n:.2f} | holding")
+            else:
+                # ATR missing — degrade to a simple 8% stop, don't get stuck
+                if pnl_pct <= -0.08:
+                    log(f"🛑 [T-FALLBACK] {symbol} {pnl_pct*100:.1f}% — no ATR, using 8% fallback stop")
+                    if smart_sell(symbol, "turtle fallback stop (no ATR)", pos):
+                        record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                                     float(pos.get("market_value", 0)), owner.lower(),
+                                     reason="turtle fallback stop", pnl_usd=pnl_usd,
+                                     pnl_pct=pnl_pct, strategy="T",
+                                     entry_price=entry_price)
+                        shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                        shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                        shared_state["position_exits"].pop(symbol, None)
+                else:
+                    log(f"   🐢 [T] {symbol}: {pnl_pct*100:+.2f}% (no ATR — fallback monitoring)")
+            continue   # Don't fall through to A/B
+
+        # ── STRATEGY A: Dynamic projection take-profit (proj_get_exit_guidance) ─
+        if strategy == "A":
+            # Try projection_engine dynamic TP first
+            should_proj_exit = False
+            proj_exit_price  = 0.0
+            proj_reason      = ""
+            try:
+                bars_tp = get_bars(symbol, days=10)
+                ind_tp  = compute_indicators(bars_tp) if bars_tp else None
+                if ind_tp:
+                    guidance = proj_get_exit_guidance(
+                        symbol, bars_tp, ind_tp,
+                        entry_price, current_price, pnl_pct
+                    )
+                    if guidance.get("conf", 0) >= 55:
+                        should_proj_exit = guidance["should_exit"]
+                        proj_exit_price  = guidance["exit_price"]
+                        proj_reason      = guidance["reason"]
+                        # Also honour projection stop level
+                        if current_price <= guidance["stop_price"] and pnl_pct < 0:
+                            log(f"🛑 [A-PROJ] [{owner}] PROJ STOP {symbol} "
+                                f"below proj_low stop=${guidance['stop_price']:.2f}")
+                            if smart_sell(symbol, f"proj stop {guidance['stop_price']}", pos):
+                                record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                                             float(pos.get("market_value", 0)), owner.lower(),
+                                             reason=f"strategy A proj stop — {proj_reason}",
+                                             pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="A-proj",
+                                             entry_price=entry_price)
+                                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                                shared_state["position_exits"].pop(symbol, None)
+                            continue
+            except Exception:
+                pass  # Fall through to fixed TP
+
+            if should_proj_exit and proj_exit_price > 0:
+                log(f"🎯 [A-PROJ] [{owner}] DYNAMIC TP {symbol} "
+                    f"+{pnl_pct*100:.1f}% | target=${proj_exit_price:.2f} | {proj_reason}")
+                if smart_sell(symbol, f"strategy A dynamic TP — {proj_reason}", pos):
+                    record_trade("take_profit", symbol, pos.get("qty"), current_price,
+                                 float(pos.get("market_value", 0)), owner.lower(),
+                                 reason=f"strategy A dynamic TP — {proj_reason}",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="A-proj",
+                                 entry_price=entry_price)
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+            elif pnl_pct >= RULES["exit_A_take_profit"]:
+                # Fixed fallback: original 7% take-profit
+                log(f"🎯 [A] [{owner}] FIXED TP {symbol} +{pnl_pct*100:.1f}% >= {RULES['exit_A_take_profit']*100:.0f}% | +${pnl_usd:.2f}")
+                if smart_sell(symbol, "strategy A take-profit", pos):
+                    record_trade("take_profit", symbol, pos.get("qty"), current_price,
+                                 float(pos.get("market_value", 0)), owner.lower(),
+                                 reason="strategy A fixed take-profit", pnl_usd=pnl_usd,
+                                 pnl_pct=pnl_pct, strategy="A",
+                                 entry_price=entry_price)
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+            else:
+                log(f"   [A] {symbol}: {pnl_pct*100:+.2f}% → target {RULES['exit_A_take_profit']*100:.0f}% | holding")
+
+        # ── STRATEGY B: Trailing stop + time stop ────────────
+        elif strategy == "B":
+            # Update peak price
+            if current_price > exit_cfg.get("peak_price", entry_price):
+                old_peak = exit_cfg.get("peak_price", entry_price)
+                shared_state["position_exits"][symbol]["peak_price"] = current_price
+                log(f"   [B] {symbol}: New peak ${current_price:.2f} (was ${old_peak:.2f}) | trailing stop = ${current_price*(1-trail_pct):.2f}")
+
+            peak_price     = shared_state["position_exits"][symbol].get("peak_price", current_price)
+            trail_stop     = peak_price * (1 - trail_pct)
+            profit_at_peak = (peak_price - entry_price) / entry_price
+
+            # Trailing activates only once position hits trail_activates threshold
+            trail_active = profit_at_peak >= RULES["exit_B_trail_activates"]
+
+            # ── Fee-aware floor: trailing stop never drops below entry + fees ──
+            min_exit_price = min_profitable_exit(entry_price)
+            if trail_active and trail_stop < min_exit_price:
+                trail_stop = min_exit_price
+                log(f"   [B] {symbol}: trail stop floored to ${min_exit_price:.2f} (entry + fees + 0.5%)")
+
+            if trail_active and current_price <= trail_stop:
+                log(f"🎯 [B] [{owner}] TRAILING STOP {symbol} | "
+                    f"peak=${peak_price:.2f} trail=${trail_stop:.2f} current=${current_price:.2f} | "
+                    f"+{pnl_pct*100:.1f}% | +${pnl_usd:.2f}")
+                if smart_sell(symbol, f"strategy B trailing stop (peak ${peak_price:.2f})", pos):
+                    record_trade("trail_stop", symbol, pos.get("qty"), current_price,
+                                 float(pos.get("market_value", 0)), owner.lower(),
+                                 reason=f"strategy B trailing stop peak=${peak_price:.2f}",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="B",
+                                 entry_price=entry_price)
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+
+            # Time stop — sell if stuck after N days
+            elif RULES["exit_B_time_stop_days"]:
+                try:
+                    days_held = (datetime.now() - datetime.strptime(entry_date, "%Y-%m-%d")).days
+                    if days_held >= RULES["exit_B_time_stop_days"] and pnl_pct < RULES["exit_B_trail_activates"]:
+                        log(f"⏰ [B] [{owner}] TIME STOP {symbol} | "
+                            f"{days_held} days held, only {pnl_pct*100:+.2f}% — freeing capital")
+                        if smart_sell(symbol, f"strategy B time stop ({days_held} days)", pos):
+                            record_trade("time_stop", symbol, pos.get("qty"), current_price,
+                                         float(pos.get("market_value", 0)), owner.lower(),
+                                         reason=f"strategy B time stop {days_held} days held",
+                                         pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="B",
+                                         entry_price=entry_price)
+                            shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                            shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                            shared_state["position_exits"].pop(symbol, None)
+                    else:
+                        status = f"trailing active, peak=${peak_price:.2f} stop=${trail_stop:.2f}" if trail_active else f"waiting for +3% to activate trail (currently {pnl_pct*100:+.2f}%)"
+                        log(f"   [B] {symbol}: {status} | {days_held}d held")
+                except Exception: pass
+
+# ── Decision Engine (Claude primary, Grok support/review) ────
+
+def collaborative_session(equity, cash, positions, pos_symbols, open_count,
+                          chart_section, news, market_ctx, features, pool):
+
+    pos_details = [
+        f"  {p['symbol']}: entry=${float(p['avg_entry_price']):.2f} "
+        f"now=${float(p['current_price']):.2f} "
+        f"P&L={round(float(p['unrealized_plpc'])*100,2)}% "
+        f"owner={'Claude' if p['symbol'] in shared_state['claude_positions'] else 'Grok'}"
+        for p in positions
+    ]
+
+    can_short    = features.get("can_short", False)
+    short_note   = "SHORT SELLING ENABLED" if can_short else f"Short locked (${features.get('until_short',2000):.0f} away)"
+
+    # ── Stock tier ────────────────────────────────────────────
+    tier         = get_stock_tier(equity)
+    tier_focus   = tier.get("focus") or RULES["universe"]
+    tier_risk    = tier["risk_pct"]
+    trade_budget = round(equity * tier_risk, 2)
+
+    tier_note = (
+        f"\n📊 STOCK TIER: {tier['note']}"
+        f"\n   Trade budget: {tier_risk*100:.0f}% = ${trade_budget:.2f} per position"
+        f"\n   Focus stocks: {', '.join(tier_focus[:5])}"
+        f"\n   Swing targets: Stop={RULES['stop_loss_pct']*100:.0f}% | TP={RULES['take_profit_pct']*100:.0f}% | Trail activates at +{RULES['exit_B_trail_activates']*100:.0f}%"
+    )
+
+    # ── Breakout scan across universe ────────────────────────
+    breakout_stocks = []
+    try:
+        for sym in tier_focus[:8]:
+            proj = shared_state.get("last_projections", {}).get(sym, {})
+            ind  = proj.get("indicators", {}) if proj else {}
+            if ind.get("breakout_signal") == "BULLISH_BREAKOUT":
+                breakout_stocks.append(f"{sym} 🚀")
+    except Exception:
+        pass
+    breakout_note = (f"\n🚀 BREAKOUT STOCKS NOW: {', '.join(breakout_stocks)}"
+                     if breakout_stocks else
+                     "\n(No confirmed breakouts this cycle — scan for dip entries)")
+
+    # PDT warning for AI
+    day_trades_used = shared_state.get("day_trade_count", 0)
+    intraday_buys   = shared_state.get("intraday_buys", {})
+    pdt_note = ""
+    if equity < 25000:
+        pdt_note = f"\n⚠️ PDT RULE: Account < $25k → max 3 day trades per 5 days ({day_trades_used}/3 used today)"
+        if intraday_buys:
+            pdt_note += f"\n   Stocks bought today (selling = day trade): {list(intraday_buys.keys())}"
+            pdt_note += f"\n   AVOID selling these today unless stop-loss triggered"
+    short_note = short_note + tier_note + breakout_note + pdt_note
+
+    # Get full intelligence for this cycle
+    pol_text, pol_trades = get_politician_trades()
+    pol_signals  = analyze_politician_signals(pol_trades, chart_section)
+    inv_text, inv_holdings = get_top_investor_portfolios()
+    gainers      = get_biggest_gainers()
+    ipos         = get_recent_ipos()
+    smart_money  = analyze_smart_money(pol_signals, inv_holdings, gainers)
+    pol_mimick   = pol_signals.get("top_mimick", [])
+    gainer_syms  = [g["symbol"] for g in gainers if g.get("in_universe")]
+    ipo_syms     = [i["symbol"] for i in ipos[:5]]
+    hot_ipos     = [i["symbol"] for i in ipos if abs(i.get("mom_5d", 0)) > 5]
+    triple_syms  = smart_money.get("triple_confirmation", [])
+    top_collab   = smart_money.get("top_collab", [])
+
+    if triple_syms:
+        log(f"🔥 Triple confirmation this cycle: {triple_syms}")
+    if gainer_syms:
+        log(f"📈 Big gainers for collaborative: {gainer_syms}")
+    if ipo_syms:
+        log(f"🆕 IPOs in play: {ipo_syms}")
+
+    # ── Sub-$5 + under-$25 opportunities: scan + Grok research ──
+    # Deliberately separate from RULES["universe"] (which stays
+    # "no OTC/penny tickers") — these are explicit, higher-risk
+    # opportunistic channels Claude sees as extra context, not a
+    # change to the core watchlist.
+    penny_candidates = []
+    wider_candidates = []
+    penny_research   = ""
+    try:
+        penny_candidates = get_penny_stock_movers()
+    except Exception as pe:
+        log(f"⚠️ Penny stock scan failed: {pe}")
+    try:
+        wider_candidates = get_under_25_movers()
+    except Exception as we:
+        log(f"⚠️ Under-$25 scan failed: {we}")
+
+    # Cache latest scans for the dashboard — informational only, not
+    # re-read by the trading logic itself.
+    shared_state["last_penny_candidates"] = penny_candidates
+    shared_state["last_wider_candidates"] = wider_candidates
+    shared_state["last_opportunity_scan_at"] = datetime.now().isoformat()
+
+    # One combined Grok research call covers both lists (dedup by
+    # symbol) — no reason to spend two AI calls on overlapping names.
+    research_candidates = list({c["symbol"]: c for c in (penny_candidates + wider_candidates)}.values())
+    if research_candidates and shared_state.get("grok_healthy", True):
+        try:
+            log(f"🔴 Grok researching {len(research_candidates)} sub-$25 mover(s) on X/news...")
+            penny_research = ask_grok_guarded(
+                prompt_builder.build_penny_research_prompt(research_candidates),
+                prompt_builder.build_penny_research_system(),
+            )
+            if penny_research:
+                log(f"🔴 Opportunity research: {len(penny_research)} chars returned")
+        except Exception as pre:
+            log(f"⚠️ Opportunity research failed: {pre}")
+            penny_research = ""
+
+    # Crypto trading has been split out of the stock decision cycle —
+    # see binance_crypto.py's standalone entrypoint. No crypto context
+    # is built or piggybacked onto the stock R1 call any more.
+
+    # ── Round 1: Claude proposes (sole decision-maker) ─────────
+    # ── Adaptive prompt — situation-aware, projection-informed, memory-injected ──
+    r1_prompt, situation_mode = prompt_builder.build_r1(
+        equity          = equity,
+        cash            = cash,
+        positions       = positions,
+        pos_details     = pos_details,
+        pool            = pool,
+        chart_section   = chart_section,
+        news            = news,
+        market_ctx      = market_ctx,
+        pol_text        = pol_text,
+        pol_mimick      = pol_mimick,
+        gainers         = gainers,
+        ipos            = ipos,
+        hot_ipos        = hot_ipos,
+        triple_syms     = triple_syms,
+        top_collab      = top_collab,
+        inv_text        = inv_text,
+        short_note      = short_note,
+        spy_trend       = shared_state.get("spy_trend", "neutral"),
+        features        = features,
+        projections     = shared_state.get("last_projections", {}),
+        crypto_context  = "",
+        penny_stocks    = penny_candidates,
+        penny_research  = penny_research,
+        wider_stocks    = wider_candidates,
+    )
+    log(f"🧠 Prompt mode: {situation_mode.upper().replace('_',' ')}")
+
+    log("🔵 Round 1 — Claude proposing (primary decision-maker)...")
+
+    c_ok = shared_state["claude_healthy"]
+    if not c_ok:
+        log("⚠️ Claude unhealthy — no trade this cycle (Grok is support-only, never trades solo)")
+        return [], False, {}
+
+    claude_r1 = safe_ask_claude(r1_prompt, prompt_builder.build_claude_system())
+    if not claude_r1:
+        log("⚠️ Claude Round 1 failed — holding")
+        return [], False, {}
+
+    log(f"🔵 Claude: '{claude_r1.get('strategy_name','')}' | {len(claude_r1.get('proposed_trades',[]))} trades")
+
+    # ── Round 2 — Grok reviews Claude's proposal (support role only) ──
+    # Grok no longer trades its own fund or proposes independent trades;
+    # it's a second-opinion / risk-check on Claude's picks.
+    c_trades = [(t.get("symbol"),t.get("confidence"),t.get("direction","long"))
+                for t in (claude_r1 or {}).get("proposed_trades",[])]
+
+    g_ok = shared_state.get("grok_healthy", True)
+    grok_review = None
+    if g_ok and c_trades:
+        log("🔴 Round 2 — Grok reviewing Claude's proposal (support role)...")
+        g_review_prompt = f"""Claude is proposing these trades this cycle: {c_trades}.
+You are Grok, acting as a SUPPORT / second-opinion risk-check — you do NOT trade your own fund.
+Use X/Twitter sentiment and news to flag risk on each symbol.
+JSON only: {{"reviewed":[{{"symbol":"NVDA","verdict":"confirm|caution|veto","note":"<12w>"}}]}}"""
+        grok_review = ask_with_retry(ask_grok_guarded, g_review_prompt,
+            "You are Grok, a support/risk-check reviewer only — not an independent trader. ONLY valid JSON under 400 chars.")
+        if grok_review:
+            log(f"🔴 Grok review: {len(grok_review.get('reviewed',[]))} trade(s) reviewed")
+    elif not g_ok:
+        log("⚠️ Grok unhealthy — proceeding on Claude's proposal alone")
+
+    vetoed = set()
+    for r in (grok_review or {}).get("reviewed", []):
+        verdict = str(r.get("verdict", "")).lower()
+        sym     = r.get("symbol")
+        if verdict == "veto" and sym:
+            vetoed.add(sym)
+            log(f"🔴 Grok VETO {sym}: {r.get('note','')[:60]} — skipping")
+        elif verdict == "caution" and sym:
+            log(f"🟡 Grok caution on {sym}: {r.get('note','')[:60]}")
+
+    # ── Round 3 — Claude confirms its best trades ──────────────
+    log("🔵 Round 3 — Claude confirming best trades...")
+    c_review_prompt = f"""Your proposed trades: {c_trades}. Grok's risk review: {(grok_review or {}).get('reviewed', [])}.
+Your budget: ${pool['claude']:.2f}. Confirm your best 1-2 trades (owner=claude).
+Min $8. Confidence 80%+.
+JSON: {{"refined_trades":[{{"action":"buy|sell","symbol":"NVDA","notional_usd":15.0,"confidence":85,"f":"flags","r":"<8w>","owner":"claude"}}]}}"""
+
+    # Re-check health here (not c_ok from before Round 1) — a
+    # credits_exhausted failure in Round 1 flips claude_healthy to False
+    # immediately, and we don't want Round 3 to hit the same dead API.
+    claude_r2 = (ask_with_retry(ask_claude_guarded, c_review_prompt,
+        "You are Claude confirming your proposed trades. ONLY valid JSON under 500 chars.")
+        if shared_state.get("claude_healthy", True) else None)
+
+    if claude_r2: log(f"🔵 Claude confirmed: {len(claude_r2.get('refined_trades',[]))} trades")
+
+    c_ref = (claude_r2 or {}).get("refined_trades", (claude_r1 or {}).get("proposed_trades",[])[:2])
+    final_trades = [t for t in c_ref if t.get("symbol") not in vetoed]
+    for t in final_trades:
+        t["owner"] = "claude"
+        t.setdefault("fee_estimate", estimate_fees(float(t.get("notional_usd", 0) or 0)))
+
+    total_alloc = sum(t.get("notional_usd", 0) for t in final_trades)
+    log(f"🎯 Final plan: {len(final_trades)} Claude trade(s), Grok-reviewed | ${total_alloc:.2f} to deploy | Cash: ${cash:.2f}")
+
+    for t in final_trades:
+        log(f"   [CLAUDE] {t.get('action','?').upper()} {t.get('symbol','?')} "
+            f"${t.get('notional_usd',0):.2f} conf={t.get('confidence','?')}% "
+            f"fee≈${t.get('fee_estimate',0):.3f}")
+
+    # Update bearish watchlist
+    for sym in (claude_r1 or {}).get("bearish_watchlist", []):
+        if sym not in shared_state["bearish_watchlist"]:
+            shared_state["bearish_watchlist"].append(sym)
+    if shared_state["bearish_watchlist"]:
+        log(f"📋 Bearish watchlist: {shared_state['bearish_watchlist']}")
+
+    autonomy_unlocked = equity >= 150
+    return final_trades, autonomy_unlocked, {"joint_message": f"{len(final_trades)} Claude trade(s), Grok-reviewed"}
+
+def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, features):
+    remaining_cash = cash
+    new_positions  = open_count
+    can_short      = features.get("can_short", False)
+
+    if final_plan.get("autonomy_unlocked"):
+        shared_state["autonomy_mode"] = True
+        for sym in final_plan.get("claude_autonomous_stocks",[]):
+            if sym not in shared_state["claude_positions"]:
+                shared_state["claude_positions"].append(sym)
+        for sym in final_plan.get("grok_autonomous_stocks",[]):
+            if sym not in shared_state["grok_positions"]:
+                shared_state["grok_positions"].append(sym)
+
+    for trade in final_trades:
+        action   = trade.get("action","hold").lower()
+        symbol   = trade.get("symbol")
+        notional = float(trade.get("notional_usd", 0))
+        conf     = trade.get("confidence", 0)
+        owner    = trade.get("owner", "shared")
+        fee_est  = trade.get("fee_estimate", estimate_fees(notional))
+
+        if not symbol: continue
+        if conf < RULES["min_confidence"]:
+            log(f"⚠️ Skip {symbol} — conf {conf}% < {RULES['min_confidence']}%")
+            continue
+
+        # ── Symbol validation ─────────────────────────────────
+        # Block placeholder/example symbols from JSON templates
