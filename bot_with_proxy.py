@@ -698,3 +698,703 @@ def stats():
             "pnl_pct":          round((equity - RULES["total_budget"]) / RULES["total_budget"] * 100, 2),
             "mode":             "REAL",
             "growth_reserve":   round(pool["reserve"], 2),
+            "trading_pool":     round(pool["trading"], 2),
+            "claude_budget":    round(pool["claude"], 2),
+            "grok_budget":      round(pool["grok"], 2),
+            "claude_allocation": shared_state["claude_allocation"],
+            "grok_allocation":   shared_state["grok_allocation"],
+            "claude_daily_pnl":  shared_state["claude_daily_pnl"],
+            "grok_daily_pnl":    shared_state["grok_daily_pnl"],
+            "claude_weekly_pnl": shared_state["claude_weekly_pnl"],
+            "grok_weekly_pnl":   shared_state["grok_weekly_pnl"],
+            "claude_total_pnl":  shared_state["claude_total_pnl"],
+            "grok_total_pnl":    shared_state["grok_total_pnl"],
+            "claude_healthy":     shared_state["claude_healthy"],
+            "claude_credits_ok":  shared_state["claude_credits_ok"],
+            "claude_fail_reason": shared_state["claude_fail_reason"],
+            "last_claude_fail":   shared_state.get("last_claude_fail"),
+            "grok_healthy":       shared_state["grok_healthy"],
+            "grok_credits_ok":    shared_state["grok_credits_ok"],
+            "grok_fail_reason":   shared_state["grok_fail_reason"],
+            "last_grok_fail":     shared_state.get("last_grok_fail"),
+            "grok_balance":            shared_state.get("grok_balance"),
+            "grok_balance_checked_at": shared_state.get("grok_balance_checked_at"),
+            "penny_candidates":        shared_state.get("last_penny_candidates", []),
+            "wider_candidates":        shared_state.get("last_wider_candidates", []),
+            "opportunity_scan_at":     shared_state.get("last_opportunity_scan_at"),
+            "failover_mode":      shared_state["failover_mode"],
+            "watch_mode_active":  shared_state["watch_mode_active"],
+            "ai_sleeping":        shared_state["ai_sleeping"],
+            "sleep_reason":       shared_state["sleep_reason"],
+            "wake_reason":        shared_state["wake_reason"],
+            "stops_fired_today":  shared_state["stops_fired_today"],
+            "ai_wake_instructions": shared_state.get("ai_wake_instructions", []),
+            "cash_thresholds":    get_cash_thresholds(equity),
+            "can_short":          features["can_short"],
+            "short_progress":    features["short_progress_pct"],
+            "autonomy_mode":     shared_state["autonomy_mode"],
+            "claude_owns":       shared_state["claude_positions"],
+            "grok_owns":         shared_state["grok_positions"],
+            "positions": [
+                {"symbol": p["symbol"], "qty": p["qty"],
+                 "pnl": round(float(p["unrealized_pl"]), 2),
+                 "pnl_pct": round(float(p["unrealized_plpc"]) * 100, 2),
+                 "owner": "claude" if p["symbol"] in shared_state["claude_positions"]
+                          else "grok" if p["symbol"] in shared_state["grok_positions"]
+                          else "shared"}
+                for p in positions
+            ]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/binance_history")
+def binance_history_endpoint():
+    """Binance trade history — fetched from exchange, saved to volume."""
+    try:
+        stats  = get_binance_history_stats()
+        trades = _load_binance_history()
+        limit  = int(request.args.get("limit", 50))
+        return jsonify({
+            "stats":  stats,
+            "trades": list(reversed(trades))[:limit],
+            "file":   "/data/binance_trade_history.json",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/history")
+def history():
+    """
+    Full trade history — last N trades (default 100, max 500).
+    Query params:
+      ?limit=50        — return last N trades
+      ?symbol=NVDA     — filter by ticker
+      ?action=sell     — filter by action type
+      ?owner=claude    — filter by AI owner
+    """
+    try:
+        limit   = min(int(request.args.get("limit", 100)), 500)
+        symbol  = request.args.get("symbol", "").upper()
+        action  = request.args.get("action", "").lower()
+        owner   = request.args.get("owner", "").lower()
+
+        trades = list(reversed(trade_history))  # newest first
+
+        if symbol: trades = [t for t in trades if t.get("symbol") == symbol]
+        if action: trades = [t for t in trades if t.get("action","").startswith(action)]
+        if owner:  trades = [t for t in trades if t.get("owner") == owner]
+
+        trades = trades[:limit]
+
+        return jsonify({
+            "count":  len(trades),
+            "total_recorded": len(trade_history),
+            "trades": trades,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/performance")
+def performance():
+    """
+    Trading performance analytics derived from trade_history.
+    Returns win rate, avg P&L, best/worst trades, per-symbol breakdown,
+    per-AI breakdown, and trend of trade quality over time.
+    """
+    try:
+        sells = [t for t in trade_history if t.get("pnl_usd") is not None]
+        buys  = [t for t in trade_history if t.get("action") == "buy"]
+
+        total_trades  = len(sells)
+        wins          = [t for t in sells if t.get("pnl_usd", 0) > 0]
+        losses        = [t for t in sells if t.get("pnl_usd", 0) <= 0]
+        win_rate      = round(len(wins) / total_trades * 100, 1) if total_trades else 0
+        total_pnl     = round(sum(t.get("pnl_usd", 0) for t in sells), 2)
+        avg_win       = round(sum(t.get("pnl_usd", 0) for t in wins) / len(wins), 2) if wins else 0
+        avg_loss      = round(sum(t.get("pnl_usd", 0) for t in losses) / len(losses), 2) if losses else 0
+        profit_factor = round(abs(sum(t.get("pnl_usd",0) for t in wins)) /
+                              abs(sum(t.get("pnl_usd",0) for t in losses)), 2) if losses and wins else None
+
+        best_trade  = max(sells, key=lambda t: t.get("pnl_usd", 0), default=None)
+        worst_trade = min(sells, key=lambda t: t.get("pnl_usd", 0), default=None)
+
+        # Per-symbol breakdown
+        sym_stats = {}
+        for t in sells:
+            sym = t.get("symbol","?")
+            if sym not in sym_stats:
+                sym_stats[sym] = {"trades": 0, "wins": 0, "total_pnl": 0.0,
+                                  "avg_pnl_pct": [], "strategies": []}
+            sym_stats[sym]["trades"]    += 1
+            sym_stats[sym]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                sym_stats[sym]["wins"] += 1
+            if t.get("pnl_pct") is not None:
+                sym_stats[sym]["avg_pnl_pct"].append(t["pnl_pct"])
+            if t.get("strategy"):
+                sym_stats[sym]["strategies"].append(t["strategy"])
+
+        symbol_summary = {}
+        for sym, s in sym_stats.items():
+            symbol_summary[sym] = {
+                "trades":    s["trades"],
+                "wins":      s["wins"],
+                "win_rate":  round(s["wins"]/s["trades"]*100, 1) if s["trades"] else 0,
+                "total_pnl": round(s["total_pnl"], 2),
+                "avg_pnl_pct": round(sum(s["avg_pnl_pct"])/len(s["avg_pnl_pct"]), 2)
+                               if s["avg_pnl_pct"] else None,
+                "strategy_used": max(set(s["strategies"]), key=s["strategies"].count)
+                                 if s["strategies"] else None,
+            }
+
+        # Per-AI breakdown
+        ai_stats = {}
+        for t in sells:
+            owner = t.get("owner", "unknown")
+            if owner not in ai_stats:
+                ai_stats[owner] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            ai_stats[owner]["trades"]    += 1
+            ai_stats[owner]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                ai_stats[owner]["wins"] += 1
+
+        ai_summary = {}
+        for owner, s in ai_stats.items():
+            ai_summary[owner] = {
+                "trades":    s["trades"],
+                "wins":      s["wins"],
+                "win_rate":  round(s["wins"]/s["trades"]*100, 1) if s["trades"] else 0,
+                "total_pnl": round(s["total_pnl"], 2),
+            }
+
+        # Exit reason breakdown
+        reason_counts = {}
+        for t in sells:
+            r = t.get("action", "sell")
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+
+        # Strategy A vs B performance
+        strat_stats = {}
+        for t in sells:
+            s = t.get("strategy") or "unknown"
+            if s not in strat_stats:
+                strat_stats[s] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            strat_stats[s]["trades"]    += 1
+            strat_stats[s]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                strat_stats[s]["wins"] += 1
+
+        strat_summary = {}
+        for s, d in strat_stats.items():
+            strat_summary[s] = {
+                "trades":    d["trades"],
+                "win_rate":  round(d["wins"]/d["trades"]*100, 1) if d["trades"] else 0,
+                "total_pnl": round(d["total_pnl"], 2),
+            }
+
+        # SPY trend performance (were trades better in bull vs bear market?)
+        spy_stats = {}
+        for t in sells:
+            trend = t.get("spy_trend", "neutral")
+            if trend not in spy_stats:
+                spy_stats[trend] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            spy_stats[trend]["trades"]    += 1
+            spy_stats[trend]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                spy_stats[trend]["wins"] += 1
+
+        spy_summary = {
+            k: {"trades": v["trades"],
+                "win_rate": round(v["wins"]/v["trades"]*100,1) if v["trades"] else 0,
+                "total_pnl": round(v["total_pnl"],2)}
+            for k, v in spy_stats.items()
+        }
+
+        return jsonify({
+            "summary": {
+                "total_closed_trades": total_trades,
+                "total_buys":          len(buys),
+                "win_rate_pct":        win_rate,
+                "total_pnl":           total_pnl,
+                "avg_win":             avg_win,
+                "avg_loss":            avg_loss,
+                "profit_factor":       profit_factor,
+            },
+            "best_trade":      best_trade,
+            "worst_trade":     worst_trade,
+            "by_symbol":       symbol_summary,
+            "by_ai":           ai_summary,
+            "by_strategy":     strat_summary,
+            "by_exit_reason":  reason_counts,
+            "by_spy_trend":    spy_summary,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/leaderboard")
+def leaderboard():
+    """
+    Stock trading performance summary.
+    Claude is the sole decision-maker now — Grok only reviews Claude's
+    proposals (support/risk-check), so there's no more head-to-head
+    competition to score. This reports overall stock performance plus
+    whether Grok's review pass is currently active.
+    """
+    try:
+        closes = [t for t in trade_history
+                  if t.get("pnl_usd") is not None
+                  and not (t.get("symbol") or "").upper().endswith(("USDT", "USDC", "BUSD"))]
+        wins      = sum(1 for t in closes if (t.get("pnl_usd") or 0) > 0)
+        total_pnl = sum(t.get("pnl_usd") or 0 for t in closes)
+        win_rate  = round(wins / len(closes) * 100, 1) if closes else 0.0
+
+        recent_trades = [{
+            "symbol":  t.get("symbol"),
+            "action":  t.get("action"),
+            "pnl_usd": t.get("pnl_usd"),
+            "pnl_pct": t.get("pnl_pct"),
+            "time":    t.get("time"),
+        } for t in closes[-10:]]
+
+        open_positions = len(shared_state.get("claude_positions", [])) + len(shared_state.get("grok_positions", []))
+
+        return jsonify({
+            "decision_model":  "claude_primary_grok_support",
+            "grok_active":     bool(GROK_KEY) and shared_state.get("grok_healthy", True),
+            "reserve":         _get_reserve_info(),
+            "total_pnl":       round(total_pnl, 2),
+            "total_closed":    len(closes),
+            "wins":            wins,
+            "win_rate":        win_rate,
+            "open_positions":  open_positions,
+            "recent_trades":   recent_trades,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _get_reserve_info():
+    """
+    Compute current wallet-scaling reserve based on combined wallet value.
+    Returns dict with combined_wallet, reserve_pct, reserve_usd, label.
+    Pulls live equity numbers — never raises.
+    """
+    try:
+        # Stocks
+        try:
+            acct = alpaca("GET", "/v2/account") or {}
+            stock_eq = float(acct.get("equity", 0) or 0)
+        except Exception:
+            stock_eq = 0.0
+        # Crypto
+        try:
+            wallet = binance_crypto.get_full_wallet() or {}
+            crypto_eq = float(wallet.get("total_value", 0) or 0)
+            usdt_free = float(wallet.get("usdt_free", 0) or 0)
+        except Exception:
+            crypto_eq, usdt_free = 0.0, 0.0
+        combined = stock_eq + crypto_eq
+        pct = binance_crypto.get_wallet_reserve_pct(combined)
+        return {
+            "combined_wallet":  round(combined, 2),
+            "stock_equity":     round(stock_eq, 2),
+            "crypto_equity":    round(crypto_eq, 2),
+            "reserve_pct":      pct,
+            "reserve_usd":      round(usdt_free * pct, 2),
+            "tradeable_usdt":   round(usdt_free * (1 - pct), 2),
+            "free_threshold":   getattr(binance_crypto, "RESERVE_FREE_THRESHOLD", 1000.0),
+            "cap_pct":          getattr(binance_crypto, "RESERVE_CAP_PCT", 0.30),
+            "label":            binance_crypto.get_wallet_reserve_label(combined),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.route("/memory")
+def memory_endpoint():
+    """
+    AI Memory inspection endpoint — surfaces what the AIs have learned.
+
+    Returns:
+      total_closed, total_wins, win_rate_overall — aggregate performance
+      lessons_count, symbols_tracked              — memory size
+      ai_patterns      → per-AI win rates and best setups
+      market_regimes   → bull/bear/neutral performance
+      top_symbols      → 10 most-traded symbols with stats
+      recent_lessons   → 8 most recent lesson entries
+      last_save_iso    → when memory was last persisted to /data
+      memory_file      → path on Railway volume
+
+    Example: /memory → JSON with full learning state
+    """
+    try:
+        if not hasattr(prompt_builder, "memory"):
+            return jsonify({"error": "memory not initialized"}), 500
+        return jsonify(prompt_builder.memory.get_stats())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/core_reserve")
+def core_reserve_endpoint():
+    """
+    Core Reserve status — long-term wealth compounder, walled off from AIs.
+
+    Returns the current reserve composition (BTC/SPY/cash split), target
+    allocation, P&L vs total contributions, ATH and entry prices for both
+    BTC and SPY, recent contingency events (defensive trims, opportunity
+    buys, take-profits, rebalances), and activation status.
+
+    The tactical AIs cannot see this data. It's surfaced only on the
+    dashboard so the user can monitor what the long-term layer is doing.
+    """
+    try:
+        if not HAVE_CORE_RESERVE or not core_reserve:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(core_reserve.get_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/evolution")
+def evolution_endpoint():
+    """
+    AI Evolution status — current tier, P&L, eligibility for next tier.
+
+    Pass A: surfaces tier 0 status for both AIs, plus rivalry standings
+    and hard-banned phrase list (transparency).
+    Pass B (future): will also show pending prompt proposals, audit log,
+    and apply/revert history.
+    """
+    try:
+        if not HAVE_AI_EVOLUTION or not ai_evolution:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        # Translate prompt_builder memory stats into the shape ai_evolution expects
+        c_stats = {"trades": 0, "total_pnl": 0.0}
+        g_stats = {"trades": 0, "total_pnl": 0.0}
+        try:
+            mem_stats = prompt_builder.memory.get_stats()
+            ai_p      = mem_stats.get("ai_patterns", {})
+            for ai, dest in (("claude", c_stats), ("grok", g_stats)):
+                p = ai_p.get(ai, {})
+                w = int(p.get("wins", 0) or 0)
+                l = int(p.get("losses", 0) or 0)
+                dest["trades"]    = w + l
+                dest["total_pnl"] = float(p.get("total_pnl_usd", 0) or 0)
+        except Exception:
+            pass
+        result = ai_evolution.get_full_status(c_stats, g_stats)
+        result["enabled"] = True
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/strategy")
+def strategy_overview_endpoint():
+    """
+    Strategic brain overview — current state, model registry, both strategies.
+
+    Phase A: Returns enabled=False with state info. Strategists are
+    dormant (no API calls, no strategy writes). Useful for verifying
+    the integration is wired correctly.
+    Phase B: Returns full strategist activity, recent activations,
+    cost tracking, and links to per-AI strategy files.
+    """
+    try:
+        if not HAVE_STRATEGIC_BRAIN or not strategic_brain:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(strategic_brain.get_full_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/strategy/<ai_name>")
+def strategy_ai_endpoint(ai_name):
+    """
+    Per-AI strategy file — current strategy + performance + history.
+
+    Phase A: Returns the default Tier-0 strategy (auto-created at boot).
+    No API calls, no actual writes. Reading is free.
+
+    URL params:
+      /strategy/claude — Claude's strategy file
+      /strategy/grok   — Grok's strategy file
+
+    Returns 404 for any other ai_name.
+    """
+    try:
+        if ai_name not in ("claude", "grok"):
+            return jsonify({"error": f"unknown AI '{ai_name}'"}), 404
+        if not HAVE_STRATEGIC_BRAIN or not strategic_brain:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(strategic_brain.load_strategy(ai_name))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/projection")
+def projection_endpoint():
+    """
+    Live daily range projections for all universe symbols (or a single symbol).
+    Uses the 5-layer model from projection_engine.py.
+
+    Query params:
+      ?symbol=NVDA  — single symbol projection
+      ?full=1       — include layer_details breakdown
+    """
+    try:
+        symbol  = request.args.get("symbol","").upper()
+        full    = request.args.get("full","0") == "1"
+        symbols = [symbol] if symbol else RULES["universe"]
+        results = {}
+
+        for sym in symbols:
+            try:
+                bars = get_bars(sym)
+                ind  = compute_indicators(bars)
+                proj = get_projection(sym, bars, ind=ind)
+                if not full:
+                    proj.pop("layer_details", None)
+                results[sym] = proj
+            except Exception as e:
+                results[sym] = {"symbol": sym, "error": str(e)}
+
+        # Cache for bot autonomous use
+        shared_state["last_projections"] = {k: v for k, v in results.items() if not v.get("error")}
+        shared_state["last_proj_time"]   = datetime.now().isoformat()
+
+        return jsonify({
+            "projections":      results,
+            "formatted_prompt": proj_format_for_ai(results, include_low_conf=True),
+            "accuracy": {
+                "hit_count":    shared_state["proj_hit_count"],
+                "total_count":  shared_state["proj_total_count"],
+                "accuracy_pct": shared_state["proj_accuracy_pct"],
+            },
+            "cached_at":    shared_state["last_proj_time"],
+            "symbol_count": len(results),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/prompt_memory")
+def prompt_memory_endpoint():
+    """
+    Live view of the adaptive prompt memory — lessons learned from closed trades.
+    Shows win rates by situation mode, AI patterns, regime stats, recent lessons.
+    GET /prompt_memory
+    """
+    try:
+        return jsonify(prompt_builder.get_memory_stats())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/crypto_status")
+def crypto_status_endpoint():
+    """
+    Live Binance.US crypto trading status.
+    Shows open positions, P&L, projections, recent trades, rules.
+    GET /crypto_status
+    """
+    try:
+        return jsonify(crypto_trader.get_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/deploy", methods=["GET", "POST"])
+def deploy_endpoint():
+    """
+    Push all bot files to GitHub, triggering Railway auto-deploy.
+    GET  /deploy          — show deploy status / setup instructions
+    POST /deploy          — trigger immediate push to GitHub
+    POST /deploy?msg=text — push with custom commit message
+
+    Requires GITHUB_TOKEN + GITHUB_REPO env vars in Railway.
+    """
+    if request.method == "GET":
+        configured = bool(GITHUB_TOKEN and GITHUB_REPO)
+
+        # ?push=1 triggers deploy from browser — no POST needed
+        if request.args.get("push") == "1" and configured:
+            msg = request.args.get("msg", "NovaTrade auto-deploy via browser")
+            def _do_deploy():
+                github_push_all(commit_msg=msg)
+            threading.Thread(target=_do_deploy, daemon=True).start()
+            return jsonify({
+                "status":  "deploying",
+                "message": f"Pushing to {GITHUB_REPO}:{GITHUB_BRANCH}...",
+                "note":    "Check Railway logs in ~30s",
+            }), 202
+
+        return jsonify({
+            "configured":    configured,
+            "repo":          GITHUB_REPO or "not set",
+            "branch":        GITHUB_BRANCH,
+            "files":         _DEPLOY_FILES,
+            "deploy_url":    "Add ?push=1 to this URL to trigger deploy from browser",
+            "setup_required": {} if configured else {
+                "GITHUB_TOKEN": "Create at github.com/settings/tokens (repo scope)",
+                "GITHUB_REPO":  "Your repo e.g. yvesanana-sys/collaboration",
+            }
+        })
+
+    # POST — trigger deploy
+    try:
+        msg = None
+        if request.is_json:
+            msg = request.json.get("message")
+        if not msg:
+            msg = request.args.get("msg")
+
+        # Run in background thread — never blocks or crashes the bot
+        def _do_deploy():
+            github_push_all(commit_msg=msg)
+
+        t = threading.Thread(target=_do_deploy, daemon=True)
+        t.start()
+
+        return jsonify({
+            "status":  "deploying",
+            "message": f"Pushing to {GITHUB_REPO}:{GITHUB_BRANCH} in background...",
+            "note":    "Check Railway logs in ~30s for result",
+        }), 202
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+    try:
+        _repair_scan(msg)
+    except Exception:
+        pass
+    # Feed rolling buffer to Claude Code trigger for log snapshots
+    try:
+        if _CC_TRIGGER_AVAILABLE and _cc_trigger:
+            _cc_trigger.buffer_log_line(str(msg))
+    except Exception:
+        pass
+
+# ── Inject shared context into extracted modules ──────────────
+# Market data needs RULES + log + shared_state
+_market_data._set_context(RULES, log, shared_state_ref=shared_state)
+# GitHub deploy only needs log
+_github_deploy._set_context(log)
+# AI clients needs log + shared_state
+_ai_clients._set_context(log, shared_state_ref=shared_state)
+# Intelligence needs ask_grok + parse_json (now from ai_clients)
+_intelligence._set_context(RULES, log,
+                            ask_grok_fn   = ask_grok_guarded,
+                            parse_json_fn = parse_json)
+# PDT manager needs log, shared_state, RULES + all trading functions
+# NOTE: smart_sell, record_trade, get_cash_thresholds defined later — see late injection below
+# NOTE: sleep_manager also injected late (needs get_cash_thresholds)
+
+# ══════════════════════════════════════════════════════════════
+# GITHUB AUTO-DEPLOY
+# Bot can push updated files to GitHub, triggering Railway redeploy.
+# Requires GITHUB_TOKEN + GITHUB_REPO env vars in Railway.
+# ══════════════════════════════════════════════════════════════
+
+_DEPLOY_FILES = [
+    "bot_with_proxy.py",
+    "binance_crypto.py",
+    "projection_engine.py",
+    "prompt_builder.py",
+    "self_repair.py",
+    "dashboard.html",
+    "thesis_manager.py",
+    "wallet_intelligence.py",
+    "NOVATRADE_MASTER.md",
+    "market_data.py",
+    "intelligence.py",
+    "github_deploy.py",
+    "ai_clients.py",
+    "sleep_manager.py",
+    "pdt_manager.py",
+    "portfolio_manager.py",
+]
+
+# [github_get_file_sha → moved to github_deploy.py]
+# [github_push_file → moved to github_deploy.py]
+# [github_push_all → moved to github_deploy.py]
+# Known crypto base symbols — used by is_crypto_symbol() to route trades
+_CRYPTO_BASES = {
+    "BTC", "ETH", "XRP", "SOL", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC",
+    "MATIC", "ATOM", "NEAR", "ALGO", "UNI", "SHIB", "PEPE", "FET", "AUDIO",
+    "KAVA", "RVN", "USDT", "USDC", "BUSD", "BNB", "BCH", "ETC", "XLM", "TRX",
+    "VET", "SAND", "MANA", "AXS", "AAVE", "GRT", "FIL", "EOS", "CHZ", "FLOW",
+    "ICP", "APE", "HBAR", "XTZ", "ZEC", "ENJ", "GALA", "DASH", "QTUM", "OMG",
+    "CRV", "1INCH", "COMP", "YFI", "MKR", "SNX", "SUSHI", "BAT", "ZIL", "ONT",
+}
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """
+    Returns True if symbol is a crypto trading pair (not a stock).
+    These must ONLY be traded via Binance.US — never through Alpaca.
+    """
+    s = (symbol or "").upper().strip()
+    if s.endswith("USDT") or s.endswith("BUSD"):
+        return True
+    if "/" in s:   # BTC/USD format
+        base = s.split("/")[0]
+        return base in _CRYPTO_BASES
+    # Plain crypto base without pair suffix (e.g. "BTC" typed alone)
+    if s in _CRYPTO_BASES and len(s) <= 5:
+        return True
+    return False
+
+def alpaca(method, path, body=None, base=None):
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET,
+        "Content-Type": "application/json",
+    }
+    res = requests.request(method, (base or BASE_URL) + path, headers=headers, json=body)
+    res.raise_for_status()
+    return res.json()
+
+# ── Fund Allocation ──────────────────────────────────────
+# [get_trading_pool → portfolio_manager.py]
+# [check_autonomy_tier → portfolio_manager.py]
+# [get_autonomy_status → portfolio_manager.py]
+# [rebalance_autonomy_funds → portfolio_manager.py]
+# [rebalance_allocations → portfolio_manager.py]
+# [_save_all_persistent_state → portfolio_manager.py]
+# [update_gain_metrics → portfolio_manager.py]
+# [format_gains → portfolio_manager.py]
+# [track_pnl → portfolio_manager.py]
+# [check_account_features → portfolio_manager.py]
+def get_full_market_intelligence():
+    """
+    Gather ALL market intelligence:
+    - Technical indicators
+    - News (24h)
+    - Politician trades (public disclosure)
+    - Top investor portfolios (13F filings)
+    - Biggest gainers today
+    - Smart money analysis (combined scoring)
+    """
+    log("📡 Gathering full market intelligence...")
+    chart_section = get_chart_section()
+    news          = get_news_context()
+    market_ctx    = get_market_context()
+
+    log("🏛️ Fetching politician trades...")
+    pol_text, pol_trades = get_politician_trades()
+    pol_signals   = analyze_politician_signals(pol_trades, chart_section)
+
+    log("💼 Fetching top investor portfolios...")
+    inv_text, inv_holdings = get_top_investor_portfolios()
+
+    log("📈 Fetching biggest gainers...")
+    gainers = get_biggest_gainers()
+
+    log("🆕 Detecting recent IPOs...")
+    ipos = get_recent_ipos()
+
+    log("🧠 Running smart money analysis...")
+    smart_money = analyze_smart_money(pol_signals, inv_holdings, gainers)
+
+    if smart_money["triple_confirmation"]:
+        log(f"🔥 TRIPLE CONFIRMATION stocks: {smart_money['triple_confirmation']}")
+    if smart_money["top_collab"]:
+        log(f"⭐ Top collaborative candidates: {smart_money['top_collab']}")
