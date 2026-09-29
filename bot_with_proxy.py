@@ -2998,3 +2998,303 @@ def _recover_missing_buy_records():
                      else "grok")
             if sym and qty > 0 and entry > 0:
                 trade_history.append({
+                    "action":    "buy",
+                    "symbol":    sym,
+                    "qty":       qty,
+                    "price":     entry,
+                    "notional":  round(cost, 2),
+                    "owner":     owner,
+                    "time":      datetime.now(timezone.utc).isoformat(),
+                    "time_et":   datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "reason":    "recovered from Alpaca on boot",
+                    "recovered": True,
+                })
+                log(f"📋 Recovered buy record: {sym} {qty:.4f} shares @ ${entry:.2f} [{owner}]")
+                recovered += 1
+        if recovered > 0:
+            _save_trade_history(trade_history)
+            log(f"✅ Boot recovery: {recovered} buy records restored from Alpaca")
+    except Exception as e:
+        log(f"⚠️ Buy record recovery failed: {e}")
+
+threading.Thread(target=_recover_missing_buy_records, daemon=True).start()
+
+# ── Late injection: sleep + PDT + portfolio (need functions defined after log()) ──
+# portfolio_manager needs trade_history, alpaca, prompt_builder
+_portfolio_manager._set_context(
+    log_fn             = log,
+    shared_state_ref   = shared_state,
+    trade_history_ref  = trade_history,
+    rules              = RULES,
+    alpaca_fn          = alpaca,
+    prompt_builder_ref = prompt_builder,
+    binance_get_fn     = binance_crypto.binance_get if hasattr(binance_crypto, "binance_get") else None,
+)
+# Boot replay — seeds AI memory from trade history (needs portfolio_manager injected)
+try:
+    _replay_trade_history_into_memory()
+except Exception:
+    pass
+
+# Sync Binance trade history from exchange — fetch last 6 months on first boot
+# Runs in background thread so it doesn't delay startup. Triggers AI
+# memory backfill once the fresh history is on disk.
+def _boot_binance_sync():
+    try:
+        sync_binance_history()
+        # After sync completes, replay history again — this catches any new
+        # trades the sync brought in and runs the backfill once memory has
+        # the latest Binance data on disk.
+        try:
+            _replay_trade_history_into_memory()
+        except Exception as re:
+            log(f"⚠️ Post-sync replay failed: {re}")
+    except Exception as e:
+        log(f"⚠️ Binance history sync failed: {e}")
+threading.Thread(target=_boot_binance_sync, daemon=True).start()
+# sleep_manager needs get_cash_thresholds (defined ~line 2640)
+_sleep_manager._set_context(log, shared_state,
+                             get_cash_thresholds_fn = get_cash_thresholds,
+                             get_spy_trend_fn       = get_spy_trend,
+                             save_state_fn_ref      = _save_all_persistent_state)
+_pdt_manager._set_context(
+    log_fn                = log,
+    shared_state_ref      = shared_state,
+    rules                 = RULES,
+    alpaca_fn             = alpaca,
+    ask_claude_fn         = ask_claude_guarded,
+    ask_grok_fn           = ask_grok_guarded,
+    parse_json_fn         = parse_json,
+    smart_sell_fn         = smart_sell,
+    record_trade_fn       = record_trade,
+    get_bars_fn           = get_bars,
+    compute_indicators_fn = compute_indicators,
+)
+
+# ── Core Reserve context wiring ──────────────────────────────
+# The reserve module is fully isolated — receives only what it needs
+# to fetch prices and place orders on its own behalf. The tactical
+# AIs cannot reach into core_reserve's state at all.
+if HAVE_CORE_RESERVE:
+    try:
+        # Stock-price fetcher for Core Reserve. Uses DATA_URL (different domain
+        # from trading API). Returns 0.0 on failure — caller handles it.
+        # Falls back to bars endpoint if quotes is unavailable (e.g. weekends).
+        def _core_reserve_stock_price(symbol: str) -> float:
+            try:
+                snap_url = f"{DATA_URL}/v2/stocks/{symbol}/quotes/latest"
+                headers  = {"APCA-API-KEY-ID": ALPACA_KEY,
+                            "APCA-API-SECRET-KEY": ALPACA_SECRET}
+                r = requests.get(snap_url, headers=headers, timeout=5)
+                if r.ok:
+                    quote = r.json().get("quote", {})
+                    bid = float(quote.get("bp", 0))
+                    ask = float(quote.get("ap", 0))
+                    if bid > 0 and ask > 0:
+                        return round((bid + ask) / 2, 2)
+                    if ask > 0:
+                        return ask
+                # Fallback: latest bar close (works pre-market / after-hours)
+                bars = get_bars(symbol, days=1)
+                if bars and len(bars) > 0:
+                    last = bars[-1]
+                    if isinstance(last, dict) and last.get("c"):
+                        return float(last["c"])
+            except Exception:
+                pass
+            return 0.0
+
+        core_reserve._set_context(
+            log_fn          = log,
+            binance_get_fn  = binance_crypto.binance_get,
+            binance_post_fn = binance_crypto.binance_post,
+            alpaca_fn       = alpaca,
+            wallet_fn       = binance_crypto.get_full_wallet,
+            record_trade_fn = record_trade,
+            stock_price_fn  = _core_reserve_stock_price,
+        )
+        log(f"🏦 Core Reserve module loaded — activation threshold ${core_reserve.ACTIVATION_THRESHOLD:.0f}")
+    except Exception as _cre:
+        log(f"⚠️ Core Reserve init failed: {_cre}")
+
+# ── Strategic Brain context wiring (Phase A: plumbing only) ──────────
+# The strategic brain receives the same dependencies needed to do its job
+# when activated in Phase B. In Phase A, ENABLE_STRATEGIST=False keeps
+# all of this dormant — endpoints respond with state, but no AI calls.
+if HAVE_STRATEGIC_BRAIN:
+    try:
+        # Wallet getter — used by strategic_brain to auto-upgrade strategist
+        # model tier when wallet crosses $5,000 threshold.
+        def _strategist_wallet() -> float:
+            try:
+                acct = alpaca("GET", "/v2/account") or {}
+                stock_eq = float(acct.get("equity", 0) or 0)
+                wallet   = binance_crypto.get_full_wallet() or {}
+                crypto_v = float(wallet.get("total_value", 0) or 0)
+                return stock_eq + crypto_v
+            except Exception:
+                return 0.0
+
+        # Trade history getter — strategist reads only its own AI's trades
+        def _strategist_trade_history(owner: str = None, limit: int = 30) -> list:
+            try:
+                # Latest closed trades from the persistent trade history,
+                # filtered by owner (claude/grok/core_reserve)
+                from portfolio_manager import trade_history as _th
+                if not _th:
+                    return []
+                # Filter to closes only (sell-side actions with pnl_usd populated)
+                exit_actions = {"sell", "stop_loss", "take_profit",
+                                "trail_stop", "time_stop"}
+                results = []
+                for t in reversed(_th):
+                    if t.get("action") not in exit_actions:
+                        continue
+                    if owner and t.get("owner") != owner:
+                        continue
+                    results.append(t)
+                    if len(results) >= limit:
+                        break
+                return results
+            except Exception as e:
+                log(f"⚠️ Strategist trade history fetch failed: {e}")
+                return []
+
+        # Market context — what's happening macro that the strategist should
+        # consider when writing strategy. SPY, BTC, VIX, and current positions.
+        def _strategist_market_context() -> dict:
+            ctx = {}
+            try:
+                # SPY price
+                snap_url = f"{DATA_URL}/v2/stocks/SPY/quotes/latest"
+                headers  = {"APCA-API-KEY-ID": ALPACA_KEY,
+                            "APCA-API-SECRET-KEY": ALPACA_SECRET}
+                r = requests.get(snap_url, headers=headers, timeout=5)
+                if r.ok:
+                    q = r.json().get("quote", {})
+                    bid = float(q.get("bp", 0)); ask = float(q.get("ap", 0))
+                    if bid > 0 and ask > 0:
+                        ctx["spy_price"] = round((bid + ask) / 2, 2)
+                # BTC price
+                btc_r = binance_crypto.binance_get(
+                    "/api/v3/ticker/price", {"symbol": "BTCUSDT"})
+                if btc_r and "price" in btc_r:
+                    ctx["btc_price"] = float(btc_r["price"])
+                # Combined wallet
+                ctx["combined_wallet"] = _strategist_wallet()
+                # Open positions count
+                try:
+                    pos = alpaca("GET", "/v2/positions") or []
+                    ctx["stock_positions"] = len(pos) if isinstance(pos, list) else 0
+                except Exception:
+                    ctx["stock_positions"] = 0
+                try:
+                    crypto_pos = (binance_crypto.get_full_wallet() or {}).get("tradeable", [])
+                    ctx["crypto_positions"] = len(crypto_pos)
+                except Exception:
+                    ctx["crypto_positions"] = 0
+            except Exception as e:
+                log(f"⚠️ Strategist market context fetch failed: {e}")
+            return ctx
+
+        # Strategist API wrappers — these read the model registry per-call
+        # so wallet-tier upgrades take effect automatically. In Phase A,
+        # these are NOT called (ENABLE_STRATEGIST is False). They exist so
+        # the wiring is verified and Phase B is a 1-line activation.
+        def _ask_claude_strategist(prompt: str, system: str = "", max_tokens: int = 4000) -> str:
+            spec = strategic_brain.get_active_model("strategist", "claude",
+                                                   wallet=_strategist_wallet())
+            with httpx.Client(timeout=120) as http:
+                res = http.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_KEY,
+                             "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    json={"model": spec["model_id"],
+                          "max_tokens": min(max_tokens, spec.get("max_tokens", 4000)),
+                          "system": system or "You are a strategic trading AI. Output valid JSON only.",
+                          "messages": [{"role": "user", "content": prompt}]},
+                )
+                if not res.is_success:
+                    raise Exception(f"{res.status_code}: {res.text}")
+                return res.json()["content"][0]["text"]
+
+        def _ask_grok_strategist(prompt: str, system: str = "", max_tokens: int = 4000) -> str:
+            # Build fallback chain: spec first, then known-available models.
+            # If GROK_MODEL env var is set, that overrides everything.
+            import os
+            spec = strategic_brain.get_active_model("strategist", "grok",
+                                                   wallet=_strategist_wallet())
+            override = os.environ.get("GROK_MODEL", "").strip()
+            if override:
+                candidates = [override]
+            else:
+                # Try the spec's model first, then fall back through models
+                # known available on the team (console.x.ai).
+                candidates = [spec["model_id"]]
+                for alt in ["grok-4.20-0309-reasoning",
+                            "grok-4.20-0309-non-reasoning",
+                            "grok-4.3",
+                            "grok-build-0.1"]:
+                    if alt not in candidates:
+                        candidates.append(alt)
+            # Reuse a cached working model first if we have one (saves 404s)
+            cached = getattr(_ask_grok_strategist, "_working_model", None)
+            if cached:
+                candidates = [cached] + [c for c in candidates if c != cached]
+
+            last_err = None
+            with httpx.Client(timeout=120) as http:
+                for model_id in candidates:
+                    try:
+                        res = http.post(
+                            "https://api.x.ai/v1/chat/completions",
+                            headers={"Authorization": f"Bearer {GROK_KEY}",
+                                     "Content-Type": "application/json"},
+                            json={"model": model_id,
+                                  "max_tokens": min(max_tokens, spec.get("max_tokens", 4000)),
+                                  "messages": [
+                                      {"role": "system", "content": system or "You are a strategic trading AI. Output valid JSON only."},
+                                      {"role": "user",   "content": prompt},
+                                  ]},
+                        )
+                        if res.is_success:
+                            _ask_grok_strategist._working_model = model_id
+                            return res.json()["choices"][0]["message"]["content"]
+                        if res.status_code == 404:
+                            last_err = f"{model_id} 404"
+                            continue
+                        raise Exception(f"{res.status_code}: {res.text}")
+                    except httpx.HTTPError as e:
+                        last_err = f"{model_id}: {e}"
+                        continue
+            raise Exception(f"All Grok strategist models failed. Last: {last_err}. "
+                            f"Set GROK_MODEL env var to a model your team has access to.")
+
+        strategic_brain._set_context(
+            log_fn                    = log,
+            ask_claude_strategist_fn  = _ask_claude_strategist,
+            ask_grok_strategist_fn    = _ask_grok_strategist,
+            get_trade_history_fn      = _strategist_trade_history,
+            get_market_context_fn     = _strategist_market_context,
+            record_trade_fn           = record_trade,
+            get_wallet_fn             = _strategist_wallet,
+        )
+        # Surface the active model spec for visibility
+        wallet_now = _strategist_wallet()
+        c_spec = strategic_brain.get_active_model("strategist", "claude", wallet=wallet_now)
+        g_spec = strategic_brain.get_active_model("strategist", "grok",   wallet=wallet_now)
+        active = "ACTIVE" if strategic_brain.ENABLE_STRATEGIST else "DORMANT (Phase A)"
+        log(f"🧭 Strategic Brain {active} — wallet ${wallet_now:.2f}")
+        log(f"   Claude-Strategist: {c_spec['model_id']} "
+            f"(${c_spec['input_cost_per_1m']:.2f}/{c_spec['output_cost_per_1m']:.2f} per 1M)")
+        log(f"   Grok-Strategist:   {g_spec['model_id']} "
+            f"(${g_spec['input_cost_per_1m']:.2f}/{g_spec['output_cost_per_1m']:.2f} per 1M)")
+    except Exception as _sbe:
+        log(f"⚠️ Strategic Brain init failed: {_sbe}")
+
+
+
+# [_replay_trade_history_into_memory → portfolio_manager.py]
+def run_cycle():
+    log("── 🤝 Collaboration Cycle ──")
