@@ -1,9 +1,9 @@
 """
 strategic_brain.py — Strategic AI layer for NovaTrade.
 
-═══════════════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════════════════
 ARCHITECTURE OVERVIEW
-═══════════════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════════════════
 This module implements the STRATEGIST role — the "research desk" of
 the bot. Strategists DON'T trade. They:
 
@@ -23,15 +23,15 @@ breaks the playbook (stop-loss breach, regime change, gap event).
 Core Reserve (the long-term BTC/SPY/Cash compounder) requires consensus
 from BOTH strategists to act. If they disagree, default is hold.
 
-═══════════════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════════════════
 MODEL CONFIGURATION (swap as new models release)
-═══════════════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════════════════
 """
 import json
 import os
 from datetime import datetime, timezone, timedelta
 
-# ── Model configuration ─────────────────────────────────────
+# ── Model configuration ────────────────────────
 # Single source of truth for ALL AI model choices in NovaTrade.
 # Both strategist and tactician models live here so that swapping
 # to new models is a one-config edit, not a hunt through code.
@@ -167,7 +167,7 @@ STRATEGIST_MODELS = {
     "grok":   get_active_model("strategist", "grok",   wallet=0.0),
 }
 
-# ── Activation schedule ─────────────────────────────────────
+# ── Activation schedule ────────────────────────
 # Phase A (this deploy): module exists, plumbing wired, but NOT activating.
 #   ENABLE_STRATEGIST = False keeps the system in "skeleton mode" — it
 #   responds to /strategy/<ai> endpoints with current state, but doesn't
@@ -189,7 +189,7 @@ SCHEDULE = {
     "crypto_close": {"hour": 21, "minute": 0,  "purpose": "review crypto session"},
 }
 
-# ── Wake-trigger thresholds ─────────────────────────────────
+# ── Wake-trigger thresholds ─────────────────────────
 # These are the mechanical conditions that allow the tactician to wake
 # the strategist mid-cycle. No AI judgment needed — these are rules.
 WAKE_TRIGGERS = {
@@ -208,7 +208,7 @@ WAKE_TRIGGERS = {
 # Cooldown: prevent wake-loops where strategist + tactician keep waking each other
 WAKE_COOLDOWN_MINUTES = 30
 
-# ── Auto-revert thresholds (Phase B) ────────────────────────
+# ── Auto-revert thresholds (Phase B) ──────────────
 # When a strategy underperforms, revert to default. Triggered by a
 # scheduled review, not mid-session.
 AUTO_REVERT = {
@@ -218,7 +218,21 @@ AUTO_REVERT = {
     "wr_underperformance_pp":    20,      # OR predicted-actual gap > 20pp
 }
 
-# ── Persistence ─────────────────────────────────────────────
+# ── Per-asset-class strategy modes ────────────────
+# Playbooks are split by asset class: each AI has ONE strategy for
+# crypto and ONE for stocks, each with its own strategy_type. These
+# constants set the default playbook per class — each controls ONLY
+# its own asset class, so flipping crypto to mean-reversion never
+# touches how stocks pick trades (and vice versa).
+CRYPTO_STRATEGY_MODE = "mean_reversion"   # crypto: buy dips, sell bounce
+STOCK_STRATEGY_MODE  = "turtle"           # stocks: Donchian breakout (unchanged)
+
+STRATEGY_MODES = {
+    "crypto": CRYPTO_STRATEGY_MODE,
+    "stock":  STOCK_STRATEGY_MODE,
+}
+
+# ── Persistence ──────────────────────────────
 STATE_DIR = "/data"
 FALLBACK_DIR = "."
 
@@ -230,7 +244,7 @@ def _state_path(name: str) -> str:
     return f"{FALLBACK_DIR}/{name}"
 
 
-# ── Strategy file schema ────────────────────────────────────
+# ── Strategy file schema ────────────────────
 def _default_strategy(ai_name: str) -> dict:
     """The default starting strategy for a new AI."""
     return {
@@ -287,29 +301,83 @@ def _default_strategy_turtle(ai_name: str, asset_class: str = "crypto") -> dict:
     }
 
 
+def _default_strategy_mean_reversion(ai_name: str, asset_class: str = "crypto") -> dict:
+    """
+    Mean-reversion playbook: buy oversold dips near support, sell the
+    bounce. strategy_type is NOT 'turtle', so the Donchian breakout
+    gates in binance_crypto/bot_with_proxy stay OFF — the AIs' dip
+    picks execute instead of being rejected.
+    Targets mirror CRYPTO_RULES (8% stop / 8% TP / 24h / conf 60).
+    """
+    return {
+        "id":              f"S-{ai_name}-meanrev-{asset_class}",
+        "name":            f"Mean Reversion {asset_class.title()} v1",
+        "version":         1,
+        "strategy_type":   "mean_reversion",
+        "active_since":    datetime.now(timezone.utc).isoformat(),
+        "rules": {
+            "entry_logic":             "Buy oversold dips (RSI <= 35) near support with reversal confirmation. Sell the bounce. NO breakout chasing.",
+            "rsi_oversold_max":        35,
+            "max_position_pct_of_pool": 60,
+            "stop_loss_pct":           8,
+            "take_profit_pct":         8,
+            "max_hold_hours":          24,
+            "min_confidence":          60,
+            "max_concurrent_positions": 3,
+            "preferred_indicators":    ["RSI", "support_resistance", "volume_ratio", "bollinger"],
+        },
+        "rationale":           "Turtle's breakout-only gate rejected every dip pick in ranging crypto — mean reversion matches how the AIs actually select entries.",
+        "predicted_win_rate":  55,
+        "predicted_avg_pnl_pct": 1.0,
+        "predicted_until":     (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+    }
+
+
+def _fresh_performance() -> dict:
+    """Zeroed performance counters for a newly-started playbook."""
+    return {
+        "trades_under_this_strategy": 0,
+        "wins":                        0,
+        "losses":                      0,
+        "actual_win_rate":             0,
+        "actual_avg_pnl_pct":          0,
+        "started_at":                  datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _default_playbook_for(ai_name: str, asset_class: str) -> dict:
+    """Build the default playbook for an asset class per STRATEGY_MODES."""
+    mode = STRATEGY_MODES.get(asset_class, "mean_reversion")
+    if mode == "turtle":
+        return _default_strategy_turtle(ai_name, asset_class=asset_class)
+    return _default_strategy_mean_reversion(ai_name, asset_class=asset_class)
+
+
 def _default_strategy_state(ai_name: str) -> dict:
-    """Initial state file for a new AI."""
+    """Initial state file for a new AI. Playbooks are per asset class."""
+    playbooks = {ac: _default_playbook_for(ai_name, ac) for ac in STRATEGY_MODES}
     return {
         "ai_name":             ai_name,
         "model_id":            STRATEGIST_MODELS[ai_name]["model_id"],
-        "current_strategy":    _default_strategy(ai_name),
-        "current_performance": {
-            "trades_under_this_strategy": 0,
-            "wins":                        0,
-            "losses":                      0,
-            "actual_win_rate":             0,
-            "actual_avg_pnl_pct":          0,
-            "started_at":                  datetime.now(timezone.utc).isoformat(),
-        },
+        # Per-asset-class playbooks — the entry gates read these.
+        "playbooks":           playbooks,
+        "playbook_performance": {ac: _fresh_performance() for ac in STRATEGY_MODES},
+        # Legacy combined fields — kept as a mirror of the crypto playbook
+        # so older readers (dashboard, strategist prompt) keep working.
+        "current_strategy":    dict(playbooks["crypto"]),
+        "current_performance": _fresh_performance(),
         "strategy_history":    [],
         "last_activation":     None,
         "last_wake_call":      None,
         "total_activations":   0,
         "audit_log":           [],
+        # Fresh states are born split — the one-shot migration in
+        # load_strategy() must never touch them.
+        "playbook_split_applied": True,
     }
 
 
-# ── Injected dependencies (set by bot on boot) ──────────────
+# ── Injected dependencies (set by bot on boot) ──────────
 log = print
 ask_claude_strategist = None    # function: (prompt, system, max_tokens) -> str
 ask_grok_strategist   = None
@@ -357,7 +425,7 @@ def _refresh_model_registry():
     return wallet
 
 
-# ── State load/save ─────────────────────────────────────────
+# ── State load/save ────────────────────────
 _state_cache = {}
 
 def load_strategy(ai_name: str) -> dict:
@@ -368,54 +436,64 @@ def load_strategy(ai_name: str) -> dict:
     try:
         with open(path) as f:
             state = json.load(f)
-            # Forward-compat: ensure all expected fields exist
-            default = _default_strategy_state(ai_name)
-            for k in default:
-                if k not in state:
-                    state[k] = default[k]
 
-            # ── ONE-SHOT TURTLE MIGRATION ───────────────────────
-            # Pre-existing state files persisted with classic/default
-            # strategy from previous deployments. When env var
-            # NOVATRADE_FORCE_TURTLE_MIGRATION=1 is set, flip current
-            # playbook to the Turtle default ONCE, archive the old one,
-            # then mark migration applied so it never re-runs. Safe to
-            # leave env var set permanently — idempotent on reload.
+            # ── ONE-SHOT PER-ASSET-CLASS PLAYBOOK SPLIT ─────
+            # Older state files hold a SINGLE combined playbook in
+            # current_strategy that governed both crypto AND stocks —
+            # so flipping crypto to mean-reversion also silently turned
+            # the Turtle gate off for stocks. Split it ONCE into two
+            # independent playbooks (crypto → CRYPTO_STRATEGY_MODE,
+            # stock → STOCK_STRATEGY_MODE), archive the old combined
+            # one, then mark applied so this never re-runs. Runs BEFORE
+            # the forward-compat fill below so the fill can't pre-seed
+            # 'playbooks' / the applied flag and mask the migration.
+            # Supersedes the old meanrev/turtle one-shot migrations
+            # (their flags are force-set so they can never re-fire if
+            # older code is ever restored).
             try:
-                if (os.environ.get("NOVATRADE_FORCE_TURTLE_MIGRATION", "").strip() == "1"
-                        and not state.get("turtle_migration_applied")):
-                    current = state.get("current_strategy", {}) or {}
-                    if current.get("strategy_type") != "turtle":
+                if not state.get("playbook_split_applied"):
+                    combined = state.get("current_strategy", {}) or {}
+                    if combined:
                         history = state.setdefault("strategy_history", [])
-                        if current:
-                            history.append({
-                                "archived_at":      datetime.now(timezone.utc).isoformat(),
-                                "archived_reason":  "turtle_migration",
-                                "previous_strategy": current,
-                            })
-                            if len(history) > 50:
-                                state["strategy_history"] = history[-50:]
-                        state["current_strategy"] = _default_strategy_turtle(ai_name, asset_class="crypto")
-                        state["last_activation"]  = datetime.now(timezone.utc).isoformat()
-                        state["current_performance"] = {
-                            "trades_under_this_strategy": 0,
-                            "wins":                        0,
-                            "losses":                      0,
-                            "actual_win_rate":             0,
-                            "actual_avg_pnl_pct":          0,
-                            "started_at":                  datetime.now(timezone.utc).isoformat(),
-                        }
-                        log(f"🐢 MIGRATION: {ai_name} playbook flipped to Turtle (previous archived)")
-                    state["turtle_migration_applied"] = True
-                    _state_cache[ai_name] = state
+                        history.append({
+                            "archived_at":       datetime.now(timezone.utc).isoformat(),
+                            "archived_reason":   "playbook_split",
+                            "previous_strategy": combined,
+                        })
+                        if len(history) > 50:
+                            state["strategy_history"] = history[-50:]
+                    playbooks = {ac: _default_playbook_for(ai_name, ac)
+                                 for ac in STRATEGY_MODES}
+                    state["playbooks"] = playbooks
+                    state["playbook_performance"] = {ac: _fresh_performance()
+                                                     for ac in STRATEGY_MODES}
+                    # Legacy mirror: crypto playbook, so old readers of
+                    # current_strategy keep seeing something sane.
+                    state["current_strategy"]    = dict(playbooks["crypto"])
+                    state["current_performance"] = _fresh_performance()
+                    state["meanrev_migration_applied"] = True
+                    state["turtle_migration_applied"]  = True
+                    state["playbook_split_applied"]    = True
+                    log(f"🔀 MIGRATION: {ai_name} playbook split by asset class — "
+                        f"crypto={playbooks['crypto'].get('strategy_type')}, "
+                        f"stock={playbooks['stock'].get('strategy_type')} "
+                        f"(combined playbook archived)")
                     try:
                         with open(path, "w") as _wf:
                             json.dump(state, _wf, default=str, indent=2)
                     except Exception as _we:
-                        log(f"⚠️ Turtle migration save failed for {ai_name}: {_we}")
-                    return state
-            except Exception as _mig_e:
-                log(f"⚠️ Turtle migration failed for {ai_name}: {_mig_e}")
+                        log(f"⚠️ Playbook-split migration save failed for {ai_name}: {_we}")
+            except Exception as _split_e:
+                log(f"⚠️ Playbook-split migration failed for {ai_name}: {_split_e}")
+
+            # Forward-compat: ensure all expected fields exist.
+            # Never inject playbook_split_applied here — only the
+            # migration above (or a fresh default state) may set it,
+            # so a failed migration retries on the next load.
+            default = _default_strategy_state(ai_name)
+            for k in default:
+                if k not in state and k != "playbook_split_applied":
+                    state[k] = default[k]
 
             _state_cache[ai_name] = state
             return state
@@ -427,6 +505,21 @@ def load_strategy(ai_name: str) -> dict:
     except Exception as e:
         log(f"⚠️ Strategy load failed for {ai_name}: {e}")
         return _default_strategy_state(ai_name)
+
+
+def load_strategy_for(ai_name: str, asset_class: str) -> dict:
+    """
+    Return the active playbook for ONE asset class ('crypto' or 'stock').
+    This is what the entry gates must call — never current_strategy,
+    which is a legacy mirror of the crypto playbook only.
+    Falls back to the legacy combined playbook if the split state is
+    somehow missing (pre-migration file loaded by newer code).
+    """
+    state = load_strategy(ai_name)
+    playbook = (state.get("playbooks") or {}).get(asset_class)
+    if isinstance(playbook, dict) and playbook:
+        return playbook
+    return state.get("current_strategy", {}) or {}
 
 
 def save_strategy(ai_name: str) -> bool:
@@ -458,7 +551,7 @@ def _audit(ai_name: str, event_type: str, message: str, **extra):
     log(f"🧠 STRATEGIST [{ai_name}]: {message}")
 
 
-# ── Strategist prompt construction ──────────────────────────
+# ── Strategist prompt construction ──────────────
 def _build_strategist_prompt(ai_name: str, purpose: str,
                               trade_history: list, market_context: dict) -> str:
     """
@@ -603,7 +696,7 @@ def parse_strategist_response(raw: str) -> dict:
     return None
 
 
-# ── Strategy validation (hard limits enforcement) ───────────
+# ── Strategy validation (hard limits enforcement) ───────
 def validate_strategy(proposed: dict) -> tuple[bool, str]:
     """
     Validate a proposed new strategy against hard limits that the
@@ -674,7 +767,7 @@ def validate_strategy(proposed: dict) -> tuple[bool, str]:
     return True, ""
 
 
-# ── Strategy application ────────────────────────────────────
+# ── Strategy application ───────────────────
 def apply_strategy_decision(ai_name: str, decision: dict) -> bool:
     """
     Apply a strategist's decision: keep, modify, or replace strategy.
@@ -759,7 +852,7 @@ def apply_strategy_decision(ai_name: str, decision: dict) -> bool:
     return True
 
 
-# ── Main activation entry point ─────────────────────────────
+# ── Main activation entry point ───────────────
 def activate_strategist(ai_name: str, purpose: str = "scheduled review") -> dict:
     """
     Main entry point — activate a strategist to review and propose strategy.
@@ -889,7 +982,7 @@ def check_wake_triggers(ai_name: str, context: dict) -> tuple[bool, str]:
     return False, ""
 
 
-# ── Status snapshot for dashboard ───────────────────────────
+# ── Status snapshot for dashboard ─────────────
 def get_full_status() -> dict:
     """Snapshot for /strategy endpoint."""
     # Refresh model registry from current wallet (so /strategy reflects
@@ -912,6 +1005,7 @@ def get_full_status() -> dict:
     out = {
         "enabled":          ENABLE_STRATEGIST,
         "phase":            "A — plumbing only" if not ENABLE_STRATEGIST else "B/C — active",
+        "strategy_modes":   dict(STRATEGY_MODES),
         "models":           STRATEGIST_MODELS,
         "model_registry":   MODEL_REGISTRY,
         "upgrade_info":     upgrade_info,
@@ -926,6 +1020,8 @@ def get_full_status() -> dict:
         out["ais"][ai] = {
             "model":              state.get("model_id"),
             "active_model":       STRATEGIST_MODELS[ai].get("model_id"),
+            "playbooks":          state.get("playbooks", {}),
+            "playbook_performance": state.get("playbook_performance", {}),
             "current_strategy":   state.get("current_strategy", {}),
             "current_performance":state.get("current_performance", {}),
             "strategy_history":   state.get("strategy_history", [])[-5:],
