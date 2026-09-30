@@ -1047,6 +1047,7 @@ Top mimick candidates: {pol_mimick}
 {f"⚡ OVERLAP — politicians buying today's movers: {pol_overlap}" if pol_overlap else ""}"""
 
         prompt = f"""AFTER-HOURS — GROK reviewing momentum + smart money for TOMORROW.
+
 TODAY'S RESULTS:
 P&L: ${pnl:+.2f} | SPY: {spy_trend.upper()}
 {f"Your edge: {ai_persona}" if ai_persona else ""}
@@ -1412,4 +1413,3 @@ INDICATORS: {chart_section[:450]}"""
 3. No overlap with partner AI if possible
 4. LIMIT ORDERS at bid/ask midpoint for better fill
 {base_json}"""
-
