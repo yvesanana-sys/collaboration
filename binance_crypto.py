@@ -3188,3 +3188,87 @@ PRIORITY: Find best entry, buy low, plan exit above fees.
                 grok_system   = f"{grok_system}\n\n{grok_rivalry}"
         except Exception as _re:
             self._log(f"   ⚠️ Rivalry context inject skipped: {_re}")
+
+        # ── Step 1: Grok live research BEFORE prompt assembly ─
+        grok_intel = ""
+        try:
+            self._log("   🔴 Grok searching X/web for crypto news...")
+            watch_coins    = list(CRYPTO_UNIVERSE.keys())[:8]
+            wallet_coins   = [h["asset"] for h in
+                              (wallet.get("tradeable", []) + wallet.get("non_tradeable", []))
+                              if h.get("value_usdt", 0) > 1]
+            position_coins = [s.replace("USDT","") for s in self.positions.keys()]
+            all_watch = list(set(
+                [s.replace("USDT","") for s in watch_coins] + wallet_coins + position_coins
+            ))[:12]
+            holdings_str   = ", ".join(position_coins) if position_coins else "none"
+            scan_str       = ", ".join([c["symbol"].replace("USDT","") for c in market_scan[:6]])
+
+            # Fetch funding rates for current holdings + watch coins
+            try:
+                funding_syms  = list(self.positions.keys())[:5]
+                funding_data  = get_funding_rates(funding_syms)
+                funding_lines = []
+                for sym, fd in funding_data.items():
+                    funding_lines.append(
+                        f"  {sym}: {fd['rate_pct']:+.4f}%/8h — {fd['signal']}"
+                    )
+                if funding_lines:
+                    self._log(f"   💰 Funding rates: {len(funding_lines)} symbols checked")
+                    funding_str = "\n".join(funding_lines)
+                else:
+                    funding_str = "No funding data available"
+            except Exception:
+                funding_str = "Funding rate fetch failed"
+
+            research_prompt = (
+                f"You have LIVE access to Twitter/X, Reddit, crypto news sites, and web search. "
+                f"Search ALL of them RIGHT NOW. I need a complete crypto intelligence briefing.\n\n"
+
+                f"MY CURRENT HOLDINGS: {holdings_str}\n"
+                f"FUNDING RATES (8h): \n{funding_str}\n"
+                f"COINS TO WATCH: {', '.join(all_watch)}\n"
+                f"MARKET MOVERS TO CHECK: {scan_str}\n\n"
+
+                f"SEARCH THESE SOURCES NOW:\n"
+                f"• Twitter/X: search each coin ticker, #crypto, #DeFi, crypto influencers "
+                f"(CryptoKaleo, PlanB, Altcoin Daily, Miles Deutscher, Ansem)\n"
+                f"• Reddit: r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin, r/ethtrader — "
+                f"what is trending in the last 3 hours?\n"
+                f"• News: CoinDesk, CoinTelegraph, Decrypt, The Block — any breaking stories?\n"
+                f"• Whale trackers: Whale Alert, Lookonchain — any large wallet moves today?\n"
+                f"• Exchange news: new listings on Binance, Coinbase, Kraken announced today?\n"
+                f"• Macro signals: BTC ETF inflows/outflows, Fed/interest rate news, "
+                f"SEC crypto regulation updates, US political crypto statements\n"
+                f"• On-chain: any unusual gas spikes, protocol exploits, large DEX volumes?\n\n"
+
+                f"FOR EACH HOLDING ({holdings_str}) — tell me:\n"
+                f"• Any FUD or negative news I should know about?\n"
+                f"• Any positive catalysts (partnerships, listings, upgrades)?\n"
+                f"• Sentiment shift on X in last 6 hours — bullish or bearish?\n\n"
+
+                f"ALSO SCAN FOR HIDDEN GEMS:\n"
+                f"• Any coin NOT in my watchlist that is genuinely trending on X/Reddit "
+                f"with a real catalyst (not just a pump)?\n"
+                f"• Any AI/DePIN/RWA/Layer2 narrative gaining momentum today?\n\n"
+
+                f"REPLY FORMAT — plain text, 6-8 bullets MAX:\n"
+                f"• [COIN/MACRO] catalyst or risk — source — bullish/bearish/neutral\n"
+                f"• Flag AVOID if something looks like a rug, scam, or manipulation\n"
+                f"• Be specific: name coins, give % moves, name the catalyst\n"
+                f"• If nothing significant found on a coin, say so briefly"
+            )
+
+            raw_intel = ask_grok_fn(
+                research_prompt,
+                "You are Grok — a crypto intelligence agent with LIVE Twitter/X, Reddit, "
+                "and web search access. Your job is to find information that gives trading "
+                "edge. Search broadly and deeply. Be specific, name coins and catalysts. "
+                "Flag risks and opportunities equally. Plain text bullets only, no JSON. "
+                "If you find something significant, lead with it. Never be vague.",
+            )
+            if raw_intel and len(raw_intel) > 20:
+                grok_intel = raw_intel[:900]  # Increased from 600 — more intel = better decisions
+                self._log(f"   🔴 Grok intel: {grok_intel[:200]}...")
+        except Exception as e:
+            self._log(f"   ⚠️ Grok research failed: {e}")
