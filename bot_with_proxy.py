@@ -1997,3 +1997,4 @@ def check_exit_conditions(positions, equity):
                         shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                         shared_state["position_exits"].pop(symbol, None)
                 else:
+
