@@ -70,6 +70,14 @@ def get_stock_tier(equity: float) -> dict:
             return t
     return RULES["stock_tiers"][-1]
 
+def get_quick_take_profit_pct(equity: float):
+    """
+    Small-account quick-flip take-profit override, or None at the top
+    tier (meaning: use the existing per-strategy A/B/T exit logic as-is).
+    Single source of truth for every stock exit-check call site.
+    """
+    return get_stock_tier(equity).get("tp_pct")
+
 def reset_intraday_buys_if_new_day():
     """
     Call at start of each trading day to reset PDT daily tracking.
