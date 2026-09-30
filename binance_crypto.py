@@ -2959,3 +2959,232 @@ class CryptoTrader:
                 )
         except Exception as pe:
             self._log(f"   ⚠️ Crypto situation failed: {pe}")
+
+        # ── Cross-reference stock projections for BTC-correlated stocks ──
+        stock_cross_ref = ""
+        if stock_projections:
+            # BTC often leads NVDA, AMD, MSTR, COIN — check if they align
+            correlated = ["NVDA", "AMD", "MSTR", "COIN"]
+            cross_lines = []
+            for sym in correlated:
+                proj = stock_projections.get(sym, {})
+                if proj and not proj.get("error"):
+                    bias = proj.get("bias", "neutral")
+                    conf = proj.get("confidence", 0)
+                    if conf >= 55:
+                        cross_lines.append(
+                            f"  {sym}: {bias.upper()} conf={conf} "
+                            f"(BTC-correlated stock signal)"
+                        )
+            if cross_lines:
+                stock_cross_ref = ("CORRELATED STOCK SIGNALS "
+                                   "(BTC leads these by 12-24h):\n" +
+                                   "\n".join(cross_lines))
+
+        # ── Politician signals on crypto-adjacent stocks ──────
+        pol_section = ""
+        if pol_text and pol_text.strip():
+            # Filter for crypto-relevant stocks
+            crypto_adjacent = ["COIN", "MSTR", "HOOD", "RIOT", "MARA",
+                                "NVDA", "AMD"]
+            pol_mentions = []
+            for sym in crypto_adjacent:
+                if sym in pol_text:
+                    pol_mentions.append(sym)
+            if pol_mentions or pol_mimick:
+                pol_section = (
+                    f"POLITICIAN TRADES (crypto-relevant):\n"
+                    f"{pol_text[:300]}\n"
+                    f"Crypto-adjacent stocks politicians are buying: "
+                    f"{pol_mentions or 'none'}\n"
+                    f"Top mimick symbols: {pol_mimick or []}"
+                )
+
+        # ── Smart money section ───────────────────────────────
+        smart_section = ""
+        if smart_money:
+            triple = smart_money.get("triple_confirmation", [])
+            # Check if any triple confirmation stocks are crypto-adjacent
+            crypto_adj = {"COIN", "MSTR", "HOOD", "RIOT", "MARA", "NVDA"}
+            crypto_triple = [s for s in triple if s in crypto_adj]
+            if crypto_triple:
+                smart_section = (
+                    f"🔥 CRYPTO SIGNAL: Triple confirmation on "
+                    f"crypto-adjacent stocks: {crypto_triple}\n"
+                    f"→ This is a bullish signal for BTC/ETH"
+                )
+
+        # ── Binance fee constants ─────────────────────────────
+        win_rate = round(self.wins / max(self.wins + self.losses, 1) * 100, 0)
+
+        # Binance.US maker=0% taker=0.1% → use 0.1% round-trip to be safe
+        BINANCE_FEE_RT = 0.001   # 0.1% round-trip (buy + sell)
+        MIN_NET_PROFIT = 0.015   # 1.5% minimum net profit after fees
+
+        # ── Staking summary for AI context ───────────────────
+        staking_text = ""
+        try:
+            staking_positions = get_staking_info()
+            if staking_positions and not staking_positions[0].get("error"):
+                total_staked_val = sum(s.get("staked_value", 0) for s in staking_positions)
+                staking_lines    = [f"\n🔒 STAKED COINS (LOCKED — cannot sell directly):"]
+                for s in staking_positions:
+                    rewards = s.get("rewards_pending", 0)
+                    unbond  = s.get("unbonding_days", "?")
+                    val     = s.get("staked_value", 0)
+                    staking_lines.append(
+                        f"  {s['asset']}: {s['staked_qty']:.4f} = ${val:.2f} | "
+                        f"pending rewards={rewards:.4f} | unbond={unbond}d"
+                    )
+                staking_lines.append(
+                    f"  Total locked: ${total_staked_val:.2f} "
+                    f"| To access: unstake (wait unbonding days) OR claim rewards only"
+                )
+                staking_lines.append(
+                    f"  REWARDS are claimable immediately without unstaking!"
+                )
+                staking_text = "\n".join(staking_lines)
+        except Exception:
+            pass
+
+        # ── Bot-tracked positions with P&L ───────────────────
+        positions_text = ""
+        if self.positions:
+            positions_text = "\n🤖 BOT-TRACKED POSITIONS (must manage exits):\n"
+            for sym, pos in self.positions.items():
+                try:
+                    curr_price = get_crypto_price(sym)
+                    pnl_pct    = pos.pnl_pct(curr_price)
+                    pnl_usd    = round((curr_price - pos.entry_price) * pos.qty, 4)
+                    # Fee-aware minimum profitable exit
+                    min_exit   = round(pos.entry_price * (1 + BINANCE_FEE_RT + MIN_NET_PROFIT), 6)
+                    proj       = self._projections.get(sym, {})
+                    dist_tp    = ""
+                    if proj and not proj.get("error"):
+                        ph = proj.get("proj_high", 0)
+                        if ph:
+                            dist_tp = f" | {round((ph-curr_price)/curr_price*100,1)}% to proj_high ${ph}"
+                    positions_text += (
+                        f"  {sym}: entry=${pos.entry_price:.6f} now=${curr_price:.6f} "
+                        f"P&L={pnl_pct:+.1f}% (${pnl_usd:+.4f})\n"
+                        f"    stop=${pos.stop_price:.6f} | TP=${pos.tp_price:.6f} "
+                        f"| min_exit=${min_exit:.6f}{dist_tp}\n"
+                    )
+                except Exception:
+                    positions_text += f"  {sym}: entry=${pos.entry_price:.6f} (price unavailable)\n"
+
+        # ── Wallet holdings with fee-aware context ────────────
+        holdings_text = ""
+        # Only feed the AIs holdings worth analyzing — dust just wastes tokens
+        # and confuses decisions ("should I rotate out of $0.00 SHIB?")
+        all_wallet_holdings = [h for h in (tradeable + wallet.get("non_tradeable", []))
+                               if h.get("value_usdt", 0) >= MIN_DISPLAY_VALUE]
+
+        if all_wallet_holdings:
+            holdings_text = "\nWALLET HOLDINGS (decide: hold / sell-to-USDT / rotate):\n"
+            for h in all_wallet_holdings:
+                sym   = h.get("symbol", f"{h['asset']}USDT")
+                proj  = self._projections.get(sym, {})
+                val   = h.get("value_usdt", 0)
+                price = h.get("price", 0)
+                proj_note = ""
+
+                if proj and not proj.get("error") and price > 0:
+                    ph = proj.get("proj_high", 0)
+                    pl = proj.get("proj_low", 0)
+                    if ph and pl:
+                        # Fee-aware minimum sell price
+                        min_sell = round(price * (1 + BINANCE_FEE_RT + 0.005), 6)
+                        if price >= ph * 0.98:
+                            proj_note = f" ⚠️ AT PROJ HIGH — sell if ${ph} hit (profit-take)"
+                        elif price <= pl * 1.02:
+                            proj_note = f" 🟢 AT PROJ LOW — dip zone (good entry)"
+                        else:
+                            upside = round((ph - price) / price * 100, 1)
+                            proj_note = f" → +{upside}% to proj_high ${ph} | min_sell=${min_sell}"
+
+                if val > 0 or h.get("qty", 0) > 0:
+                    val_str = f"= ${val:.2f}" if val > 0.01 else "(no price)"
+                    price_str = (f"${price:.8f}" if price > 0 and price < 0.001
+                                 else f"${price:.4f}" if price > 0 else "$0")
+                    holdings_text += (f"  {h['asset']}: {h['qty']:.4f} "
+                                      f"{val_str} @ {price_str}"
+                                      f"{proj_note}\n")
+
+        # ── Determine trading mode ────────────────────────────
+        no_buying_power = crypto_pool < CRYPTO_RULES["min_trade_usdt"] and not has_coins
+        profit_focus    = no_buying_power and bool(self.positions)
+        rotation_mode   = not has_usdt and has_coins
+
+        if profit_focus:
+            mode_instruction = """
+🎯 PROFIT PROTECTION MODE — No buying power available.
+PRIORITY: Protect and grow what you already have.
+1. EXITS: Review all bot positions — are any near TP? Take profit if yes.
+2. TRAIL: If position is profitable, raise stop to entry price (lock in breakeven minimum)
+3. ROTATE only if a position has a clear sell signal AND a better coin is available
+4. WATCH: Note best opportunities for when USDT becomes available"""
+        elif rotation_mode:
+            mode_instruction = """
+🔄 ROTATION MODE — No USDT but have coins to work with.
+PRIORITY: Sell weakest coin → buy strongest opportunity.
+1. Identify your WEAKEST holding (bearish proj, near high, low momentum)
+2. Sell it → generates USDT → immediately buy the best current setup
+3. Always check: new coin must be projected to gain MORE than fee cost (>1.5%)
+4. Never sell a coin that's already profitable just to chase another — only rotate losers"""
+        else:
+            mode_instruction = """
+💰 OPPORTUNITY MODE — USDT available for buying.
+PRIORITY: Find best entry, buy low, plan exit above fees.
+1. Entry must be AT or BELOW proj_low
+2. TP must be at proj_high → minimum net gain after fees = 1.5%
+3. fee-aware rule: sell price must be > entry × 1.011 (fees + min profit)"""
+
+        # ── Build neutral, equal-capability system prompts ────
+        # Both AIs get IDENTICAL base prompts (only name swaps).
+        # No "specialty" baking — they have full data access and
+        # develop their own strategies based on what wins.
+        # Rivalry context is added so each AI knows where they stand.
+        if prompt_builder:
+            claude_system = prompt_builder.build_claude_system()
+            grok_system   = prompt_builder.build_grok_system()
+        else:
+            # Fallback if prompt_builder isn't wired (shouldn't happen)
+            _neutral = (
+                "You are an aggressive autonomous crypto trader competing "
+                "for highest realized profit. Full access to indicators, "
+                "news, sentiment, on-chain data, and trade history. "
+                "Output valid JSON with full field names — do NOT abbreviate."
+            )
+            claude_system = f"You are Claude. {_neutral}"
+            grok_system   = f"You are Grok. {_neutral}"
+
+        # ── Inject rivalry context (concrete standings + anti-tilt) ──
+        try:
+            import ai_evolution
+            # Pull current standings from the AI memory's per-AI patterns
+            mem_stats = (prompt_builder.memory.get_stats()
+                         if prompt_builder and hasattr(prompt_builder, "memory")
+                         else {})
+            ai_p = mem_stats.get("ai_patterns", {})
+            c_stats = ai_p.get("claude", {})
+            g_stats = ai_p.get("grok",   {})
+            c_pnl   = c_stats.get("total_pnl_usd", 0) or 0
+            g_pnl   = g_stats.get("total_pnl_usd", 0) or 0
+            c_tr    = (c_stats.get("wins", 0) or 0) + (c_stats.get("losses", 0) or 0)
+            g_tr    = (g_stats.get("wins", 0) or 0) + (g_stats.get("losses", 0) or 0)
+            c_w     = c_stats.get("wins", 0) or 0
+            g_w     = g_stats.get("wins", 0) or 0
+            leader  = "claude" if c_pnl > g_pnl else ("grok" if g_pnl > c_pnl else "tie")
+
+            claude_rivalry = ai_evolution.build_rivalry_context(
+                "claude", c_pnl, c_tr, c_w, g_pnl, g_tr, g_w, leader)
+            grok_rivalry   = ai_evolution.build_rivalry_context(
+                "grok",   g_pnl, g_tr, g_w, c_pnl, c_tr, c_w, leader)
+
+            if claude_rivalry:
+                claude_system = f"{claude_system}\n\n{claude_rivalry}"
+            if grok_rivalry:
+                grok_system   = f"{grok_system}\n\n{grok_rivalry}"
+        except Exception as _re:
+            self._log(f"   ⚠️ Rivalry context inject skipped: {_re}")
