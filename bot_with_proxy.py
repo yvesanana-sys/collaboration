@@ -2998,3 +2998,57 @@ def _recover_missing_buy_records():
                      else "grok")
             if sym and qty > 0 and entry > 0:
                 trade_history.append({
+                    "action":    "buy",
+                    "symbol":    sym,
+                    "qty":       qty,
+                    "price":     entry,
+                    "notional":  round(cost, 2),
+                    "owner":     owner,
+                    "time":      datetime.now(timezone.utc).isoformat(),
+                    "time_et":   datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "reason":    "recovered from Alpaca on boot",
+                    "recovered": True,
+                })
+                log(f"📋 Recovered buy record: {sym} {qty:.4f} shares @ ${entry:.2f} [{owner}]")
+                recovered += 1
+        if recovered > 0:
+            _save_trade_history(trade_history)
+            log(f"✅ Boot recovery: {recovered} buy records restored from Alpaca")
+    except Exception as e:
+        log(f"⚠️ Buy record recovery failed: {e}")
+
+threading.Thread(target=_recover_missing_buy_records, daemon=True).start()
+
+# ── Late injection: sleep + PDT + portfolio (need functions defined after log()) ──
+# portfolio_manager needs trade_history, alpaca, prompt_builder
+_portfolio_manager._set_context(
+    log_fn             = log,
+    shared_state_ref   = shared_state,
+    trade_history_ref  = trade_history,
+    rules              = RULES,
+    alpaca_fn          = alpaca,
+    prompt_builder_ref = prompt_builder,
+    binance_get_fn     = binance_crypto.binance_get if hasattr(binance_crypto, "binance_get") else None,
+)
+# Boot replay — seeds AI memory from trade history (needs portfolio_manager injected)
+try:
+    _replay_trade_history_into_memory()
+except Exception:
+    pass
+
+# Sync Binance trade history from exchange — fetch last 6 months on first boot
+# Runs in background thread so it doesn't delay startup. Triggers AI
+# memory backfill once the fresh history is on disk.
+def _boot_binance_sync():
+    try:
+        sync_binance_history()
+        # After sync completes, replay history again — this catches any new
+        # trades the sync brought in and runs the backfill once memory has
+        # the latest Binance data on disk.
+        try:
+            _replay_trade_history_into_memory()
+        except Exception as re:
+            log(f"⚠️ Post-sync replay failed: {re}")
+    except Exception as e:
+        log(f"⚠️ Binance history sync failed: {e}")
+threading.Thread(target=_boot_binance_sync, daemon=True).start()
