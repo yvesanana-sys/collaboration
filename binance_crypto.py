@@ -2398,3 +2398,109 @@ class CryptoTrader:
                         if recon:
                             pnl_usd = round(recon["gross_proceeds"] - recon["fee_usd"]
                                              - pos.entry_price * recon["qty"], 2)
+                            pnl_pct = round((recon["avg_price"] / pos.entry_price - 1) * 100, 2)
+                            self._log(f"   🧹 {symbol}: ghost position — reconciled broker-side "
+                                      f"exit @ ${recon['avg_price']:.6f} | P&L: ${pnl_usd:+.2f} "
+                                      f"({pnl_pct:+.2f}%) — likely stop-loss fill")
+                        else:
+                            # No matching fill found on Binance — still record an
+                            # ESTIMATE off the current mark rather than lose the
+                            # trade silently. Clearly tagged as inexact.
+                            pnl_usd = round((current - pos.entry_price) * pos.qty, 2)
+                            pnl_pct = pos.pnl_pct(current)
+                            self._log(f"   🧹 {symbol}: ghost position detected "
+                                      f"(live qty={live_qty:.8f}, ~${live_val:.4f}) — no Binance "
+                                      f"fill found, recording ESTIMATE P&L: ${pnl_usd:+.2f} "
+                                      f"({pnl_pct:+.2f}%)")
+                        if record_trade_fn:
+                            try:
+                                record_trade_fn(
+                                    action       = "stop_loss",
+                                    symbol       = symbol,
+                                    qty          = recon.get("qty", pos.qty) if recon else pos.qty,
+                                    price        = recon.get("avg_price", current) if recon else current,
+                                    notional     = round((recon.get("avg_price", current) if recon else current)
+                                                          * (recon.get("qty", pos.qty) if recon else pos.qty), 2),
+                                    owner        = pos.owner,
+                                    pnl_usd      = pnl_usd,
+                                    pnl_pct      = pnl_pct / 100,
+                                    strategy     = "crypto",
+                                    entry_price  = pos.entry_price,
+                                    reason       = "crypto:stop_loss (broker-side"
+                                                   + ("" if recon else ", estimated") + ")",
+                                )
+                            except Exception as rte:
+                                self._log(f"   ⚠️ ghost-exit record_trade failed: {rte}")
+                        del self.positions[symbol]
+                        continue
+                except Exception as ge:
+                    self._log(f"   ⚠️ Ghost-check failed {symbol}: {ge}")
+
+                pos.update(current)
+                pnl     = pos.pnl_pct(current)
+
+                # ── Trail stop logic (CLASSIC only — Turtle uses Donchian/2N) ──
+                trail_activate = CRYPTO_RULES["trail_activate_pct"]  # 30%
+                trail_pct      = CRYPTO_RULES["trail_pct"]           # 40% from peak
+
+                if pos.strategy_type != "turtle" and pnl >= trail_activate * 100:
+                    # Trailing stop = peak × (1 - trail_pct)
+                    trail_stop = round(pos.peak_price * (1 - trail_pct), 6)
+                    if trail_stop > pos.stop_price:
+                        old_stop = pos.stop_price
+                        pos.stop_price = trail_stop
+                        self._log(f"   📈 {symbol} trail stop: ${old_stop:.6f} → "
+                                  f"${trail_stop:.6f} | peak=${pos.peak_price:.6f} "
+                                  f"P&L={pnl:+.1f}%")
+
+                exit_reason = None
+                # ── Turtle Donchian breakdown check (Turtle positions only) ──
+                # For Turtle positions, this fires before the 2N stop.
+                # Donchian breakdown = trend ended → exit the winner.
+                if pos.strategy_type == "turtle":
+                    d_exit = pos.should_turtle_donchian_exit()
+                    if d_exit.get("should_exit"):
+                        exit_reason = f"turtle_exit ({d_exit.get('reason','')})"
+                if exit_reason is None and pos.should_stop(current):
+                    if pos.strategy_type == "turtle":
+                        exit_reason = f"turtle_2N_stop ({pnl:.2f}%)"
+                    else:
+                        exit_reason = f"stop_loss ({pnl:.2f}%)"
+                elif (exit_reason is None and pos.strategy_type != "turtle"
+                      and quick_tp is not None and pnl >= quick_tp * 100):
+                    # Small-wallet velocity override — bank any real gain
+                    # above the tier floor instead of holding for 8%.
+                    exit_reason = f"take_profit (quick tier {pnl:.2f}%)"
+                elif exit_reason is None and pos.should_take_profit(current):
+                    exit_reason = f"take_profit ({pnl:.2f}%)"
+                elif exit_reason is None and pos.should_time_exit():
+                    # ── Fee-floor guard ─────────────────────────────
+                    # Don't dump on time_exit if we're underwater AND below
+                    # fee floor — extend the hold instead. Past the hard cap,
+                    # we exit anyway to avoid being stuck in a dead position.
+                    fee_floor = pos.entry_price * (1 + CRYPTO_RULES["round_trip_fee"] + 0.005)
+                    underwater = current < fee_floor
+                    hours_held = pos.hours_held()
+                    hard_cap   = CRYPTO_RULES.get("hard_max_hold_hours",
+                                                   CRYPTO_RULES["max_hold_hours"] * 3)
+
+                    if underwater and hours_held < hard_cap:
+                        # Skip this exit — log once per hour to avoid spam
+                        last_skip = getattr(pos, "_last_extend_log", 0)
+                        if hours_held - last_skip >= 1.0:
+                            self._log(f"   ⏳ {symbol}: time_exit skipped — "
+                                      f"underwater ${current:.6f} < fee floor "
+                                      f"${fee_floor:.6f} (P&L {pnl:+.2f}%) — "
+                                      f"extending hold ({hours_held:.1f}h / {hard_cap}h cap)")
+                            pos._last_extend_log = hours_held
+                    else:
+                        # Either above fee floor (exit OK to book breakeven+)
+                        # or hard cap reached (force exit regardless of P&L)
+                        cap_reason = " HARD CAP" if hours_held >= hard_cap else ""
+                        exit_reason = (f"time_exit ({hours_held:.1f}h > "
+                                       f"{CRYPTO_RULES['max_hold_hours']}h{cap_reason})")
+
+                if exit_reason:
+                    result = self._execute_exit(
+                        pos, current, exit_reason,
+                        record_trade_fn = record_trade_fn,
