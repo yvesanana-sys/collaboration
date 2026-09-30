@@ -498,3 +498,503 @@ def pdt_status_endpoint():
             if proj and not proj.get("error"):
                 guidance[sym] = {
                     "bias":       proj.get("bias", "unknown"),
+                    "confidence": proj.get("confidence", 0),
+                    "proj_high":  proj.get("proj_high"),
+                    "proj_low":   proj.get("proj_low"),
+                    "recommendation": (
+                        "HOLD OVERNIGHT — bullish projection"
+                        if proj.get("bias") == "bullish"
+                        else "CONSIDER SELLING — bearish projection"
+                        if proj.get("bias") == "bearish"
+                        else "HOLD — neutral, set tight stop"
+                    ),
+                }
+        status["projection_guidance"] = guidance
+        hold_plans = {k.replace("pdt_hold_", ""): v
+                      for k, v in shared_state.items()
+                      if k.startswith("pdt_hold_")}
+        status["active_hold_plans"] = hold_plans
+        status["explanation"] = (
+            "PDT rule: accounts < $25,000 limited to 3 day trades per 5 business days."
+        )
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/liquidate", methods=["GET", "POST"])
+def liquidate_endpoint():
+    """
+    SPOT LIQUIDATION — sells free coins to USDT. Staked assets untouched.
+    GET  /liquidate          → preview
+    GET  /liquidate?confirm=yes → execute
+    """
+    try:
+        from binance_crypto import (liquidate_all_to_usdt,
+                                    get_full_wallet, get_staking_info)
+    except Exception as ie:
+        return jsonify({"error": f"import failed: {ie}"}), 500
+
+    confirm = request.args.get("confirm", "").lower() == "yes" \
+              or request.method == "POST"
+
+    if not confirm:
+        # Preview mode — show what would be sold, nothing executed
+        try:
+            wallet  = get_full_wallet()
+            staking = get_staking_info()
+
+            # Staked assets — show as PROTECTED
+            staked_assets = {}
+            for s in staking:
+                if not s.get("error") and s.get("staked_qty", 0) > 0:
+                    staked_assets[s["asset"]] = s
+
+            # Spot coins that would be sold
+            spot_to_sell = []
+            spot_to_skip = []
+            for h in wallet.get("positions", []):
+                asset = h["asset"]
+                if asset in staked_assets:
+                    continue  # Staked — protected
+                free = h.get("free", 0)
+                val  = h.get("value_usdt", 0)
+                if free > 0 and val >= 1.0:
+                    spot_to_sell.append({
+                        "asset":      asset,
+                        "qty":        free,
+                        "value_usdt": val,
+                        "price":      h.get("price", 0),
+                        "action":     "SELL → USDT (market order, instant)",
+                    })
+                elif free > 0:
+                    spot_to_skip.append({
+                        "asset":  asset,
+                        "qty":    free,
+                        "value":  val,
+                        "reason": "dust < $1",
+                    })
+
+            total_spot   = sum(h["value_usdt"] for h in spot_to_sell)
+            usdt_now     = wallet.get("usdt_free", 0)
+            usdt_after   = round(usdt_now + total_spot, 2)
+            total_staked = sum(s.get("staked_value", 0)
+                               for s in staked_assets.values())
+
+            staked_summary = [
+                {
+                    "asset":       a,
+                    "staked_qty":  s["staked_qty"],
+                    "value_usdt":  s.get("staked_value", 0),
+                    "rewards":     s.get("rewards_pending", 0),
+                    "unbond_days": s.get("unbonding_days", "?"),
+                    "action":      "PROTECTED — earning APY, not touched",
+                }
+                for a, s in staked_assets.items()
+            ]
+
+            return jsonify({
+                "status":          "PREVIEW — add ?confirm=yes to execute",
+                "warning":         "Sells all free spot coins to USDT via market orders. Staked assets (FET/AUDIO/KAVA) are left untouched.",
+                "usdt_now":        round(usdt_now, 2),
+                "usdt_after_sale": usdt_after,
+                "spot_to_sell":    spot_to_sell,
+                "spot_to_skip":    spot_to_skip,
+                "staked_protected": staked_summary,
+                "staked_total_value": round(total_staked, 2),
+                "tip":             "Claim staking rewards separately from Binance.US → Earn → Staking",
+                "execute_url":     "/liquidate?confirm=yes",
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # ── EXECUTE liquidation ───────────────────────────────────
+    log("🔴 LIQUIDATION REQUESTED via /liquidate endpoint")
+    log("   Converting all crypto holdings to USDT for pure trading...")
+
+    try:
+        result = liquidate_all_to_usdt(log_fn=log)
+
+        # Store liquidation timestamp so bot knows to trade fresh
+        shared_state["last_liquidation"] = datetime.now(timezone.utc).isoformat()
+        shared_state["liquidation_result"] = result
+
+        return jsonify({
+            "status":      "LIQUIDATION EXECUTED",
+            "coins_sold":  result["sold"],
+            "skipped":     result["skipped"],
+            "usdt_gained": result["usdt_gained"],
+            "usdt_final":  result["usdt_final"],
+            "failures":    result["failed"],
+            "note":        (
+                "All free spot coins sold to USDT. "
+                "Staked assets (FET/AUDIO/KAVA) untouched — still earning APY. "
+                "Claim staking rewards from Binance.US → Earn → Staking for extra USDT."
+            ),
+        })
+    except Exception as e:
+        log(f"❌ Liquidation error: {e}")
+        return jsonify({"error": str(e), "status": "FAILED"}), 500
+    """
+    Check PDT (Pattern Day Trader) status.
+    Shows day trades used, remaining, intraday buys, and projection guidance.
+    GET /pdt
+    """
+    try:
+        account = alpaca("GET", "/v2/account")
+        equity  = float(account.get("equity", 55))
+        status  = get_pdt_status(equity)
+
+        # Add projection-based guidance for each intraday buy
+        guidance = {}
+        projections = shared_state.get("last_projections", {})
+        for sym in status.get("intraday_buys", []):
+            proj = projections.get(sym, {})
+            if proj and not proj.get("error"):
+                guidance[sym] = {
+                    "bias":       proj.get("bias", "unknown"),
+                    "confidence": proj.get("confidence", 0),
+                    "proj_high":  proj.get("proj_high"),
+                    "proj_low":   proj.get("proj_low"),
+                    "recommendation": (
+                        "HOLD OVERNIGHT — bullish projection, protect with trail stop"
+                        if proj.get("bias") == "bullish"
+                        else "CONSIDER SELLING — bearish projection despite PDT cost"
+                        if proj.get("bias") == "bearish"
+                        else "HOLD — neutral, set tight stop"
+                    ),
+                }
+        status["projection_guidance"] = guidance
+
+        # Active hold plans
+        hold_plans = {k.replace("pdt_hold_", ""): v
+                      for k, v in shared_state.items()
+                      if k.startswith("pdt_hold_")}
+        status["active_hold_plans"] = hold_plans
+
+        status["explanation"] = (
+            "PDT rule: accounts < $25,000 limited to 3 day trades per 5 business days. "
+            "Day trade = buying AND selling same stock same day. "
+            "Violation = account restricted for 90 days."
+        )
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/stats")
+def stats():
+    try:
+        account   = alpaca_get("/v2/account")
+        positions = alpaca_get("/v2/positions")
+        equity    = float(account["equity"])
+        features  = check_account_features(account, equity)
+        pool      = get_trading_pool(equity)
+        autonomy  = get_autonomy_status(equity)
+        return jsonify({
+            "bot":              BOT_NAME,
+            "equity":           equity,
+            "cash":             float(account["cash"]),
+            "pnl":              round(equity - RULES["total_budget"], 2),
+            "pnl_pct":          round((equity - RULES["total_budget"]) / RULES["total_budget"] * 100, 2),
+            "mode":             "REAL",
+            "growth_reserve":   round(pool["reserve"], 2),
+            "trading_pool":     round(pool["trading"], 2),
+            "claude_budget":    round(pool["claude"], 2),
+            "grok_budget":      round(pool["grok"], 2),
+            "claude_allocation": shared_state["claude_allocation"],
+            "grok_allocation":   shared_state["grok_allocation"],
+            "claude_daily_pnl":  shared_state["claude_daily_pnl"],
+            "grok_daily_pnl":    shared_state["grok_daily_pnl"],
+            "claude_weekly_pnl": shared_state["claude_weekly_pnl"],
+            "grok_weekly_pnl":   shared_state["grok_weekly_pnl"],
+            "claude_total_pnl":  shared_state["claude_total_pnl"],
+            "grok_total_pnl":    shared_state["grok_total_pnl"],
+            "claude_healthy":     shared_state["claude_healthy"],
+            "claude_credits_ok":  shared_state["claude_credits_ok"],
+            "claude_fail_reason": shared_state["claude_fail_reason"],
+            "last_claude_fail":   shared_state.get("last_claude_fail"),
+            "grok_healthy":       shared_state["grok_healthy"],
+            "grok_credits_ok":    shared_state["grok_credits_ok"],
+            "grok_fail_reason":   shared_state["grok_fail_reason"],
+            "last_grok_fail":     shared_state.get("last_grok_fail"),
+            "grok_balance":            shared_state.get("grok_balance"),
+            "grok_balance_checked_at": shared_state.get("grok_balance_checked_at"),
+            "penny_candidates":        shared_state.get("last_penny_candidates", []),
+            "wider_candidates":        shared_state.get("last_wider_candidates", []),
+            "opportunity_scan_at":     shared_state.get("last_opportunity_scan_at"),
+            "failover_mode":      shared_state["failover_mode"],
+            "watch_mode_active":  shared_state["watch_mode_active"],
+            "ai_sleeping":        shared_state["ai_sleeping"],
+            "sleep_reason":       shared_state["sleep_reason"],
+            "wake_reason":        shared_state["wake_reason"],
+            "stops_fired_today":  shared_state["stops_fired_today"],
+            "ai_wake_instructions": shared_state.get("ai_wake_instructions", []),
+            "cash_thresholds":    get_cash_thresholds(equity),
+            "can_short":          features["can_short"],
+            "short_progress":    features["short_progress_pct"],
+            "autonomy_mode":     shared_state["autonomy_mode"],
+            "claude_owns":       shared_state["claude_positions"],
+            "grok_owns":         shared_state["grok_positions"],
+            "positions": [
+                {"symbol": p["symbol"], "qty": p["qty"],
+                 "pnl": round(float(p["unrealized_pl"]), 2),
+                 "pnl_pct": round(float(p["unrealized_plpc"]) * 100, 2),
+                 "owner": "claude" if p["symbol"] in shared_state["claude_positions"]
+                          else "grok" if p["symbol"] in shared_state["grok_positions"]
+                          else "shared"}
+                for p in positions
+            ]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/binance_history")
+def binance_history_endpoint():
+    """Binance trade history — fetched from exchange, saved to volume."""
+    try:
+        stats  = get_binance_history_stats()
+        trades = _load_binance_history()
+        limit  = int(request.args.get("limit", 50))
+        return jsonify({
+            "stats":  stats,
+            "trades": list(reversed(trades))[:limit],
+            "file":   "/data/binance_trade_history.json",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/history")
+def history():
+    """
+    Full trade history — last N trades (default 100, max 500).
+    Query params:
+      ?limit=50        — return last N trades
+      ?symbol=NVDA     — filter by ticker
+      ?action=sell     — filter by action type
+      ?owner=claude    — filter by AI owner
+    """
+    try:
+        limit   = min(int(request.args.get("limit", 100)), 500)
+        symbol  = request.args.get("symbol", "").upper()
+        action  = request.args.get("action", "").lower()
+        owner   = request.args.get("owner", "").lower()
+
+        trades = list(reversed(trade_history))  # newest first
+
+        if symbol: trades = [t for t in trades if t.get("symbol") == symbol]
+        if action: trades = [t for t in trades if t.get("action","").startswith(action)]
+        if owner:  trades = [t for t in trades if t.get("owner") == owner]
+
+        trades = trades[:limit]
+
+        return jsonify({
+            "count":  len(trades),
+            "total_recorded": len(trade_history),
+            "trades": trades,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/performance")
+def performance():
+    """
+    Trading performance analytics derived from trade_history.
+    Returns win rate, avg P&L, best/worst trades, per-symbol breakdown,
+    per-AI breakdown, and trend of trade quality over time.
+    """
+    try:
+        sells = [t for t in trade_history if t.get("pnl_usd") is not None]
+        buys  = [t for t in trade_history if t.get("action") == "buy"]
+
+        total_trades  = len(sells)
+        wins          = [t for t in sells if t.get("pnl_usd", 0) > 0]
+        losses        = [t for t in sells if t.get("pnl_usd", 0) <= 0]
+        win_rate      = round(len(wins) / total_trades * 100, 1) if total_trades else 0
+        total_pnl     = round(sum(t.get("pnl_usd", 0) for t in sells), 2)
+        avg_win       = round(sum(t.get("pnl_usd", 0) for t in wins) / len(wins), 2) if wins else 0
+        avg_loss      = round(sum(t.get("pnl_usd", 0) for t in losses) / len(losses), 2) if losses else 0
+        profit_factor = round(abs(sum(t.get("pnl_usd",0) for t in wins)) /
+                              abs(sum(t.get("pnl_usd",0) for t in losses)), 2) if losses and wins else None
+
+        best_trade  = max(sells, key=lambda t: t.get("pnl_usd", 0), default=None)
+        worst_trade = min(sells, key=lambda t: t.get("pnl_usd", 0), default=None)
+
+        # Per-symbol breakdown
+        sym_stats = {}
+        for t in sells:
+            sym = t.get("symbol","?")
+            if sym not in sym_stats:
+                sym_stats[sym] = {"trades": 0, "wins": 0, "total_pnl": 0.0,
+                                  "avg_pnl_pct": [], "strategies": []}
+            sym_stats[sym]["trades"]    += 1
+            sym_stats[sym]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                sym_stats[sym]["wins"] += 1
+            if t.get("pnl_pct") is not None:
+                sym_stats[sym]["avg_pnl_pct"].append(t["pnl_pct"])
+            if t.get("strategy"):
+                sym_stats[sym]["strategies"].append(t["strategy"])
+
+        symbol_summary = {}
+        for sym, s in sym_stats.items():
+            symbol_summary[sym] = {
+                "trades":    s["trades"],
+                "wins":      s["wins"],
+                "win_rate":  round(s["wins"]/s["trades"]*100, 1) if s["trades"] else 0,
+                "total_pnl": round(s["total_pnl"], 2),
+                "avg_pnl_pct": round(sum(s["avg_pnl_pct"])/len(s["avg_pnl_pct"]), 2)
+                               if s["avg_pnl_pct"] else None,
+                "strategy_used": max(set(s["strategies"]), key=s["strategies"].count)
+                                 if s["strategies"] else None,
+            }
+
+        # Per-AI breakdown
+        ai_stats = {}
+        for t in sells:
+            owner = t.get("owner", "unknown")
+            if owner not in ai_stats:
+                ai_stats[owner] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            ai_stats[owner]["trades"]    += 1
+            ai_stats[owner]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                ai_stats[owner]["wins"] += 1
+
+        ai_summary = {}
+        for owner, s in ai_stats.items():
+            ai_summary[owner] = {
+                "trades":    s["trades"],
+                "wins":      s["wins"],
+                "win_rate":  round(s["wins"]/s["trades"]*100, 1) if s["trades"] else 0,
+                "total_pnl": round(s["total_pnl"], 2),
+            }
+
+        # Exit reason breakdown
+        reason_counts = {}
+        for t in sells:
+            r = t.get("action", "sell")
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+
+        # Strategy A vs B performance
+        strat_stats = {}
+        for t in sells:
+            s = t.get("strategy") or "unknown"
+            if s not in strat_stats:
+                strat_stats[s] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            strat_stats[s]["trades"]    += 1
+            strat_stats[s]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                strat_stats[s]["wins"] += 1
+
+        strat_summary = {}
+        for s, d in strat_stats.items():
+            strat_summary[s] = {
+                "trades":    d["trades"],
+                "win_rate":  round(d["wins"]/d["trades"]*100, 1) if d["trades"] else 0,
+                "total_pnl": round(d["total_pnl"], 2),
+            }
+
+        # SPY trend performance (were trades better in bull vs bear market?)
+        spy_stats = {}
+        for t in sells:
+            trend = t.get("spy_trend", "neutral")
+            if trend not in spy_stats:
+                spy_stats[trend] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+            spy_stats[trend]["trades"]    += 1
+            spy_stats[trend]["total_pnl"] += t.get("pnl_usd", 0)
+            if t.get("pnl_usd", 0) > 0:
+                spy_stats[trend]["wins"] += 1
+
+        spy_summary = {
+            k: {"trades": v["trades"],
+                "win_rate": round(v["wins"]/v["trades"]*100,1) if v["trades"] else 0,
+                "total_pnl": round(v["total_pnl"],2)}
+            for k, v in spy_stats.items()
+        }
+
+        return jsonify({
+            "summary": {
+                "total_closed_trades": total_trades,
+                "total_buys":          len(buys),
+                "win_rate_pct":        win_rate,
+                "total_pnl":           total_pnl,
+                "avg_win":             avg_win,
+                "avg_loss":            avg_loss,
+                "profit_factor":       profit_factor,
+            },
+            "best_trade":      best_trade,
+            "worst_trade":     worst_trade,
+            "by_symbol":       symbol_summary,
+            "by_ai":           ai_summary,
+            "by_strategy":     strat_summary,
+            "by_exit_reason":  reason_counts,
+            "by_spy_trend":    spy_summary,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/leaderboard")
+def leaderboard():
+    """
+    Stock trading performance summary.
+    Claude is the sole decision-maker now — Grok only reviews Claude's
+    proposals (support/risk-check), so there's no more head-to-head
+    competition to score. This reports overall stock performance plus
+    whether Grok's review pass is currently active.
+    """
+    try:
+        closes = [t for t in trade_history
+                  if t.get("pnl_usd") is not None
+                  and not (t.get("symbol") or "").upper().endswith(("USDT", "USDC", "BUSD"))]
+        wins      = sum(1 for t in closes if (t.get("pnl_usd") or 0) > 0)
+        total_pnl = sum(t.get("pnl_usd") or 0 for t in closes)
+        win_rate  = round(wins / len(closes) * 100, 1) if closes else 0.0
+
+        recent_trades = [{
+            "symbol":  t.get("symbol"),
+            "action":  t.get("action"),
+            "pnl_usd": t.get("pnl_usd"),
+            "pnl_pct": t.get("pnl_pct"),
+            "time":    t.get("time"),
+        } for t in closes[-10:]]
+
+        open_positions = len(shared_state.get("claude_positions", [])) + len(shared_state.get("grok_positions", []))
+
+        return jsonify({
+            "decision_model":  "claude_primary_grok_support",
+            "grok_active":     bool(GROK_KEY) and shared_state.get("grok_healthy", True),
+            "reserve":         _get_reserve_info(),
+            "total_pnl":       round(total_pnl, 2),
+            "total_closed":    len(closes),
+            "wins":            wins,
+            "win_rate":        win_rate,
+            "open_positions":  open_positions,
+            "recent_trades":   recent_trades,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _get_reserve_info():
+    """
+    Compute current wallet-scaling reserve based on combined wallet value.
+    Returns dict with combined_wallet, reserve_pct, reserve_usd, label.
+    Pulls live equity numbers — never raises.
+    """
+    try:
+        # Stocks
+        try:
+            acct = alpaca("GET", "/v2/account") or {}
+            stock_eq = float(acct.get("equity", 0) or 0)
+        except Exception:
+            stock_eq = 0.0
+        # Crypto
+        try:
+            wallet = binance_crypto.get_full_wallet() or {}
+            crypto_eq = float(wallet.get("total_value", 0) or 0)
+            usdt_free = float(wallet.get("usdt_free", 0) or 0)
+        except Exception:
+            crypto_eq, usdt_free = 0.0, 0.0
+        combined = stock_eq + crypto_eq
+        pct = binance_crypto.get_wallet_reserve_pct(combined)
+        return {
