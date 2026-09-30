@@ -1498,3 +1498,903 @@ def get_full_wallet() -> dict:
                     "value_usdt":   value_usdt,
                     "in_universe":  in_universe,
                 }
+                positions.append(entry)
+                if in_universe:
+                    tradeable.append(entry)
+                else:
+                    non_tradeable.append(entry)
+            except Exception:
+                # Price lookup failed (rebranded, delisted, no USDT pair)
+                # Still show the holding so user knows it exists
+                entry = {
+                    "asset":       asset,
+                    "symbol":      symbol,
+                    "qty":         qty,
+                    "free":        free,
+                    "locked":      lock,
+                    "price":       0,
+                    "value_usdt":  0,
+                    "in_universe": in_universe,
+                    "note":        "no USDT price — check Binance.US",
+                }
+                positions.append(entry)
+                if in_universe:
+                    tradeable.append(entry)
+                else:
+                    non_tradeable.append(entry)
+
+        # ── BNB (fee discount coin — track separately) ────────
+        bnb_bal  = balances.get("BNB", {})
+        bnb_qty  = float(bnb_bal.get("free", "0")) + float(bnb_bal.get("locked", "0"))
+        bnb_info = None
+        if bnb_qty > 0.0001:
+            try:
+                bnb_price = get_crypto_price("BNBUSDT")
+                bnb_value = round(bnb_qty * bnb_price, 2)
+                total_value += bnb_value
+                bnb_info = {
+                    "asset": "BNB", "qty": bnb_qty,
+                    "price": bnb_price, "value_usdt": bnb_value,
+                    "note": "fee discount coin — holds 5% fee savings",
+                }
+            except Exception:
+                pass
+
+        # ── Sort by value ──────────────────────────────────────
+        positions     = sorted(positions,     key=lambda x: -x["value_usdt"])
+        tradeable     = sorted(tradeable,     key=lambda x: -x["value_usdt"])
+        non_tradeable = sorted(non_tradeable, key=lambda x: -x.get("value_usdt", 0))
+
+        # ── Build wallet summary for AI prompt ────────────────
+        lines = [f"BINANCE.US WALLET (total ~${total_value:.2f} USDT):"]
+        lines.append(f"  💵 Spendable USDT: ${usdt_free:.2f} (locked: ${usdt_total-usdt_free:.2f})")
+        if tradeable:
+            lines.append(f"  🪙 Tradeable holdings ({len(tradeable)}):")
+            for p in tradeable[:6]:
+                lines.append(f"    {p['asset']}: {p['qty']:.4f} = ${p['value_usdt']:.2f} @ ${p['price']:.4f}")
+        if non_tradeable:
+            lines.append(f"  📦 Other holdings ({len(non_tradeable)}) — hold only:")
+            for p in non_tradeable:
+                if p.get("value_usdt", 0) > 0.5:
+                    note = f" ({p['note']})" if p.get("note") else ""
+                    lines.append(f"    {p['asset']}: {p['qty']:.4f} = ${p.get('value_usdt', 0):.2f}{note}")
+                elif p.get("qty", 0) > 0:
+                    note = p.get("note", "no USDT price — check Binance.US")
+                    lines.append(f"    {p['asset']}: {p['qty']:.4f} ({note})")
+        if bnb_info:
+            lines.append(f"  🔶 BNB (fee coin): {bnb_info['qty']:.4f} = ${bnb_info['value_usdt']:.2f}")
+        if stablecoins:
+            other_stable = [s for s in stablecoins if s["asset"] != "USDT"]
+            if other_stable:
+                lines.append(f"  🏦 Other stables: " +
+                             ", ".join(f"{s['asset']}=${s['value_usdt']:.2f}" for s in other_stable))
+
+        wallet_summary = "\n".join(lines)
+
+        return {
+            "usdt_free":      round(usdt_free, 2),
+            "usdt_total":     round(usdt_total, 2),
+            "total_value":    round(total_value, 2),
+            "positions":      positions,
+            "stablecoins":    stablecoins,
+            "tradeable":      tradeable,
+            "non_tradeable":  non_tradeable,
+            "bnb":            bnb_info,
+            "position_count": len(positions),
+            "wallet_summary": wallet_summary,
+        }
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "usdt_free": 0, "usdt_total": 0, "total_value": 0,
+            "positions": [], "stablecoins": [], "tradeable": [],
+            "non_tradeable": [], "wallet_summary": "Wallet read failed",
+        }
+
+def get_crypto_balance() -> dict:
+    """
+    Backwards-compatible wrapper — returns USDT balance + positions.
+    Calls get_full_wallet() internally.
+    """
+    wallet = get_full_wallet()
+    return {
+        "usdt_free":      wallet["usdt_free"],
+        "usdt_total":     wallet["usdt_total"],
+        "positions":      wallet["tradeable"],
+        "position_count": len(wallet["tradeable"]),
+    }
+
+def get_open_crypto_orders(symbol: str = None) -> list:
+    """Get all open orders, optionally filtered by symbol."""
+    params = {}
+    if symbol:
+        params["symbol"] = symbol
+    try:
+        return binance_get("/api/v3/openOrders", params, signed=True)
+    except Exception:
+        return []
+
+def cancel_crypto_order(symbol: str, order_id: int) -> dict:
+    """Cancel an open order."""
+    return binance_delete("/api/v3/order", {"symbol": symbol, "orderId": order_id})
+
+
+# ══════════════════════════════════════════════════════════════
+# ORDER EXECUTION
+# Always limit orders (0% maker fee)
+# ══════════════════════════════════════════════════════════════
+
+def _round_qty(qty: float, symbol: str) -> float:
+    """Round quantity to correct decimal places for each coin."""
+    decimals = CRYPTO_UNIVERSE.get(symbol, {}).get("decimals", 3)
+    return round(qty, decimals)
+
+def _round_qty_step(qty: float, symbol: str) -> float:
+    """
+    Round quantity DOWN to Binance exchange step_size.
+    Uses get_symbol_filters() — same logic as place_crypto_buy.
+    Fixes 400 LOT_SIZE errors on sell orders (e.g. DOTUSDT).
+    """
+    try:
+        filters  = get_symbol_filters(symbol)
+        step     = filters["step_size"]
+        if step > 0:
+            rounded = math.floor(qty / step) * step
+            step_str  = f"{step:.10f}".rstrip('0')
+            decimals  = len(step_str.split('.')[1]) if '.' in step_str else 0
+            return float(f"{rounded:.{decimals}f}")
+    except Exception:
+        pass
+    # Fallback to decimal-based rounding
+    return _round_qty(qty, symbol)
+
+def place_crypto_buy(symbol: str, notional_usdt: float,
+                     limit_price: float = None) -> dict:
+    """
+    Place a MARKET buy order using quoteOrderQty (spend exact USDT).
+    MARKET orders fill instantly — no stuck LIMIT orders.
+    Falls back to qty-based MARKET if quoteOrderQty fails.
+    """
+    # Minimum notional check
+    if notional_usdt < CRYPTO_RULES["min_trade_usdt"]:
+        return {"error": f"Notional ${notional_usdt:.2f} below minimum $10"}
+
+    # Method 1: quoteOrderQty — Binance spends exact USDT, handles qty internally
+    # NOTE: not all Binance.US pairs support quoteOrderQty for MARKET BUY.
+    # We detect success by the presence of 'orderId' in the response dict,
+    # NOT by scanning for "error" substring (which can false-negative if
+    # a valid response happens to contain an 'error' field or if the response
+    # body is a string).
+    try:
+        result = binance_post("/api/v3/order", {
+            "symbol":        symbol,
+            "side":          "BUY",
+            "type":          "MARKET",
+            "quoteOrderQty": str(round(notional_usdt, 2)),
+        })
+        if isinstance(result, dict) and result.get("orderId"):
+            return result
+        # Otherwise fall through to Method 2
+    except Exception:
+        pass  # Fall through to method 2
+
+    # Method 2: qty-based MARKET order (with safety buffer)
+    # ── Apply 0.5% buffer so tiny price ticks between read and fill don't
+    # ── trigger INSUFFICIENT_BALANCE 400 errors. Better to slightly
+    # ── under-spend than to get rejected entirely.
+    try:
+        filters   = get_symbol_filters(symbol)
+        step_size = filters["step_size"]
+        price     = get_crypto_price(symbol)
+        if price <= 0:
+            return {"error": f"Cannot get price for {symbol}"}
+
+        effective_notional = notional_usdt * 0.995  # 0.5% safety buffer
+        raw_qty = effective_notional / price
+
+        import math as _math
+        if step_size > 0:
+            qty_rounded = _math.floor(raw_qty / step_size) * step_size
+            step_str = f"{step_size:.10f}".rstrip('0')
+            decimals = len(step_str.split('.')[1]) if '.' in step_str else 0
+            qty = float(f"{qty_rounded:.{decimals}f}")
+        else:
+            qty = _round_qty(raw_qty, symbol)
+        if qty <= 0:
+            return {"error": f"Quantity rounded to 0 for {symbol}"}
+
+        # Re-check notional: qty * price must still meet minimum
+        est_notional = qty * price
+        if est_notional < CRYPTO_RULES["min_trade_usdt"]:
+            return {"error": f"Buffered qty notional ${est_notional:.2f} below minimum $10 for {symbol}"}
+
+        return binance_post("/api/v3/order", {
+            "symbol":   symbol,
+            "side":     "BUY",
+            "type":     "MARKET",
+            "quantity": str(qty),
+        })
+    except Exception as e:
+        return {"error": str(e)}
+
+# ── Exchange filter cache (tick size / step size per symbol) ──────
+_EXCHANGE_FILTERS: dict = {}   # {symbol: {"tick_size": float, "step_size": float, "min_notional": float}}
+
+def get_symbol_filters(symbol: str) -> dict:
+    """
+    Fetch tick_size and step_size from Binance.US exchangeInfo.
+    Cached per symbol — only fetches once per session.
+    tick_size: minimum price increment (e.g. 0.00000001 for SHIB)
+    step_size: minimum quantity increment
+    """
+    if symbol in _EXCHANGE_FILTERS:
+        return _EXCHANGE_FILTERS[symbol]
+    try:
+        data = binance_get("/api/v3/exchangeInfo", {"symbol": symbol})
+        info = data.get("symbols", [{}])[0]
+        tick_size  = 0.00000001
+        step_size  = 1.0
+        min_notional = 10.0
+        for f in info.get("filters", []):
+            if f["filterType"] == "PRICE_FILTER":
+                tick_size = float(f["tickSize"])
+            elif f["filterType"] == "LOT_SIZE":
+                step_size = float(f["stepSize"])
+            elif f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL"):
+                min_notional = float(f.get("minNotional", f.get("minQty", 10)))
+        result = {"tick_size": tick_size, "step_size": step_size,
+                  "min_notional": min_notional}
+        _EXCHANGE_FILTERS[symbol] = result
+        return result
+    except Exception:
+        return {"tick_size": 0.00000001, "step_size": 1.0, "min_notional": 10.0}
+
+
+def _round_to_tick(price: float, tick_size: float) -> str:
+    """
+    Round price DOWN to nearest tick_size increment.
+    Returns string formatted to correct decimal places.
+    E.g. SHIB tick_size=0.00000001 → price=0.00000621 → '0.00000621'
+    """
+    if tick_size <= 0:
+        tick_size = 0.00000001
+    import math
+    rounded = math.floor(price / tick_size) * tick_size
+    # Determine decimal places from tick_size
+    tick_str   = f"{tick_size:.10f}".rstrip('0')
+    if '.' in tick_str:
+        decimals = len(tick_str.split('.')[1])
+    else:
+        decimals = 0
+    return f"{rounded:.{decimals}f}"
+
+
+def get_live_asset_balance(symbol: str) -> float:
+    """
+    Fetch the CURRENT free balance of the base asset from Binance.
+    Critical before every SELL — tracked qty may differ from wallet qty
+    due to commission fees deducted at buy time.
+    
+    Example: Buy 255.9 KAVA → Binance takes 1.5 KAVA as fee → wallet holds 254.39
+    If bot tries to sell 255.9, Binance rejects with 400.
+    
+    Returns 0.0 on any failure (caller should handle).
+    """
+    try:
+        # Extract base asset (KAVAUSDT → KAVA, BTCUSDT → BTC, etc.)
+        base_asset = symbol.replace("USDT", "").replace("USDC", "").replace("BUSD", "")
+        if not base_asset:
+            return 0.0
+        data = binance_get("/api/v3/account", signed=True)
+        balances = {b["asset"]: b for b in data.get("balances", [])}
+        free = float(balances.get(base_asset, {}).get("free", 0))
+        return free
+    except Exception as e:
+        print(f"[CRYPTO] ⚠️ get_live_asset_balance({symbol}) failed: {e}", flush=True)
+        return 0.0
+
+
+def reconcile_ghost_exit(symbol: str, entry_time) -> dict:
+    """
+    A tracked position's live Binance balance dropped to zero/dust without
+    the bot selling it — almost always a broker-side STOP_LOSS order that
+    filled directly on the exchange (survives bot restarts/redeploys by
+    design). Query Binance's own fill history since entry to recover the
+    real exit price/qty/fees so the loss can still be recorded, instead of
+    the position just vanishing from trade history.
+
+    Returns {} if no matching SELL fill is found (caller should fall back
+    to an estimate using the current mark price rather than lose the
+    trade entirely).
+    """
+    try:
+        start_ms = int(entry_time.timestamp() * 1000)
+        trades = binance_get("/api/v3/myTrades",
+                              {"symbol": symbol, "startTime": start_ms, "limit": 100},
+                              signed=True)
+        sells = [t for t in (trades or [])
+                 if not t.get("isBuyer") and float(t.get("qty", 0)) > 0]
+        if not sells:
+            return {}
+        total_qty   = sum(float(t["qty"]) for t in sells)
+        total_quote = sum(float(t["quoteQty"]) for t in sells)
+        total_fee   = sum(float(t.get("commission", 0)) for t in sells
+                           if t.get("commissionAsset") in ("USDT", "USD", "USDC"))
+        if total_qty <= 0:
+            return {}
+        return {
+            "qty":             total_qty,
+            "avg_price":       total_quote / total_qty,
+            "gross_proceeds":  total_quote,
+            "fee_usd":         total_fee,
+            "last_fill_time":  max(int(t["time"]) for t in sells),
+        }
+    except Exception as e:
+        print(f"[CRYPTO] ⚠️ reconcile_ghost_exit({symbol}) failed: {e}", flush=True)
+        return {}
+
+
+def place_crypto_sell(symbol: str, qty: float,
+                      limit_price: float = None,
+                      force_limit: bool = False) -> dict:
+    """
+    Sell crypto. DEFAULTS TO MARKET ORDER — fills immediately at best bid.
+    
+    Per NOVATRADE_MASTER.md: "LIMIT orders on crypto cause PRICE_FILTER
+    rejections — all sell paths use MARKET orders." Resting limits above
+    market price sit unfilled, locking balance and getting re-stacked by
+    every AI cycle. MARKET is the correct default.
+    
+    Pass force_limit=True only when you explicitly want a resting limit
+    order (e.g. a TP ladder placed deliberately above market).
+    
+    CRITICAL: Fetches LIVE wallet balance before sending order.
+    Binance takes commission at BUY time so wallet may hold LESS than
+    the purchase amount. Selling the full purchase qty will fail with 400.
+    """
+    # ── Live balance check — prevent 400 errors from commission deductions ──
+    live_balance = get_live_asset_balance(symbol)
+    if live_balance > 0:
+        # ── Dust check: if remaining balance is below min-notional, ────
+        # ── treat it as ZERO. Otherwise we spam logs every cycle and
+        # ── potentially get MIN_NOTIONAL 400s from Binance.
+        try:
+            cur_price = get_crypto_price(symbol)
+            est_value = live_balance * cur_price if cur_price > 0 else 0
+        except Exception:
+            est_value = 0
+        if 0 < est_value < 1.5:  # below $1.50 = dust (Binance min notional is $10)
+            print(f"[CRYPTO]    🧹 {symbol}: dust balance {live_balance:.8f} "
+                  f"(~${est_value:.4f}) — too small to sell, treating as zero", flush=True)
+            return {"error": "DUST_BALANCE", "symbol": symbol,
+                    "requested_qty": qty, "live_balance": live_balance,
+                    "est_value": est_value}
+        if live_balance < qty:
+            print(f"[CRYPTO]    💡 {symbol}: requested sell qty {qty} > live balance {live_balance:.8f}", flush=True)
+            print(f"[CRYPTO]       Using live balance (commission was deducted at buy)", flush=True)
+            qty = live_balance * 0.9995  # 0.05% safety buffer for rounding
+    elif live_balance == 0:
+        print(f"[CRYPTO]    ⚠️ {symbol}: live balance = 0 — skipping sell (nothing to sell)", flush=True)
+        return {"error": "ZERO_BALANCE", "symbol": symbol, "requested_qty": qty}
+
+    qty_r = _round_qty_step(qty, symbol)
+    if qty_r <= 0:
+        return {"error": "QTY_ROUNDED_TO_ZERO", "symbol": symbol, "requested_qty": qty}
+
+    # ── DEFAULT PATH: MARKET order (fills immediately) ──────────
+    if not force_limit:
+        return binance_post("/api/v3/order", {
+            "symbol":   symbol,
+            "side":     "SELL",
+            "type":     "MARKET",
+            "quantity": qty_r,
+        })
+
+    # ── LIMIT path — only when caller explicitly requests it ────
+    filters   = get_symbol_filters(symbol)
+    tick_size = filters["tick_size"]
+
+    if not limit_price or limit_price <= 0:
+        try:
+            limit_price = get_crypto_price(symbol) * 1.0015
+        except Exception:
+            # No price at all — fallback to MARKET
+            return binance_post("/api/v3/order", {
+                "symbol":   symbol,
+                "side":     "SELL",
+                "type":     "MARKET",
+                "quantity": qty_r,
+            })
+
+    price_str = _round_to_tick(limit_price, tick_size)
+
+    # Safety: never send price=0.0000...
+    if float(price_str) <= 0:
+        return binance_post("/api/v3/order", {
+            "symbol":   symbol,
+            "side":     "SELL",
+            "type":     "MARKET",
+            "quantity": qty_r,
+        })
+
+    return binance_post("/api/v3/order", {
+        "symbol":      symbol,
+        "side":        "SELL",
+        "type":        "LIMIT",
+        "timeInForce": "GTC",
+        "quantity":    qty_r,
+        "price":       price_str,
+    })
+
+def place_crypto_stop_market(symbol: str, qty: float,
+                              stop_price: float) -> dict:
+    """
+    Place a stop-loss market order for emergency exits.
+    Used only when price hits stop — uses market order (0.01% taker fee).
+    
+    Like place_crypto_sell, fetches LIVE wallet balance first to prevent
+    400 errors from commission-deducted holdings.
+    """
+    # ── Live balance check ──
+    live_balance = get_live_asset_balance(symbol)
+    if live_balance > 0:
+        # Dust check (same threshold as place_crypto_sell)
+        try:
+            cur_price = get_crypto_price(symbol)
+            est_value = live_balance * cur_price if cur_price > 0 else 0
+        except Exception:
+            est_value = 0
+        if 0 < est_value < 1.5:
+            print(f"[CRYPTO]    🧹 {symbol}: dust balance {live_balance:.8f} "
+                  f"(~${est_value:.4f}) — too small to place stop", flush=True)
+            return {"error": "DUST_BALANCE", "symbol": symbol,
+                    "live_balance": live_balance, "est_value": est_value}
+        if live_balance < qty:
+            print(f"[CRYPTO]    💡 {symbol}: stop qty {qty} > live balance {live_balance:.8f} — using live balance", flush=True)
+            qty = live_balance * 0.9995
+    elif live_balance == 0:
+        print(f"[CRYPTO]    ⚠️ {symbol}: live balance = 0 — cannot place stop", flush=True)
+        return {"error": "ZERO_BALANCE", "symbol": symbol}
+    
+    qty     = _round_qty_step(qty, symbol)
+    filters = get_symbol_filters(symbol)
+    stop_str = _round_to_tick(stop_price, filters["tick_size"])
+    return binance_post("/api/v3/order", {
+        "symbol":    symbol,
+        "side":      "SELL",
+        "type":      "STOP_LOSS",
+        "timeInForce": "GTC",
+        "quantity":  qty,
+        "stopPrice": stop_str,
+    })
+
+
+# ══════════════════════════════════════════════════════════════
+# POSITION MANAGEMENT
+# ══════════════════════════════════════════════════════════════
+
+class CryptoPosition:
+    """Tracks a single open crypto position with exit strategy."""
+
+    def __init__(self, symbol, qty, entry_price, entry_time,
+                 stop_pct=None, tp_price=None, owner="shared",
+                 strategy_type="classic", turtle_system=1,
+                 atr_at_entry=None, stop_price_override=None):
+        self.symbol       = symbol
+        self.qty          = qty
+        self.entry_price  = entry_price
+        self.entry_time   = entry_time
+        self.stop_pct     = stop_pct or CRYPTO_RULES["stop_loss_pct"]
+        # Turtle uses 2N stop (absolute price). Classic uses % stop.
+        if stop_price_override is not None and stop_price_override > 0:
+            self.stop_price = round(stop_price_override, 6)
+        else:
+            self.stop_price = round(entry_price * (1 - self.stop_pct), 4)
+        self.tp_price     = tp_price or round(entry_price * (1 + CRYPTO_RULES["take_profit_pct"]), 4)
+        self.owner        = owner
+        self.peak_price   = entry_price
+        self.exit_order_id = None
+        # ── Turtle metadata ─────────────────────────────────────
+        self.strategy_type = strategy_type      # "turtle" or "classic"
+        self.turtle_system = turtle_system      # 1 (20/10) or 2 (55/20)
+        self.atr_at_entry  = atr_at_entry       # N for 2N stop checks
+
+    def update(self, current_price: float):
+        """Update peak price for trailing logic."""
+        if current_price > self.peak_price:
+            self.peak_price = current_price
+
+    def hours_held(self) -> float:
+        """How many hours since entry."""
+        delta = datetime.now(timezone.utc) - self.entry_time
+        return delta.total_seconds() / 3600
+
+    def pnl_pct(self, current_price: float) -> float:
+        return round((current_price - self.entry_price) / self.entry_price * 100, 2)
+
+    def should_stop(self, current_price: float) -> bool:
+        # Works for both Classic (% stop_price) and Turtle (2N stop_price)
+        return current_price <= self.stop_price
+
+    def should_take_profit(self, current_price: float) -> bool:
+        # Turtle has NO take-profit — only Donchian breakdown or 2N stop
+        if self.strategy_type == "turtle":
+            return False
+        return current_price >= self.tp_price
+
+    def should_time_exit(self) -> bool:
+        # Turtle holds until exit signal — no time stop
+        if self.strategy_type == "turtle":
+            return False
+        return self.hours_held() >= CRYPTO_RULES["max_hold_hours"]
+
+    def should_turtle_donchian_exit(self) -> dict:
+        """
+        Check Donchian breakdown exit for Turtle positions.
+        Returns {"should_exit": bool, "reason": str, "exit_level": float|None}.
+        Returns inactive shape for non-Turtle positions.
+        """
+        if self.strategy_type != "turtle" or not self.atr_at_entry:
+            return {"should_exit": False, "reason": "not turtle", "exit_level": None}
+        try:
+            return turtle_check_exit(self.symbol, self.entry_price,
+                                    self.atr_at_entry, system=self.turtle_system)
+        except Exception as e:
+            return {"should_exit": False, "reason": f"check failed: {e}", "exit_level": None}
+
+    def to_dict(self) -> dict:
+        return {
+            "symbol":       self.symbol,
+            "qty":          self.qty,
+            "entry_price":  self.entry_price,
+            "stop_price":   self.stop_price,
+            "tp_price":     self.tp_price,
+            "owner":        self.owner,
+            "peak_price":   self.peak_price,
+            "hours_held":   round(self.hours_held(), 1),
+            "strategy_type": self.strategy_type,
+            "turtle_system": self.turtle_system,
+            "atr_at_entry":  self.atr_at_entry,
+        }
+
+
+# ══════════════════════════════════════════════════════════════
+# MAIN CRYPTO TRADER CLASS
+# ══════════════════════════════════════════════════════════════
+
+
+def get_funding_rates(symbols: list) -> dict:
+    """
+    Fetch perpetual futures funding rates from Binance.US.
+    Free — we're already connected to Binance API.
+    Funding rate interpretation:
+      > +0.01% per 8h = longs paying shorts = crowded long = reversal risk
+      < -0.01% per 8h = shorts paying longs = short squeeze potential
+      Near 0 = balanced market, no strong bias
+    Returns {symbol: {"rate": float, "signal": str}}
+    """
+    rates = {}
+    for sym in symbols:
+        try:
+            perp_sym = sym if sym.endswith("USDT") else sym + "USDT"
+            resp = binance_get(
+                "/fapi/v1/fundingRate",
+                {"symbol": perp_sym, "limit": 1}
+            )
+            if resp and isinstance(resp, list) and resp:
+                rate = float(resp[0].get("fundingRate", 0)) * 100  # Convert to %
+                if rate > 0.05:
+                    signal = "HIGH_FUNDING — crowded longs, reversal risk"
+                elif rate > 0.01:
+                    signal = "ELEVATED_FUNDING — slight long bias"
+                elif rate < -0.01:
+                    signal = "NEGATIVE_FUNDING — shorts dominant, squeeze possible"
+                else:
+                    signal = "NEUTRAL_FUNDING — balanced market"
+                rates[sym] = {"rate_pct": round(rate, 4), "signal": signal}
+        except Exception:
+            continue
+    return rates
+
+class CryptoTrader:
+    """
+    24/7 crypto trading engine for NovaTrade.
+    Initialized once at module level in bot_with_proxy.py.
+    Runs independently from stock trading cycle.
+    """
+
+    def __init__(self):
+        self.positions      = {}
+        self.trade_history  = []
+        self.last_cycle     = None
+        self.total_pnl      = 0.0
+        self.wins           = 0
+        self.losses         = 0
+        self.cycle_count    = 0
+        self._projections   = {}
+        self._wallet_cache  = None   # Latest get_full_wallet() result — for BNB detection
+        self._enabled       = bool(BINANCE_KEY and BINANCE_SECRET)
+        self.staking        = StakingManager()
+        self._shared_state  = None   # Injected by bot on init
+
+        if self._enabled:
+            self._log("🔐 Binance.US API keys found — crypto trading ENABLED")
+            self._log("🔒 Staking manager initialized — reviews every 12 hours")
+        else:
+            self._log("⚠️ BINANCE_KEY or BINANCE_SECRET missing — crypto trading DISABLED")
+            self._log("   Add BINANCE_KEY and BINANCE_SECRET to Railway variables")
+
+    def update_crypto_baselines(self, wallet_value: float):
+        """Update day/week/month/year start baselines on rollover."""
+        if not self._shared_state:
+            return
+        ss = self._shared_state
+        from datetime import datetime as _dt
+        now       = _dt.now()
+        cur_day   = now.strftime("%Y-%m-%d")
+        cur_week  = now.strftime("%Y-W%W")
+        cur_month = now.strftime("%Y-%m")
+        cur_year  = now.strftime("%Y")
+
+        if not ss.get("crypto_last_day"):
+            ss["crypto_day_start"]   = wallet_value
+            ss["crypto_week_start"]  = wallet_value
+            ss["crypto_month_start"] = wallet_value
+            ss["crypto_year_start"]  = wallet_value
+
+        if ss.get("crypto_last_day") != cur_day:
+            ss["crypto_day_start"]  = wallet_value
+            ss["crypto_last_day"]   = cur_day
+        if ss.get("crypto_last_week") != cur_week:
+            ss["crypto_week_start"] = wallet_value
+            ss["crypto_last_week"]  = cur_week
+        if ss.get("crypto_last_month") != cur_month:
+            ss["crypto_month_start"] = wallet_value
+            ss["crypto_last_month"]  = cur_month
+        if ss.get("crypto_last_year") != cur_year:
+            ss["crypto_year_start"] = wallet_value
+            ss["crypto_last_year"]  = cur_year
+
+    def format_crypto_gains(self, wallet_value: float) -> str:
+        """Return a one-line crypto gains summary."""
+        if not self._shared_state:
+            return ""
+        ss = self._shared_state
+
+        def _g(start):
+            if not start or start <= 0:
+                return "⬜ $+0.00 (+0.0%)"
+            diff = wallet_value - start
+            pct  = diff / start * 100
+            icon = "🟢" if diff > 0 else "🔴" if diff < 0 else "⬜"
+            return f"{icon} ${diff:+.2f} ({pct:+.1f}%)"
+
+        d = ss.get("crypto_day_start",   wallet_value)
+        w = ss.get("crypto_week_start",  wallet_value)
+        m = ss.get("crypto_month_start", wallet_value)
+        y = ss.get("crypto_year_start",  wallet_value)
+        return (f"🪙 Gains  Day: {_g(d)}"
+                f"  Week: {_g(w)}"
+                f"  Month: {_g(m)}"
+                f"  YTD: {_g(y)}")
+
+    def get_ai_leaderboard(self, trade_history_ref=None) -> dict:
+        """
+        Tally crypto-only realized P&L by AI owner from trade history.
+        Returns per-AI win rate, trade count, total P&L, and identifies
+        the current leader. Used for both the cycle log line and the
+        /leaderboard Flask endpoint.
+        """
+        # Use injected trade_history if provided, else try module-level
+        if trade_history_ref is None:
+            trade_history_ref = []
+
+        # Crypto trades = symbol ends in USDT (or USDC/BUSD/USD pairs)
+        # AND has a realized pnl_usd (closed position)
+        def _is_crypto_close(t):
+            sym = (t.get("symbol") or "").upper()
+            return (t.get("pnl_usd") is not None
+                    and sym.endswith(("USDT", "USDC", "BUSD"))
+                    and t.get("action") in ("sell", "stop_loss", "take_profit",
+                                            "trail_stop", "time_stop"))
+
+        crypto_closes = [t for t in trade_history_ref if _is_crypto_close(t)]
+
+        stats = {"claude": {"trades": 0, "wins": 0, "losses": 0,
+                            "total_pnl": 0.0, "best": None, "worst": None,
+                            "open_positions": 0},
+                 "grok":   {"trades": 0, "wins": 0, "losses": 0,
+                            "total_pnl": 0.0, "best": None, "worst": None,
+                            "open_positions": 0},
+                 "shared": {"trades": 0, "wins": 0, "losses": 0,
+                            "total_pnl": 0.0, "best": None, "worst": None,
+                            "open_positions": 0}}
+
+        for t in crypto_closes:
+            owner = (t.get("owner") or "shared").lower()
+            if owner not in stats:
+                continue
+            pnl = float(t.get("pnl_usd", 0))
+            stats[owner]["trades"]    += 1
+            stats[owner]["total_pnl"] += pnl
+            if pnl > 0:
+                stats[owner]["wins"] += 1
+            else:
+                stats[owner]["losses"] += 1
+            best = stats[owner]["best"]
+            worst = stats[owner]["worst"]
+            if best is None or pnl > float(best.get("pnl_usd", 0)):
+                stats[owner]["best"]  = t
+            if worst is None or pnl < float(worst.get("pnl_usd", 0)):
+                stats[owner]["worst"] = t
+
+        # Count open positions per owner from live state
+        for sym, pos in self.positions.items():
+            owner = (pos.owner or "shared").lower()
+            if owner in stats:
+                stats[owner]["open_positions"] += 1
+
+        # Compute win rate + round
+        for owner, s in stats.items():
+            s["win_rate"] = round(s["wins"] / s["trades"] * 100, 1) if s["trades"] else 0.0
+            s["total_pnl"] = round(s["total_pnl"], 2)
+
+        # Identify leader (Claude vs Grok only — "shared" doesn't compete)
+        c_pnl = stats["claude"]["total_pnl"]
+        g_pnl = stats["grok"]["total_pnl"]
+        if stats["claude"]["trades"] == 0 and stats["grok"]["trades"] == 0:
+            leader     = "tie"
+            margin     = 0.0
+            leader_emoji = "🤝"
+        elif c_pnl > g_pnl:
+            leader     = "claude"
+            margin     = round(c_pnl - g_pnl, 2)
+            leader_emoji = "🔵"
+        elif g_pnl > c_pnl:
+            leader     = "grok"
+            margin     = round(g_pnl - c_pnl, 2)
+            leader_emoji = "🔴"
+        else:
+            leader     = "tie"
+            margin     = 0.0
+            leader_emoji = "🤝"
+
+        return {
+            "claude":       stats["claude"],
+            "grok":         stats["grok"],
+            "shared":       stats["shared"],
+            "leader":       leader,
+            "leader_emoji": leader_emoji,
+            "margin_usd":   margin,
+            "total_closed": len(crypto_closes),
+        }
+
+    def format_leaderboard_line(self, trade_history_ref=None) -> str:
+        """One-line leaderboard for cycle summary log."""
+        lb = self.get_ai_leaderboard(trade_history_ref)
+        c, g = lb["claude"], lb["grok"]
+
+        def _ai_str(name, s):
+            if s["trades"] == 0:
+                return f"{name}: no closes yet ({s['open_positions']} open)"
+            sign = "+" if s["total_pnl"] >= 0 else ""
+            return (f"{name}: {sign}${s['total_pnl']:.2f} "
+                    f"({s['wins']}W/{s['losses']}L, {s['win_rate']:.0f}% WR, "
+                    f"{s['open_positions']} open)")
+
+        leader_str = ""
+        if lb["leader"] == "claude":
+            leader_str = f" 👑 Claude leads by ${lb['margin_usd']:.2f}"
+        elif lb["leader"] == "grok":
+            leader_str = f" 👑 Grok leads by ${lb['margin_usd']:.2f}"
+        elif c["trades"] + g["trades"] > 0:
+            leader_str = " 🤝 Tied"
+
+        return (f"🏆 Leaderboard | 🔵 {_ai_str('Claude', c)} | "
+                f"🔴 {_ai_str('Grok', g)}{leader_str}")
+
+    def _log(self, msg: str):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{now}] [CRYPTO] {msg}", flush=True)
+
+    def is_enabled(self) -> bool:
+        return self._enabled
+
+    # ── CRYPTO POOL SIZING ──────────────────────────────────
+    def get_crypto_pool(self, total_equity: float = 0) -> float:
+        """
+        How much USDT is available for crypto trading.
+        Uses the ACTUAL Binance.US USDT balance — completely independent
+        of Alpaca equity. The wallets are separate accounts.
+        total_equity param kept for API compatibility but ignored.
+        """
+        try:
+            wallet = get_full_wallet()
+            return wallet.get("usdt_free", 0.0)
+        except Exception:
+            return 0.0
+
+    # ── AUTONOMOUS EXIT MONITOR ─────────────────────────────
+    def run_exit_monitor(self, record_trade_fn=None, prompt_builder=None) -> int:
+        """
+        Check all open positions for stop/TP/time exit + trail stop.
+        Runs every 5-min tick — no AI needed.
+        Trail stop activates at +30% gain, trails 40% from peak.
+        Also auto-cancels stale unfilled orders (BUY >30min, SELL >60min).
+        record_trade_fn: pass bot's record_trade so exits are saved to history.
+        """
+        if not self._enabled:
+            return 0
+
+        # ── Auto-cancel stale unfilled orders ─────────────────
+        try:
+            all_open = get_open_crypto_orders()
+            for order in (all_open or []):
+                side       = order.get("side", "")
+                status     = order.get("status", "")
+                symbol     = order.get("symbol", "")
+                order_id   = order.get("orderId")
+                order_time = order.get("time", 0)
+                filled_qty = float(order.get("executedQty", 0))
+                orig_qty   = float(order.get("origQty", 0))
+                price      = float(order.get("price", 0))
+
+                if status != "NEW" or filled_qty > 0:
+                    continue
+
+                # Protective STOP_LOSS orders rest at the broker by design
+                # (survive bot outages) — never auto-cancel them as stale.
+                if "STOP" in order.get("type", ""):
+                    continue
+
+                age_mins = (time.time() * 1000 - order_time) / 60000
+                threshold = 30 if side == "BUY" else 60
+                if age_mins < threshold:
+                    continue
+
+                try:
+                    cancel_crypto_order(symbol, order_id)
+                    self._log(
+                        f"   🗑️ Cancelled stale {side} order: {symbol} "
+                        f"{orig_qty} @ ${price:.6f} | age={age_mins:.0f}min"
+                    )
+                except Exception as ce:
+                    self._log(f"   ⚠️ Cancel failed {symbol} {order_id}: {ce}")
+        except Exception as oe:
+            self._log(f"   ⚠️ Open order check failed: {oe}")
+
+        if not self.positions:
+            return 0
+
+        # ── Quick-flip take-profit tier (computed once per cycle, not
+        # per-position, to avoid extra API calls). Falls back to None
+        # (no override — existing 8% tp_price stands) on any failure.
+        quick_tp = None
+        try:
+            wallet_value = get_full_wallet().get("total_value", 0)
+            quick_tp = get_crypto_quick_take_profit_pct(wallet_value)
+        except Exception as we:
+            self._log(f"   ⚠️ Quick-TP wallet lookup failed: {we}")
+
+        exits = 0
+        for symbol, pos in list(self.positions.items()):
+            try:
+                current = get_crypto_price(symbol)
+
+                # ── Ghost position cleanup ───────────────────────
+                # If wallet balance for this symbol is dust ($ < $1.50)
+                # or zero, the position was sold outside the bot — almost
+                # always a broker-side STOP_LOSS order filling directly on
+                # Binance. Reconcile against Binance's own fill history so
+                # the loss still lands in trade history/performance/the
+                # AI's memory instead of vanishing (see reconcile_ghost_exit).
+                try:
+                    asset = symbol.replace("USDT", "")
+                    live_qty = get_live_asset_balance(symbol)
+                    live_val = live_qty * current if current > 0 else 0
+                    if live_qty == 0 or 0 < live_val < 1.5:
+                        recon = reconcile_ghost_exit(symbol, pos.entry_time)
+                        if recon:
+                            pnl_usd = round(recon["gross_proceeds"] - recon["fee_usd"]
+                                             - pos.entry_price * recon["qty"], 2)
