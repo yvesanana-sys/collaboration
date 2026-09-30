@@ -2498,3 +2498,503 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                             log(f"   📊 {symbol} bid=${bid_price} ask=${ask_price} "
                                 f"spread={spread_pct}% → limit=${limit_price}")
                 except Exception as eq:
+                    log(f"   ⚠️ Quote fetch failed for {symbol}: {eq} — using market order")
+
+                # Use limit order if we got a price, otherwise fall back to market
+                if limit_price and limit_price > 0:
+                    # Convert notional to shares for limit order
+                    shares = round(notional / limit_price, 6)
+                    if shares > 0:
+                        order = alpaca("POST", "/v2/orders", {
+                            "symbol":        symbol,
+                            "qty":           str(shares),
+                            "side":          "buy",
+                            "type":          "limit",
+                            "limit_price":   str(limit_price),
+                            "time_in_force": "day",  # Cancels if not filled by close
+                        })
+                        log(f"✅ LIMIT BUY [{owner}] {symbol} {shares} shares @ ${limit_price} "
+                            f"(~${notional:.2f}) | conf={conf}% | {order['id'][:8]}...")
+                        record_trade("buy", symbol, shares, limit_price, notional,
+                                     owner, confidence=conf, reason="limit order",
+                                     strategy=trade.get("exit_strategy","A"))
+                        record_intraday_buy(symbol)  # PDT tracking
+                    else:
+                        raise Exception("Calculated 0 shares")
+                else:
+                    # Fallback to market order
+                    order = alpaca("POST", "/v2/orders", {
+                        "symbol": symbol, "notional": str(round(notional, 2)),
+                        "side": "buy", "type": "market", "time_in_force": "day",
+                    })
+                    log(f"✅ MARKET BUY [{owner}] {symbol} ${notional:.2f} | "
+                        f"conf={conf}% | fee≈${fee_est:.3f} | {order['id'][:8]}...")
+                    record_trade("buy", symbol, None, None, notional,
+                                 owner, confidence=conf, reason="market order",
+                                 strategy=trade.get("exit_strategy","A"))
+
+                remaining_cash -= notional; new_positions += 1
+                if owner == "claude" and symbol not in shared_state["claude_positions"]:
+                    shared_state["claude_positions"].append(symbol)
+                elif owner == "grok" and symbol not in shared_state["grok_positions"]:
+                    shared_state["grok_positions"].append(symbol)
+                pos_symbols.append(symbol)
+
+                # ── ASSIGN EXIT STRATEGY ──────────────────
+                # Get current price for entry tracking
+                try:
+                    bars = get_bars(symbol, days=10)
+                    ind  = compute_indicators(bars) if bars else None
+                    entry_px = limit_price if limit_price else (ind["close"] if ind else notional/10)
+                    is_collab = trade.get("is_collab", False)
+
+                    # If we came through the Turtle gate, override the
+                    # exit strategy to T regardless of what the AI proposed.
+                    if turtle_pre_entry and turtle_pre_entry.get("eligible"):
+                        rationale = f"Turtle System 1 breakout — {turtle_pre_entry.get('reason','')[:60]}"
+                        log(f"🐢 {symbol}: Turtle position armed — ATR=${turtle_pre_entry['atr']:.2f}, "
+                            f"2N stop=${turtle_pre_entry['stop_price']:.2f}")
+                        assign_exit_strategy(symbol, "T", entry_px,
+                                            trade.get("confidence", 80), rationale,
+                                            atr_at_entry=turtle_pre_entry.get("atr"),
+                                            donchian_high=turtle_pre_entry.get("donchian_high"),
+                                            system=1)
+                    elif is_collab:
+                        # Collaborative trades: use strategy stored in trade data
+                        # (agreed by both AIs in Round 3)
+                        strat   = trade.get("exit_strategy", "A")
+                        rationale = trade.get("exit_rationale", "collaborative trade")
+                        assign_exit_strategy(symbol, strat, entry_px,
+                                            trade.get("confidence", 80), rationale)
+                    else:
+                        # Autonomous trades: AI decides based on signals
+                        strat, rationale = decide_exit_strategy_solo(
+                            symbol, trade, bars, ind
+                        )
+                        assign_exit_strategy(symbol, strat, entry_px,
+                                            trade.get("confidence", 80), rationale)
+                except Exception as ex:
+                    log(f"⚠️ Exit strategy assign failed: {ex} — defaulting to A")
+                    assign_exit_strategy(symbol, "A", notional/10, 80, "default")
+
+                # ── Broker-side protective stop (survives bot outages).
+                # Runs after exit-strategy assignment so Turtle positions
+                # get their 2N stop. Unfilled buys are covered later by
+                # ensure_protective_stops.
+                _arm_stop_after_buy(order, symbol, limit_price or 0)
+
+            except Exception as e: log(f"❌ Buy {symbol}: {e}")
+
+        elif action == "short":
+            if not can_short:
+                pct  = features.get("short_progress_pct", 0)
+                left = features.get("until_short", 2000)
+                log(f"🔒 SHORT {symbol} locked — need ${left:.0f} more ({pct}% to $2k)")
+                if symbol not in shared_state["bearish_watchlist"]:
+                    shared_state["bearish_watchlist"].append(symbol)
+                    log(f"   📋 Added to bearish watchlist: {shared_state['bearish_watchlist']}")
+                continue
+            if symbol in pos_symbols:
+                log(f"⚠️ Already long {symbol} — can't short"); continue
+            notional = min(notional, remaining_cash * 0.90, max_for_owner)
+            if notional < 8: continue
+            try:
+                order = alpaca("POST", "/v2/orders", {
+                    "symbol": symbol, "notional": str(round(notional, 2)),
+                    "side": "sell", "type": "market", "time_in_force": "day",
+                })
+                log(f"✅ REAL SHORT [{owner}] {symbol} ${notional:.2f} | conf={conf}% | {order['id'][:8]}...")
+                remaining_cash -= notional; new_positions += 1
+                sym_short = f"{symbol}_SHORT"
+                if owner == "claude": shared_state["claude_positions"].append(sym_short)
+                elif owner == "grok": shared_state["grok_positions"].append(sym_short)
+            except Exception as e: log(f"❌ Short {symbol}: {e}")
+
+        elif action == "sell":
+            if symbol not in pos_symbols:
+                log(f"⚠️ No position in {symbol}"); continue
+            try:
+                pos_data = next((p for p in positions if p["symbol"] == symbol), {})
+                if smart_sell(symbol, f"AI sell signal (conf={conf}%)", pos_data):
+                    record_trade("sell", symbol, None, None, None,
+                                 owner, confidence=conf, reason="AI decision")
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    pos_symbols.remove(symbol)
+                else:
+                    log(f"⚠️ smart_sell failed for {symbol} — all 4 methods tried")
+            except Exception as e: log(f"❌ Sell {symbol}: {e}")
+
+
+
+# [classify_ai_error → moved to ai_clients.py]
+# [safe_ask_claude → moved to ai_clients.py]
+# [safe_ask_grok → moved to ai_clients.py]
+# [check_ai_health → moved to ai_clients.py]
+def get_cash_thresholds(equity):
+    """Return cash thresholds (sleep/watch/active) scaled to equity."""
+    sleep_thresh = RULES["cash_sleep_threshold"]  # Always $8
+
+    if equity < 500:
+        # Maximize cash use while the account is small: wake for a real
+        # decision cycle as soon as there's enough cash to size a trade
+        # (min trade is $8), instead of waiting for it to build up to the
+        # standard $20-30 watch/active bands — that left cash sitting
+        # idle for cycles at a time. Reverts to standard scaling at $500+.
+        watch_thresh  = 12.0
+        active_thresh = 15.0
+    else:
+        watch_thresh  = max(
+            RULES["threshold_floor"],
+            round(equity * RULES["threshold_equity_pct"], 2)
+        )
+        active_thresh = round(watch_thresh * RULES["threshold_active_mult"], 2)
+
+    return {
+        "sleep":  sleep_thresh,
+        "watch":  watch_thresh,
+        "active": active_thresh,
+    }
+
+def run_autopilot(positions, pos_symbols, cash, equity):
+    """
+    Rule-based autopilot — fires when BOTH AIs are unavailable.
+    Uses pure technical signals only — no AI calls needed.
+    Conservative: only acts on very clear signals.
+
+    BUY signal:  RSI < 35 AND MACD positive AND price > SMA20
+    SELL signal: RSI > 70 OR stop-loss hit OR take-profit hit
+    """
+    log("🤖 AUTOPILOT MODE — Pure technical rules, no AI calls")
+    log(f"   Rules: BUY if RSI<{RULES['autopilot_rsi_buy']} + MACD+ | SELL if RSI>{RULES['autopilot_rsi_sell']}")
+
+    tp_target = get_quick_take_profit_pct(equity) or RULES["take_profit_pct"]
+
+    # Check exits first
+    for pos in positions:
+        symbol  = pos["symbol"]
+        pnl_pct = float(pos["unrealized_plpc"])
+        if pnl_pct >= tp_target:
+            log(f"🎯 AUTOPILOT take-profit: {symbol} +{pnl_pct*100:.1f}% >= {tp_target*100:.1f}%")
+            try:
+                cancel_stock_orders(symbol, "(before autopilot TP close)")
+                alpaca("DELETE", f"/v2/positions/{symbol}")
+                record_trade("take_profit", symbol, pos.get("qty"), float(pos.get("current_price",0)),
+                             float(pos.get("market_value",0)), "bot",
+                             reason="autopilot take-profit",
+                             pnl_usd=float(pos.get("unrealized_pl",0)),
+                             pnl_pct=pnl_pct, strategy="autopilot")
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                log(f"✅ AUTOPILOT SOLD {symbol}")
+            except Exception as e: log(f"❌ {e}")
+        elif pnl_pct <= -RULES["stop_loss_pct"]:
+            log(f"🛑 AUTOPILOT stop-loss: {symbol} {pnl_pct*100:.1f}%")
+            try:
+                cancel_stock_orders(symbol, "(before autopilot SL close)")
+                alpaca("DELETE", f"/v2/positions/{symbol}")
+                record_trade("stop_loss", symbol, pos.get("qty"), float(pos.get("current_price",0)),
+                             float(pos.get("market_value",0)), "bot",
+                             reason="autopilot stop-loss",
+                             pnl_usd=float(pos.get("unrealized_pl",0)),
+                             pnl_pct=pnl_pct, strategy="autopilot")
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                log(f"✅ AUTOPILOT SOLD {symbol}")
+            except Exception as e: log(f"❌ {e}")
+
+    # Only look for buys if we have enough cash
+    active_thresh = get_cash_thresholds(equity)["active"]
+    if cash < active_thresh:
+        log(f"⏳ AUTOPILOT: Cash ${cash:.2f} below active threshold ${active_thresh:.2f} — monitoring only")
+        return
+
+    # Scan universe for clear technical buy signals
+    open_count = len(alpaca("GET", "/v2/positions"))
+    if open_count >= RULES["max_positions"]:
+        log(f"⏳ AUTOPILOT: Max positions reached — holding")
+        return
+
+    best_signal = None
+    best_score  = 0
+
+    for sym in RULES["universe"]:
+        if sym in pos_symbols: continue
+        bars = get_bars(sym)
+        ind  = compute_indicators(bars)
+        if not ind: continue
+
+        # ── projection_engine.py buy scorer ───────────────────
+        proj_score, proj_summary = proj_score_buy(sym, bars, ind, cash)
+
+        # ── Intraday signals (VWAP, volume delta, patterns) ───
+        intraday_score = 0
+        intraday_signals = []
+        try:
+            intraday = get_intraday_bars(sym, timeframe="5Min", hours=8)
+            if intraday and len(intraday) >= 5:
+                id_ind = compute_intraday_indicators(intraday)
+                if id_ind:
+                    # Bonus: price above VWAP = bullish intraday
+                    if id_ind["vwap_position"] == "ABOVE_VWAP":
+                        intraday_score += 8
+                        intraday_signals.append("above_VWAP")
+                    # Bonus: buyers dominating volume
+                    if id_ind["vol_delta_bias"] == "BUYERS":
+                        intraday_score += 8
+                        intraday_signals.append(f"buy_vol={id_ind['buy_vol_pct']}%")
+                    # Bonus: intraday OBV rising
+                    if id_ind["obv_trend"] == "RISING":
+                        intraday_score += 5
+                        intraday_signals.append("OBV_rising")
+                    # Bonus: bullish candlestick pattern
+                    bullish_patterns = [p for p in id_ind["patterns"]
+                                        if any(x in p for x in
+                                        ["HAMMER","ENGULFING","MORNING","SOLDIERS",
+                                         "LIQUIDITY_GRAB"])]
+                    if bullish_patterns:
+                        intraday_score += 10
+                        intraday_signals.append(bullish_patterns[0].split("(")[0])
+                    # Penalty: price below VWAP + sellers dominating
+                    if (id_ind["vwap_position"] == "BELOW_VWAP" and
+                            id_ind["vol_delta_bias"] == "SELLERS"):
+                        intraday_score -= 15
+                        intraday_signals.append("below_VWAP+sellers")
+                    # Penalty: bearish patterns
+                    bearish_patterns = [p for p in id_ind["patterns"]
+                                        if any(x in p for x in
+                                        ["SHOOTING_STAR","BEARISH","CROWS",
+                                         "EVENING","STOP_HUNT"])]
+                    if bearish_patterns:
+                        intraday_score -= 10
+                        intraday_signals.append(f"BEARISH_PATTERN")
+        except Exception:
+            pass  # Never break autopilot for intraday failure
+
+        # ── Legacy signals ────────────────────────────────────
+        legacy_score = 0
+        if ind["rsi"] and ind["rsi"] < RULES["autopilot_rsi_buy"]:
+            legacy_score += 10
+        if ind["macd"] and ind["macd"] > 0:
+            legacy_score += 5
+        # OBV divergence from daily
+        if ind.get("obv_divergence") == "BULLISH":
+            legacy_score += 8
+        elif ind.get("obv_divergence") == "BEARISH":
+            legacy_score -= 10
+
+        score   = min(100, proj_score + legacy_score + intraday_score)
+        signals = [proj_summary] + intraday_signals
+
+        if score >= 55 and score > best_score:
+            best_score  = score
+            best_signal = {"symbol": sym, "score": score, "signals": signals, "ind": ind}
+
+    if best_signal:
+        sym      = best_signal["symbol"]
+        notional = min(cash * 0.40, cash - 5)  # Conservative 40% of cash
+        if notional >= 8:
+            log(f"🤖 AUTOPILOT BUY: {sym} score={best_score} signals={best_signal['signals']}")
+            try:
+                order = alpaca("POST", "/v2/orders", {
+                    "symbol": sym, "notional": str(round(notional, 2)),
+                    "side": "buy", "type": "market", "time_in_force": "day",
+                })
+                log(f"✅ AUTOPILOT BUY {sym} ${notional:.2f} | {order['id'][:8]}...")
+                record_trade("buy", sym, None, None, notional, "bot",
+                             reason=f"autopilot score={best_score}",
+                             strategy="autopilot")
+                shared_state["claude_positions"].append(sym)  # Assign to Claude by default
+            except Exception as e: log(f"❌ Autopilot buy {sym}: {e}")
+    else:
+        log(f"🤖 AUTOPILOT: No clear buy signals found — holding cash safely")
+
+def run_low_cash_cycle(positions, pos_symbols, cash, equity, features):
+    """Run cycle when cash is low - manage exits only, no new buys."""
+    log("=" * 50)
+    log("💸 LOW CASH CYCLE — Profit-taking + next strategy mode")
+    log("=" * 50)
+
+    pos_details = []
+    for p in positions:
+        pnl_pct  = round(float(p["unrealized_plpc"]) * 100, 2)
+        pnl_usd  = round(float(p["unrealized_pl"]), 2)
+        owner    = "Claude" if p["symbol"] in shared_state["claude_positions"] else                    "Grok" if p["symbol"] in shared_state["grok_positions"] else "Shared"
+        pos_details.append({
+            "symbol":   p["symbol"],
+            "owner":    owner,
+            "pnl_pct":  pnl_pct,
+            "pnl_usd":  pnl_usd,
+            "qty":      p["qty"],
+            "price":    float(p["current_price"]),
+            "value":    round(float(p["market_value"]), 2),
+        })
+        log(f"   [{owner}] {p['symbol']}: {pnl_pct:+.2f}% (${pnl_usd:+.2f}) value=${float(p['market_value']):.2f}")
+
+    # Get quick market check
+    try:
+        market_ctx    = get_market_context()
+        news          = get_news_context()
+        chart_section = get_chart_section()
+    except Exception as e:
+        log(f"⚠️ Data fetch error: {e}")
+        market_ctx = news = chart_section = "unavailable"
+
+    # Ask both AIs what to sell and what to prepare for
+    low_cash_prompt = f"""LOW CASH SITUATION — Buying power too low to open new trades.
+Current cash: ${cash:.2f} (need $8+ to trade)
+Total equity: ${equity:.2f}
+
+OPEN POSITIONS (must choose wisely):
+{chr(10).join([f"  [{p['owner']}] {p['symbol']}: {p['pnl_pct']:+.2f}% (${p['pnl_usd']:+.2f}) value=${p['value']:.2f}" for p in pos_details])}
+
+MARKET: {market_ctx}
+NEWS: {news[:200]}
+INDICATORS: {chart_section[:400]}
+
+DECISION FRAMEWORK:
+1. Should we sell anything to free up cash? Only if:
+   a) Position is at or near take-profit target (>5% gain) — lock it in
+   b) Position is showing weakness and likely to drop more
+   c) A much better opportunity exists that needs the capital
+2. If all positions look good — HOLD, do not panic sell
+3. What is the NEXT buy target once cash is available?
+4. Which position has the best risk/reward to keep holding?
+
+Respond ONLY with JSON:
+{{"sell_recommendation": "symbol or none","sell_reason": "brief","hold_recommendation": ["symbols to keep"],"next_buy_target": "symbol","next_buy_reason": "brief","action": "sell/hold","urgency": "high/medium/low"}}"""
+
+    claude_decision = None
+    grok_decision   = None
+
+    try:
+        claude_decision = ask_with_retry(ask_claude_guarded, low_cash_prompt,
+            "You are Claude managing low cash situation. ONLY valid JSON under 500 chars.")
+        if claude_decision:
+            log(f"🔵 Claude low-cash: action={claude_decision.get('action')} sell={claude_decision.get('sell_recommendation')} next={claude_decision.get('next_buy_target')}")
+    except Exception as e:
+        log(f"❌ Claude low-cash: {e}")
+
+    try:
+        grok_decision = ask_with_retry(ask_grok_guarded, low_cash_prompt,
+            "You are Grok managing low cash situation. ONLY valid JSON under 500 chars.")
+        if grok_decision:
+            log(f"🔴 Grok low-cash: action={grok_decision.get('action')} sell={grok_decision.get('sell_recommendation')} next={grok_decision.get('next_buy_target')}")
+    except Exception as e:
+        log(f"❌ Grok low-cash: {e}")
+
+    # ── DECISION LOGIC ──────────────────────────────────────
+    # Claude is the sole decision-maker; Grok's read is advisory context,
+    # logged alongside Claude's call but never required to act.
+    c_sell = (claude_decision or {}).get("sell_recommendation", "none").upper()
+    g_sell = (grok_decision   or {}).get("sell_recommendation", "none").upper()
+    c_action = (claude_decision or {}).get("action", "hold").lower()
+    g_action = (grok_decision   or {}).get("action", "hold").lower()
+
+    # Check if any position hit take-profit or stop-loss automatically
+    tp_target = (get_quick_take_profit_pct(equity) or RULES["take_profit_pct"]) * 100
+    sold_something = False
+    for p in pos_details:
+        if p["pnl_pct"] >= tp_target:
+            log(f"🎯 [{p['owner']}] Auto take-profit: {p['symbol']} at +{p['pnl_pct']:.1f}% (target {tp_target:.1f}%)")
+            try:
+                cancel_stock_orders(p["symbol"], "(before low-cash TP close)")
+                alpaca("DELETE", f"/v2/positions/{p['symbol']}")
+                record_trade("take_profit", p["symbol"], None, p["price"], p["value"],
+                             p["owner"].lower(), reason="low-cash auto take-profit",
+                             pnl_usd=p["pnl_usd"], pnl_pct=p["pnl_pct"]/100)
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != p["symbol"]]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != p["symbol"]]
+                log(f"✅ SOLD {p['symbol']} — profit locked")
+                sold_something = True
+            except Exception as e:
+                log(f"❌ Sell {p['symbol']}: {e}")
+
+        elif p["pnl_pct"] <= -RULES["stop_loss_pct"] * 100:
+            log(f"🛑 [{p['owner']}] Auto stop-loss: {p['symbol']} at {p['pnl_pct']:.1f}%")
+            try:
+                cancel_stock_orders(p["symbol"], "(before low-cash SL close)")
+                alpaca("DELETE", f"/v2/positions/{p['symbol']}")
+                record_trade("stop_loss", p["symbol"], None, p["price"], p["value"],
+                             p["owner"].lower(), reason="low-cash auto stop-loss",
+                             pnl_usd=p["pnl_usd"], pnl_pct=p["pnl_pct"]/100)
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != p["symbol"]]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != p["symbol"]]
+                log(f"✅ SOLD {p['symbol']} — loss cut")
+                sold_something = True
+            except Exception as e:
+                log(f"❌ Sell {p['symbol']}: {e}")
+
+    # Claude decides whether to sell; Grok's agreement (or not) is logged
+    # as supporting context only, and is never required to act.
+    if c_sell != "NONE" and c_sell in pos_symbols and not sold_something:
+        grok_note = ("Grok agrees" if c_sell == g_sell
+                     else f"Grok says {g_sell or 'HOLD'} (advisory only)")
+        log(f"🔵 Claude decision: SELL {c_sell} to free up cash ({grok_note})")
+        log(f"   Claude reason: {(claude_decision or {}).get('sell_reason','')}")
+        try:
+            cancel_stock_orders(c_sell, "(before low-cash sell)")
+            alpaca("DELETE", f"/v2/positions/{c_sell}")
+            sold_pos = next((p for p in pos_details if p["symbol"] == c_sell), {})
+            record_trade("sell", c_sell, None, sold_pos.get("price"), sold_pos.get("value"),
+                         sold_pos.get("owner","shared").lower(),
+                         reason=f"low-cash: Claude decision — {(claude_decision or {}).get('sell_reason','')}",
+                         pnl_usd=sold_pos.get("pnl_usd"), pnl_pct=(sold_pos.get("pnl_pct",0)/100 if sold_pos.get("pnl_pct") else None))
+            shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != c_sell]
+            shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != c_sell]
+            log(f"✅ SOLD {c_sell} — cash freed up for better opportunity")
+            sold_something = True
+        except Exception as e:
+            log(f"❌ Sell {c_sell}: {e}")
+
+    elif c_action == "hold":
+        log(f"🔵 Claude decision: HOLD all positions — not worth selling yet")
+        if g_action != "hold":
+            log(f"   (Grok's read was: {g_action} {g_sell} — advisory only)")
+        log(f"   Best position: {max(pos_details, key=lambda x: x['pnl_pct'])['symbol'] if pos_details else 'none'}")
+
+    # ── NEXT STRATEGY LOG ───────────────────────────────────
+    c_next = (claude_decision or {}).get("next_buy_target", "")
+    g_next = (grok_decision   or {}).get("next_buy_target", "")
+
+    log(f"📋 NEXT BUY TARGET (ready when cash available):")
+    if c_next: log(f"   🔵 Claude (decision):  {c_next} — {(claude_decision or {}).get('next_buy_reason','')[:80]}")
+    if g_next: log(f"   🔴 Grok (advisory):    {g_next} — {(grok_decision   or {}).get('next_buy_reason','')[:80]}")
+
+    if c_next:
+        shared_state["next_buy_target"] = c_next
+
+    log("=" * 50)
+    log(f"💸 Low cash cycle complete | Cash: ${cash:.2f} | Positions: {len(positions)}")
+    log("=" * 50)
+
+# ── Boot sequence — load persistent data from volume ─────────
+# Runs after all modules imported, before trading loop starts
+trade_history[:] = _load_trade_history()   # Load into existing list (keeps reference)
+_load_shared_state()                        # Restore equity baselines
+_load_sleep_state()                         # Restore AI sleep/wake state
+
+def _recover_missing_buy_records():
+    """
+    If trade_history is empty but Alpaca has open positions,
+    inject buy records so history is accurate when positions eventually close.
+    Runs once on boot in background thread.
+    """
+    try:
+        if len(trade_history) > 0:
+            return  # Already have records — no recovery needed
+        positions = alpaca_get("/v2/positions")
+        if not positions:
+            return
+        from datetime import datetime, timezone
+        recovered = 0
+        for p in positions:
+            sym   = p.get("symbol", "")
+            qty   = float(p.get("qty", 0))
+            entry = float(p.get("avg_entry_price", 0))
+            cost  = float(p.get("cost_basis", 0)) or entry * qty
+            owner = ("claude" if sym in shared_state.get("claude_positions", [])
+                     else "grok" if sym in shared_state.get("grok_positions", [])
+                     else "grok")
+            if sym and qty > 0 and entry > 0:
+                trade_history.append({
