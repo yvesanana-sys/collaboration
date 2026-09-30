@@ -1412,3 +1412,4 @@ INDICATORS: {chart_section[:450]}"""
 3. No overlap with partner AI if possible
 4. LIMIT ORDERS at bid/ask midpoint for better fill
 {base_json}"""
+
