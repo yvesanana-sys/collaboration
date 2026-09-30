@@ -22,15 +22,6 @@ DATA_URL       = "https://data.alpaca.markets"
 BOT_NAME       = "NovaTrade"
 PORT           = int(os.environ.get("PORT", 8080))
 
-# ── Crypto trading — split out of this process ────────────────
-# NovaTrade is stocks-only now. Crypto trading (new entries, staking)
-# is being moved to its own standalone bot (see binance_crypto.py's
-# __main__ entrypoint). This process still runs the exit monitor so
-# any crypto positions already open get managed safely, but it will
-# not open new crypto positions. Flip to True only if you intend to
-# run crypto and stocks from this same process again.
-CRYPTO_TRADING_ENABLED = False
-
 app = Flask(__name__)
 CORS(app)
 
@@ -42,11 +33,9 @@ shared_state: dict = {
     "claude_positions":    [],
     "grok_positions":      [],
     "bearish_watchlist":   [],
-    # Fund allocation — Claude is sole decision-maker; Grok is advisory-only
-    # (see rebalance_allocations() in portfolio_manager.py, which no longer
-    # moves these away from 1.0/0.0)
-    "claude_allocation":   1.0,
-    "grok_allocation":     0.0,
+    # Fund allocation
+    "claude_allocation":   0.50,
+    "grok_allocation":     0.50,
     "growth_reserve":      0.0,
     # Performance tracking
     "claude_daily_pnl":    0.0,
@@ -71,8 +60,6 @@ shared_state: dict = {
     "claude_fail_reason":  "",
     "grok_fail_reason":    "",
     "failover_mode":       False,
-    "grok_balance":            None,   # {remaining_balance, spent_balance, total_granted} or None
-    "grok_balance_checked_at": None,
     # Sleep/wake
     "ai_sleeping":         False,
     "sleep_reason":        "",
@@ -118,7 +105,7 @@ shared_state: dict = {
     "last_liquidation":    "",
     "liquidation_result":  None,
     "next_buy_target":     None,
-    "trading_brief":       {},
+    "trading_brief":       "",
     "last_rebalance_day":  "",
     "last_rebalance_week": "",
     "last_reset_month":    "",
@@ -167,8 +154,7 @@ from market_data import (
     _compute_breakout, compute_indicators, get_chart_section,
     get_news_context, get_fear_greed_index, get_earnings_calendar,
     get_market_context, get_spy_trend, get_biggest_gainers,
-    get_recent_ipos, get_market_mode, get_penny_stock_movers,
-    get_under_25_movers,
+    get_recent_ipos, get_market_mode,
 )
 import market_data as _market_data
 
@@ -189,64 +175,6 @@ from ai_clients import (
     safe_ask_claude, safe_ask_grok, check_ai_health,
 )
 import ai_clients as _ai_clients
-
-# ── Health-gated wrappers ─────────────────────────────────────
-# A number of call sites below need the raw text/JSON response from
-# Claude/Grok (not ask_with_retry's health-tracked wrapper), but were
-# calling ask_claude/ask_grok directly with no health check at all.
-# That meant a known-dead AI (e.g. Claude marked credits_exhausted)
-# kept getting hit every cycle — Round 2 review, low-cash decisions,
-# PDT hold council, crypto cycles, staking review each threw their own
-# "credit balance too low" error on every tick instead of backing off.
-# These wrappers raise immediately when unhealthy so the existing
-# try/except around each call site logs one line and moves on, same as
-# any other failure, without spending an API call.
-def ask_claude_guarded(*args, **kwargs):
-    if not shared_state.get("claude_healthy", True):
-        raise Exception(f"Claude unhealthy ({shared_state.get('claude_fail_reason','unknown')}) — call skipped")
-    try:
-        return ask_claude(*args, **kwargs)
-    except Exception as e:
-        # Mirror safe_ask_claude's classification so a known-dead AI actually
-        # gets marked unhealthy here too — otherwise this guard only ever
-        # reads the flag and never sets it, so a doomed call (e.g. credits
-        # exhausted) keeps firing every cycle instead of backing off.
-        error_type = classify_ai_error(str(e))
-        shared_state["claude_fail_count"] = shared_state.get("claude_fail_count", 0) + 1
-        shared_state["claude_fail_reason"] = error_type
-        if error_type == "credits_exhausted":
-            shared_state["claude_healthy"]    = False
-            shared_state["claude_credits_ok"] = False
-            shared_state["last_claude_fail"]  = datetime.now().isoformat()
-        elif error_type == "auth_error":
-            shared_state["claude_healthy"]   = False
-            shared_state["last_claude_fail"] = datetime.now().isoformat()
-        elif shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
-            shared_state["claude_healthy"]   = False
-            shared_state["last_claude_fail"] = datetime.now().isoformat()
-        raise
-
-def ask_grok_guarded(*args, **kwargs):
-    if not shared_state.get("grok_healthy", True):
-        raise Exception(f"Grok unhealthy ({shared_state.get('grok_fail_reason','unknown')}) — call skipped")
-    try:
-        return ask_grok(*args, **kwargs)
-    except Exception as e:
-        # Same as ask_claude_guarded above — see that comment.
-        error_type = classify_ai_error(str(e))
-        shared_state["grok_fail_count"] = shared_state.get("grok_fail_count", 0) + 1
-        shared_state["grok_fail_reason"] = error_type
-        if error_type == "credits_exhausted":
-            shared_state["grok_healthy"]    = False
-            shared_state["grok_credits_ok"] = False
-            shared_state["last_grok_fail"]  = datetime.now().isoformat()
-        elif error_type == "auth_error":
-            shared_state["grok_healthy"]   = False
-            shared_state["last_grok_fail"] = datetime.now().isoformat()
-        elif shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
-            shared_state["grok_healthy"]   = False
-            shared_state["last_grok_fail"] = datetime.now().isoformat()
-        raise
 
 from sleep_manager import (
     ai_sleep, ai_wake, check_wake_conditions, check_ai_wake_instructions,
@@ -270,7 +198,6 @@ import portfolio_manager as _portfolio_manager
 
 from pdt_manager import (
     record_intraday_buy, is_day_trade, get_stock_tier,
-    get_quick_take_profit_pct,
     reset_intraday_buys_if_new_day, check_pdt_safe,
     run_pdt_hold_council, _pdt_fallback_plan,
     check_pdt_hold_plans, get_pdt_decision, get_pdt_status,
@@ -380,26 +307,7 @@ def get_equity_cash():
 
 @app.route("/health")
 def health():
-    # last_sync is stamped at the end of every completed run_cycle() —
-    # the GitHub health-watchdog workflow (.github/workflows/health-
-    # watchdog.yml) reads last_cycle_age_sec to decide whether to advance
-    # its last-known-good branch. Without this field the watchdog was
-    # conservative-forever: it never promoted, so last-known-good stayed
-    # pinned to whatever it was seeded to, and a single failed deploy of
-    # an unrelated change reverted this repo all the way back to that
-    # stale snapshot instead of the actual last-good state.
-    last_sync = shared_state.get("last_sync") or ""
-    cycle_age = None
-    if last_sync:
-        try:
-            cycle_age = int((datetime.now() - datetime.fromisoformat(last_sync)).total_seconds())
-        except Exception:
-            cycle_age = None
-    return jsonify({
-        "status":             "ok",
-        "bot":                BOT_NAME,
-        "last_cycle_age_sec": cycle_age,
-    })
+    return jsonify({"status": "ok", "bot": BOT_NAME})
 
 @app.route("/storage")
 def storage_check():
@@ -712,16 +620,9 @@ def stats():
             "claude_healthy":     shared_state["claude_healthy"],
             "claude_credits_ok":  shared_state["claude_credits_ok"],
             "claude_fail_reason": shared_state["claude_fail_reason"],
-            "last_claude_fail":   shared_state.get("last_claude_fail"),
             "grok_healthy":       shared_state["grok_healthy"],
             "grok_credits_ok":    shared_state["grok_credits_ok"],
             "grok_fail_reason":   shared_state["grok_fail_reason"],
-            "last_grok_fail":     shared_state.get("last_grok_fail"),
-            "grok_balance":            shared_state.get("grok_balance"),
-            "grok_balance_checked_at": shared_state.get("grok_balance_checked_at"),
-            "penny_candidates":        shared_state.get("last_penny_candidates", []),
-            "wider_candidates":        shared_state.get("last_wider_candidates", []),
-            "opportunity_scan_at":     shared_state.get("last_opportunity_scan_at"),
             "failover_mode":      shared_state["failover_mode"],
             "watch_mode_active":  shared_state["watch_mode_active"],
             "ai_sleeping":        shared_state["ai_sleeping"],
@@ -936,40 +837,84 @@ def performance():
 @app.route("/leaderboard")
 def leaderboard():
     """
-    Stock trading performance summary.
-    Claude is the sole decision-maker now — Grok only reviews Claude's
-    proposals (support/risk-check), so there's no more head-to-head
-    competition to score. This reports overall stock performance plus
-    whether Grok's review pass is currently active.
+    Claude vs Grok head-to-head crypto trading scoreboard.
+    Pulls realized P&L from both the persistent trade_history
+    (stocks + crypto via /data volume) and CryptoTrader's in-memory
+    history. Counts only crypto closes, tagged by `owner`.
     """
     try:
-        closes = [t for t in trade_history
-                  if t.get("pnl_usd") is not None
-                  and not (t.get("symbol") or "").upper().endswith(("USDT", "USDC", "BUSD"))]
-        wins      = sum(1 for t in closes if (t.get("pnl_usd") or 0) > 0)
-        total_pnl = sum(t.get("pnl_usd") or 0 for t in closes)
-        win_rate  = round(wins / len(closes) * 100, 1) if closes else 0.0
+        # Use persistent trade_history (loaded from /data on boot,
+        # contains all owner-tagged closes across both stocks & crypto).
+        # ALSO merge in CryptoTrader's in-memory crypto closes — but
+        # dedup, because _execute_exit writes to BOTH lists. Without
+        # dedup, every crypto close was counted twice in the leaderboard
+        # → inflated trade counts and >100% win rates on the dashboard.
+        all_history = list(trade_history)
 
-        recent_trades = [{
-            "symbol":  t.get("symbol"),
-            "action":  t.get("action"),
-            "pnl_usd": t.get("pnl_usd"),
-            "pnl_pct": t.get("pnl_pct"),
-            "time":    t.get("time"),
-        } for t in closes[-10:]]
+        # Build a signature set from the persistent history so we can
+        # skip duplicates when merging the in-memory list. Signature is
+        # (symbol, time, pnl_usd) — same close has all three identical
+        # since both code paths derive from one _execute_exit() call.
+        def _sig(t):
+            pnl = t.get("pnl_usd")
+            return (
+                (t.get("symbol") or "").upper(),
+                t.get("time") or "",
+                round(float(pnl), 4) if pnl is not None else None,
+            )
 
-        open_positions = len(shared_state.get("claude_positions", [])) + len(shared_state.get("grok_positions", []))
+        seen_sigs = {_sig(t) for t in all_history if t.get("pnl_usd") is not None}
+
+        if hasattr(crypto_trader, "trade_history"):
+            for t in crypto_trader.trade_history:
+                sig = _sig(t)
+                if sig in seen_sigs:
+                    continue   # already counted via persistent history
+                seen_sigs.add(sig)
+                # Merge — CryptoTrader format slightly differs, normalize
+                all_history.append({
+                    "action":     t.get("action", "sell"),
+                    "symbol":     t.get("symbol", ""),
+                    "owner":      t.get("owner", "shared"),
+                    "pnl_usd":    t.get("pnl_usd"),
+                    "pnl_pct":    t.get("pnl_pct"),
+                    "time":       t.get("time", ""),
+                    "entry_price": t.get("entry_price"),
+                    "exit_price":  t.get("exit_price"),
+                })
+
+        lb = crypto_trader.get_ai_leaderboard(all_history)
+
+        # Annotate with helpful context
+        c, g = lb["claude"], lb["grok"]
+        recent_trades = []
+        for t in all_history[-20:]:
+            sym = (t.get("symbol") or "").upper()
+            if (t.get("pnl_usd") is not None
+                and sym.endswith(("USDT", "USDC", "BUSD"))):
+                recent_trades.append({
+                    "symbol":  t.get("symbol"),
+                    "owner":   t.get("owner"),
+                    "pnl_usd": t.get("pnl_usd"),
+                    "pnl_pct": t.get("pnl_pct"),
+                    "time":    t.get("time"),
+                })
 
         return jsonify({
-            "decision_model":  "claude_primary_grok_support",
-            "grok_active":     bool(GROK_KEY) and shared_state.get("grok_healthy", True),
-            "reserve":         _get_reserve_info(),
-            "total_pnl":       round(total_pnl, 2),
-            "total_closed":    len(closes),
-            "wins":            wins,
-            "win_rate":        win_rate,
-            "open_positions":  open_positions,
-            "recent_trades":   recent_trades,
+            "competition_enabled": getattr(binance_crypto, "ENABLE_AI_COMPETITION", False),
+            "pool_split": {
+                "claude_pct": getattr(binance_crypto, "CLAUDE_POOL_PCT", 0.5),
+                "grok_pct":   getattr(binance_crypto, "GROK_POOL_PCT",   0.5),
+            },
+            "reserve": _get_reserve_info(),
+            "leader":          lb["leader"],
+            "leader_emoji":    lb["leader_emoji"],
+            "margin_usd":      lb["margin_usd"],
+            "claude":          c,
+            "grok":            g,
+            "shared":          lb["shared"],   # legacy "both AIs agreed" trades
+            "total_closed":    lb["total_closed"],
+            "recent_trades":   recent_trades[-10:],   # last 10 crypto closes
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1281,7 +1226,7 @@ _github_deploy._set_context(log)
 _ai_clients._set_context(log, shared_state_ref=shared_state)
 # Intelligence needs ask_grok + parse_json (now from ai_clients)
 _intelligence._set_context(RULES, log,
-                            ask_grok_fn   = ask_grok_guarded,
+                            ask_grok_fn   = ask_grok,
                             parse_json_fn = parse_json)
 # PDT manager needs log, shared_state, RULES + all trading functions
 # NOTE: smart_sell, record_trade, get_cash_thresholds defined later — see late injection below
@@ -1502,17 +1447,16 @@ def stock_turtle_check_exit(symbol: str, entry_price: float, atr_at_entry: float
 
 def is_turtle_active_for_stocks() -> bool:
     """
-    Returns True iff EITHER AI's STOCK playbook has strategy_type='turtle'.
+    Returns True iff EITHER AI's current playbook has strategy_type='turtle'.
     Stocks are shared between Claude and Grok, so we activate Turtle on
-    stocks whenever either AI's stock playbook says so. Reads the
-    per-asset-class playbook — the crypto playbook (mean-reversion)
-    must never influence how stocks pick trades.
+    stocks whenever either AI's playbook says so.
     """
     try:
         import strategic_brain as _sb
         for ai_name in ("claude", "grok"):
             try:
-                cs = _sb.load_strategy_for(ai_name, "stock") or {}
+                state = _sb.load_strategy(ai_name)
+                cs = state.get("current_strategy", {}) or {}
                 if cs.get("strategy_type") == "turtle":
                     return True
             except Exception:
@@ -1611,162 +1555,6 @@ def decide_exit_strategy_solo(symbol, trade_data, bars, ind):
 # [check_pdt_hold_plans → pdt_manager.py]
 # [get_pdt_decision → pdt_manager.py]
 # [get_pdt_status → pdt_manager.py]
-
-# ══════════════════════════════════════════════════════════════
-# BROKER-SIDE PROTECTIVE STOPS (P0b)
-# Every long stock position gets a real resting STOP order at
-# Alpaca so downside protection survives bot restarts/outages.
-# A resting stop HOLDS the shares — every sell/close path must
-# cancel it first (see cancel_stock_orders calls in exit paths).
-# ══════════════════════════════════════════════════════════════
-
-def _is_option_symbol(symbol):
-    """OCC option symbols end in C/P + 8-digit strike (e.g. AAPL240119C00190000)."""
-    return len(symbol) > 12 and symbol[-9] in ("C", "P") and symbol[-8:].isdigit()
-
-def get_open_stock_orders(symbol=None):
-    """List open Alpaca orders, optionally filtered to one symbol."""
-    try:
-        path = "/v2/orders?status=open&limit=500"
-        if symbol:
-            path += f"&symbols={symbol}"
-        return alpaca("GET", path) or []
-    except Exception as e:
-        log(f"⚠️ [STOP] open-orders fetch failed ({symbol or 'all'}): {e}")
-        return []
-
-def cancel_stock_orders(symbol, why=""):
-    """Cancel ALL open orders for a symbol. Returns count cancelled.
-    Never raises — safe to call unconditionally before any sell/close."""
-    n = 0
-    for o in get_open_stock_orders(symbol):
-        try:
-            alpaca("DELETE", f"/v2/orders/{o['id']}")
-            log(f"   [STOP] Cancelled {o.get('type','?')} {o.get('side','?')} "
-                f"order for {symbol} (id={str(o.get('id',''))[:8]}...) {why}")
-            n += 1
-        except Exception as ce:
-            log(f"   ⚠️ [STOP] Cancel failed {symbol} {str(o.get('id',''))[:8]}: {ce}")
-    return n
-
-def compute_protective_stop_price(symbol, entry_price):
-    """Stop level mirroring the software exit logic: Turtle 2N stop if
-    assigned in position_exits, else the universal hard stop."""
-    cfg = shared_state.get("position_exits", {}).get(symbol, {})
-    sp = cfg.get("stop_price")
-    if sp and sp > 0:
-        return sp
-    return entry_price * (1 - RULES["exit_A_stop_loss"])
-
-def place_stock_protective_stop(symbol, qty, stop_price):
-    """Submit a resting STOP sell at Alpaca. Tries GTC first, falls back
-    to DAY (fractional GTC support varies). Non-fatal on failure — the
-    software stop monitor stays active either way. Returns order or None."""
-    if _is_option_symbol(symbol):
-        log(f"   [STOP] {symbol} looks like an option — software-managed only")
-        return None
-    if qty != int(qty):
-        log(f"   [STOP] {symbol} qty={qty} is fractional — Alpaca rejects stop "
-            f"orders on fractional share quantities, software stop still active")
-        return None
-    # Alpaca price increments: $0.01 at/above $1, $0.0001 below
-    stop_price = round(stop_price, 2) if stop_price >= 1 else round(stop_price, 4)
-    if stop_price <= 0 or qty <= 0:
-        log(f"   [STOP] invalid stop for {symbol} (qty={qty}, stop={stop_price}) — skipped")
-        return None
-    for tif in ("gtc", "day"):
-        try:
-            order = alpaca("POST", "/v2/orders", {
-                "symbol": symbol, "qty": str(qty),
-                "side": "sell", "type": "stop",
-                "stop_price": str(stop_price),
-                "time_in_force": tif,
-            })
-            log(f"   [STOP] Broker stop resting for {symbol}: {qty} @ ${stop_price} "
-                f"({tif.upper()}, order {str(order.get('id',''))[:8]}...)")
-            return order
-        except Exception as se:
-            log(f"   [STOP] {tif.upper()} stop rejected for {symbol}: {str(se)[:120]}")
-    log(f"   [STOP] NOT placed for {symbol} -- software stop still active")
-    return None
-
-def _arm_stop_after_buy(order, symbol, fallback_entry=0):
-    """After a BUY submits, wait briefly for the fill and place the broker
-    stop. Unfilled orders are picked up by ensure_protective_stops later."""
-    try:
-        time.sleep(2)
-        od = alpaca("GET", f"/v2/orders/{order['id']}")
-        filled_qty = float(od.get("filled_qty") or 0)
-        if od.get("status") == "filled" and filled_qty > 0:
-            entry = float(od.get("filled_avg_price") or 0) or fallback_entry
-            if entry > 0:
-                place_stock_protective_stop(
-                    symbol, filled_qty,
-                    compute_protective_stop_price(symbol, entry))
-                return
-        log(f"   [STOP] {symbol} buy not filled yet ({od.get('status','?')}) — "
-            f"stop deferred to reconciler")
-    except Exception as e:
-        log(f"   [STOP] arm-after-buy error {symbol}: {e} — reconciler will cover")
-
-def ensure_protective_stops(positions):
-    """Reconciler — runs every cycle. (1) Cancels DANGLING stop orders
-    (symbol no longer held) so a triggered stray stop can never sell
-    shares we don't have. (2) Places a missing stop for any long stock
-    position without one (catches late limit fills, restarts, manual
-    cancels). (3) Cleans tracker state for positions that vanished —
-    stop filled at the broker while the bot was down."""
-    try:
-        open_orders = get_open_stock_orders()
-        held = {p["symbol"]: p for p in positions}
-
-        # 1. Dangling stop sells → cancel
-        for o in open_orders:
-            if "stop" in (o.get("type") or "") and o.get("side") == "sell" \
-                    and o.get("symbol") not in held:
-                try:
-                    alpaca("DELETE", f"/v2/orders/{o['id']}")
-                    log(f"   [STOP] Cancelled DANGLING stop for {o.get('symbol')} "
-                        f"(no position — exit/stop already filled)")
-                except Exception as ce:
-                    log(f"   ⚠️ [STOP] Dangling cancel failed {o.get('symbol')}: {ce}")
-
-        # 2. Unprotected longs → place stop
-        stop_syms = {o.get("symbol") for o in open_orders
-                     if "stop" in (o.get("type") or "") and o.get("side") == "sell"}
-        sell_syms = {o.get("symbol") for o in open_orders if o.get("side") == "sell"}
-        for sym, p in held.items():
-            if _is_option_symbol(sym):
-                continue
-            qty = float(p.get("qty", 0) or 0)
-            if qty <= 0:
-                continue  # shorts stay software-managed for now
-            if sym in stop_syms:
-                continue  # already protected
-            if sym in sell_syms:
-                continue  # an exit sell is already working — never double-sell
-            qty_avail = float(p.get("qty_available", qty) or 0)
-            if qty_avail <= 0:
-                log(f"   [STOP] {sym}: no available qty (held by other orders) — skipped")
-                continue
-            entry = float(p.get("avg_entry_price", 0) or 0)
-            if entry <= 0:
-                continue
-            place_stock_protective_stop(sym, qty_avail,
-                                        compute_protective_stop_price(sym, entry))
-
-        # 3. Vanished positions → clean trackers
-        open_syms = {o.get("symbol") for o in open_orders}
-        for sym in list(shared_state.get("position_exits", {}).keys()):
-            if sym not in held and sym not in open_syms:
-                log(f"   [STOP] {sym} tracked but no position/orders — "
-                    f"broker stop likely filled; cleaning trackers")
-                shared_state["position_exits"].pop(sym, None)
-                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != sym]
-                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != sym]
-    except Exception as e:
-        log(f"⚠️ ensure_protective_stops error: {e}")
-
 def smart_sell(symbol, reason, pos):
     """Execute a smart limit sell, fall back to market order.
     Checks PDT rule + uses projections to decide hold-overnight vs sell."""
@@ -1826,10 +1614,6 @@ def smart_sell(symbol, reason, pos):
 
     except Exception as e:
         log(f"⚠️ PDT check error: {e} — proceeding with sell")
-
-    # ── Cancel any resting broker stop first — it HOLDS the shares and
-    # would block every sell method below (and could double-sell later).
-    cancel_stock_orders(symbol, "(before exit sell)")
 
     last_err = None
     # Method 1: Limit sell at mid-price
@@ -1908,7 +1692,7 @@ def smart_sell(symbol, reason, pos):
             shared_state["failed_sells"].pop(symbol, None)
     return False
 
-def check_exit_conditions(positions, equity):
+def check_exit_conditions(positions):
     """
     Strategy-aware exit system.
     Each position uses whichever strategy was assigned at entry:
@@ -1916,7 +1700,6 @@ def check_exit_conditions(positions, equity):
     Strategy B: Trailing stop + 4% hard stop + 3-day time stop
     """
     today = datetime.now().strftime("%Y-%m-%d")
-    quick_tp = get_quick_take_profit_pct(equity)
 
     for pos in positions:
         symbol       = pos["symbol"]
@@ -1940,27 +1723,6 @@ def check_exit_conditions(positions, equity):
                              float(pos.get("market_value", 0)), owner.lower(),
                              reason="stop loss triggered", pnl_usd=pnl_usd,
                              pnl_pct=pnl_pct, strategy=strategy,
-                             entry_price=entry_price)
-                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
-                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
-                shared_state["position_exits"].pop(symbol, None)
-            continue
-
-        # ── UNIVERSAL: Quick take-profit, all strategies ──────
-        # Bank any real gain instead of waiting for the strategy-specific
-        # 8% target — maximize round-trips and keep cash working.
-        # Applies to Turtle (strategy T) too now — every tier has a
-        # tp_pct (see portfolio_manager.py stock_tiers), so this always
-        # fires before the A/B/T-specific logic below gets a chance to
-        # hold out for a bigger, slower move.
-        if quick_tp is not None and pnl_pct >= quick_tp:
-            log(f"⚡ [{owner}] QUICK TP {symbol} +{pnl_pct*100:.1f}% >= {quick_tp*100:.1f}% "
-                f"(tier: equity ${equity:.0f}) | +${pnl_usd:.2f}")
-            if smart_sell(symbol, "quick take-profit (small-account velocity)", pos):
-                record_trade("take_profit", symbol, pos.get("qty"), current_price,
-                             float(pos.get("market_value", 0)), owner.lower(),
-                             reason=f"quick take-profit (tier tp={quick_tp*100:.1f}%)",
-                             pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy=strategy,
                              entry_price=entry_price)
                 shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
                 shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
@@ -2136,7 +1898,79 @@ def check_exit_conditions(positions, equity):
                         log(f"   [B] {symbol}: {status} | {days_held}d held")
                 except Exception: pass
 
-# ── Decision Engine (Claude primary, Grok support/review) ────
+# ── Collaboration Engine ─────────────────────────────────
+
+def is_collaborative_trade_worthy(trade_claude, trade_grok, chart_section, news, equity=0, collab_pool=0):
+    """
+    Gate-keeper for collaborative big-ticket trades.
+    LOCKED until equity >= $3,000 and min trade size $1,000.
+    Requires: 95%+ confidence BOTH AIs + news catalyst + 5+ signals.
+    This is the HIGH CONVICTION filter — fires rarely but powerfully.
+    """
+    if not trade_claude or not trade_grok:
+        return False, "One AI did not propose a trade"
+
+    # ── PRIMARY GATEKEEPER — equity must be $3,000+ ──────────────
+    if equity < RULES["collab_unlock_equity"]:
+        needed = RULES["collab_unlock_equity"] - equity
+        pct    = round(equity / RULES["collab_unlock_equity"] * 100, 1)
+        return False, f"LOCKED — need ${needed:.0f} more equity (${equity:.0f}/${RULES['collab_unlock_equity']} = {pct}%)"
+
+    # ── MINIMUM TRADE SIZE — must be able to deploy $1,000 ───────
+    if collab_pool < RULES["collab_min_trade_size"]:
+        return False, f"Collaborative pool ${collab_pool:.0f} < ${RULES['collab_min_trade_size']} minimum trade size"
+
+    # Must be same symbol
+    if trade_claude.get("symbol") != trade_grok.get("symbol"):
+        return False, f"Symbol mismatch: Claude={trade_claude.get('symbol')} Grok={trade_grok.get('symbol')}"
+
+    # BONUS: Biggest gainers get automatic collaborative consideration
+    # (still need both AIs to agree, but lower confidence threshold)
+    gainers      = get_biggest_gainers()
+    gainer_syms  = [g["symbol"] for g in gainers if g.get("change", 0) > 3.0]
+    is_big_gainer = symbol in gainer_syms
+    if is_big_gainer:
+        log(f"📈 {symbol} is a biggest gainer today — lowering collab confidence to 88%")
+
+    # Both must hit confidence threshold
+    # Biggest gainers get lower threshold (88% vs 95%)
+    c_conf     = trade_claude.get("confidence", 0)
+    g_conf     = trade_grok.get("confidence", 0)
+    conf_floor = 88 if is_big_gainer else RULES["collab_min_confidence"]
+    if c_conf < conf_floor:
+        return False, f"Claude confidence {c_conf}% < {conf_floor}% required"
+    if g_conf < conf_floor:
+        return False, f"Grok confidence {g_conf}% < {conf_floor}% required"
+
+    # Must have 5+ combined signals
+    # Read new compact "flags" string or legacy "signals" list — both work
+    def _to_signal_list(t):
+        flags = t.get("flags") or t.get("f") or ""
+        sigs  = t.get("signals", [])
+        return [x.strip() for x in flags.split(",") if x.strip()] + list(sigs)
+    c_signals   = _to_signal_list(trade_claude)
+    g_signals   = _to_signal_list(trade_grok)
+    all_signals = list(set(c_signals + g_signals))
+    if len(all_signals) < RULES["collab_min_signals"]:
+        return False, f"Only {len(all_signals)} unique signals (need {RULES['collab_min_signals']}+)"
+
+    # Must have news catalyst
+    symbol = trade_claude.get("symbol", "")
+    if RULES["collab_require_news"] and symbol:
+        news_lower = news.lower()
+        sym_lower  = symbol.lower()
+        has_news   = sym_lower in news_lower or any(
+            word in news_lower for word in ["earnings", "acquisition", "fed", "rate", "ai", "revenue", "merger"]
+        )
+        if not has_news:
+            return False, f"No news catalyst found for {symbol}"
+
+    # Expected profit check
+    expected_profit = trade_claude.get("net_profit_target", 0)
+    if expected_profit > 0 and expected_profit < RULES["collab_min_profit_pct"]:
+        return False, f"Expected profit {expected_profit*100:.1f}% < {RULES['collab_min_profit_pct']*100:.0f}% minimum"
+
+    return True, f"✅ All gates passed: conf={c_conf}%/{g_conf}% signals={len(all_signals)} news=✅"
 
 def collaborative_session(equity, cash, positions, pos_symbols, open_count,
                           chart_section, news, market_ctx, features, pool):
@@ -2211,50 +2045,32 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
     if ipo_syms:
         log(f"🆕 IPOs in play: {ipo_syms}")
 
-    # ── Sub-$5 + under-$25 opportunities: scan + Grok research ──
-    # Deliberately separate from RULES["universe"] (which stays
-    # "no OTC/penny tickers") — these are explicit, higher-risk
-    # opportunistic channels Claude sees as extra context, not a
-    # change to the core watchlist.
-    penny_candidates = []
-    wider_candidates = []
-    penny_research   = ""
-    try:
-        penny_candidates = get_penny_stock_movers()
-    except Exception as pe:
-        log(f"⚠️ Penny stock scan failed: {pe}")
-    try:
-        wider_candidates = get_under_25_movers()
-    except Exception as we:
-        log(f"⚠️ Under-$25 scan failed: {we}")
-
-    # Cache latest scans for the dashboard — informational only, not
-    # re-read by the trading logic itself.
-    shared_state["last_penny_candidates"] = penny_candidates
-    shared_state["last_wider_candidates"] = wider_candidates
-    shared_state["last_opportunity_scan_at"] = datetime.now().isoformat()
-
-    # One combined Grok research call covers both lists (dedup by
-    # symbol) — no reason to spend two AI calls on overlapping names.
-    research_candidates = list({c["symbol"]: c for c in (penny_candidates + wider_candidates)}.values())
-    if research_candidates and shared_state.get("grok_healthy", True):
+    # ── Build crypto context for unified R1 call ─────────────
+    # If crypto_trader is enabled, gather crypto data and append
+    # to R1 prompt — no extra AI call needed
+    crypto_context_str = ""
+    if crypto_trader.is_enabled():
         try:
-            log(f"🔴 Grok researching {len(research_candidates)} sub-$25 mover(s) on X/news...")
-            penny_research = ask_grok_guarded(
-                prompt_builder.build_penny_research_prompt(research_candidates),
-                prompt_builder.build_penny_research_system(),
+            crypto_projs  = crypto_trader.get_projections_snapshot()
+            crypto_wallet = crypto_trader.get_wallet_snapshot()
+            crypto_stats  = crypto_trader.get_stats_snapshot()
+            crypto_cross  = crypto_trader.get_stock_cross_ref(
+                shared_state.get("last_projections", {})
             )
-            if penny_research:
-                log(f"🔴 Opportunity research: {len(penny_research)} chars returned")
-        except Exception as pre:
-            log(f"⚠️ Opportunity research failed: {pre}")
-            penny_research = ""
+            crypto_context_str = prompt_builder.build_crypto_context(
+                wallet_summary  = crypto_wallet.get("summary", ""),
+                crypto_pool     = crypto_wallet.get("usdt_free", 0),
+                crypto_proj_text = crypto_projs,
+                crypto_holdings = crypto_wallet.get("holdings_text", ""),
+                crypto_stats    = crypto_stats,
+                stock_cross_ref = crypto_cross,
+            )
+            if crypto_context_str:
+                log("🪙 Crypto context added to R1 prompt — unified call")
+        except Exception as ce:
+            log(f"⚠️ Crypto context build failed: {ce} — skipping crypto in R1")
 
-    # Crypto trading has been split out of the stock decision cycle —
-    # see binance_crypto.py's standalone entrypoint. No crypto context
-    # is built or piggybacked onto the stock R1 call any more.
-
-    # ── Round 1: Claude proposes (sole decision-maker) ─────────
+    # Round 1: Both propose independently
     # ── Adaptive prompt — situation-aware, projection-informed, memory-injected ──
     r1_prompt, situation_mode = prompt_builder.build_r1(
         equity          = equity,
@@ -2277,97 +2093,192 @@ def collaborative_session(equity, cash, positions, pos_symbols, open_count,
         spy_trend       = shared_state.get("spy_trend", "neutral"),
         features        = features,
         projections     = shared_state.get("last_projections", {}),
-        crypto_context  = "",
-        penny_stocks    = penny_candidates,
-        penny_research  = penny_research,
-        wider_stocks    = wider_candidates,
+        crypto_context  = crypto_context_str,
     )
     log(f"🧠 Prompt mode: {situation_mode.upper().replace('_',' ')}")
 
-    log("🔵 Round 1 — Claude proposing (primary decision-maker)...")
+    log("🔵 Round 1 — Claude proposing...")
+    log("🔴 Round 1 — Grok proposing...")
 
     c_ok = shared_state["claude_healthy"]
-    if not c_ok:
-        log("⚠️ Claude unhealthy — no trade this cycle (Grok is support-only, never trades solo)")
+    g_ok = shared_state["grok_healthy"]
+
+    if c_ok:
+        claude_r1 = safe_ask_claude(r1_prompt,
+            prompt_builder.build_claude_system())
+    else:
+        log("⚠️ Claude unhealthy — skipping Round 1 for Claude")
+        claude_r1 = None
+
+    if g_ok:
+        grok_r1 = safe_ask_grok(r1_prompt,
+            prompt_builder.build_grok_system())
+    else:
+        log("⚠️ Grok unhealthy — skipping Round 1 for Grok")
+        grok_r1 = None
+
+    # Single AI failover — one AI runs solo
+    if claude_r1 and not grok_r1:
+        log("⚠️ FAILOVER: Grok down — Claude running solo this cycle")
+    elif grok_r1 and not claude_r1:
+        log("⚠️ FAILOVER: Claude down — Grok running solo this cycle")
+
+    if claude_r1:
+        log(f"🔵 Claude: '{claude_r1.get('strategy_name','')}' | {len(claude_r1.get('proposed_trades',[]))} trades")
+    if grok_r1:
+        log(f"🔴 Grok: '{grok_r1.get('strategy_name','')}' | {len(grok_r1.get('proposed_trades',[]))} trades")
+
+    if not claude_r1 and not grok_r1:
+        log("⚠️ Both failed Round 1 — holding")
         return [], False, {}
 
-    claude_r1 = safe_ask_claude(r1_prompt, prompt_builder.build_claude_system())
-    if not claude_r1:
-        log("⚠️ Claude Round 1 failed — holding")
-        return [], False, {}
+    # ── UNIFIED CRYPTO EXECUTION from R1 responses ────────────
+    # Extract crypto_trades from both AI responses and execute now.
+    # Zero extra AI calls — crypto piggybacks on the stock R1 call.
+    if crypto_trader.is_enabled() and crypto_context_str:
+        try:
+            crypto_pool_now = crypto_trader.get_wallet_snapshot().get("usdt_free", 0)
+            crypto_new = crypto_trader.execute_from_r1(
+                claude_r1       = claude_r1,
+                grok_r1         = grok_r1,
+                crypto_pool     = crypto_pool_now,
+                record_trade_fn = record_trade,
+                prompt_builder  = prompt_builder,
+            )
+            if crypto_new:
+                log(f"🪙 Crypto: {crypto_new} new position(s) from unified R1")
+        except Exception as cex:
+            log(f"⚠️ Crypto R1 execution failed: {cex}")
 
-    log(f"🔵 Claude: '{claude_r1.get('strategy_name','')}' | {len(claude_r1.get('proposed_trades',[]))} trades")
-
-    # ── Round 2 — Grok reviews Claude's proposal (support role only) ──
-    # Grok no longer trades its own fund or proposes independent trades;
-    # it's a second-opinion / risk-check on Claude's picks.
+    # ── AUTONOMOUS TRADES (Round 2 — quick review) ─────────────────
+    # Each AI proposes trades for their own fund independently
     c_trades = [(t.get("symbol"),t.get("confidence"),t.get("direction","long"))
                 for t in (claude_r1 or {}).get("proposed_trades",[])]
+    g_trades = [(t.get("symbol"),t.get("confidence"),t.get("direction","long"))
+                for t in (grok_r1 or {}).get("proposed_trades",[])]
 
-    g_ok = shared_state.get("grok_healthy", True)
-    grok_review = None
-    if g_ok and c_trades:
-        log("🔴 Round 2 — Grok reviewing Claude's proposal (support role)...")
-        g_review_prompt = f"""Claude is proposing these trades this cycle: {c_trades}.
-You are Grok, acting as a SUPPORT / second-opinion risk-check — you do NOT trade your own fund.
-Use X/Twitter sentiment and news to flag risk on each symbol.
-JSON only: {{"reviewed":[{{"symbol":"NVDA","verdict":"confirm|caution|veto","note":"<12w>"}}]}}"""
-        grok_review = ask_with_retry(ask_grok_guarded, g_review_prompt,
-            "You are Grok, a support/risk-check reviewer only — not an independent trader. ONLY valid JSON under 400 chars.")
-        if grok_review:
-            log(f"🔴 Grok review: {len(grok_review.get('reviewed',[]))} trade(s) reviewed")
-    elif not g_ok:
-        log("⚠️ Grok unhealthy — proceeding on Claude's proposal alone")
+    log("🔵 Round 2 — Claude autonomous review...")
+    log("🔴 Round 2 — Grok autonomous review...")
 
-    vetoed = set()
-    for r in (grok_review or {}).get("reviewed", []):
-        verdict = str(r.get("verdict", "")).lower()
-        sym     = r.get("symbol")
-        if verdict == "veto" and sym:
-            vetoed.add(sym)
-            log(f"🔴 Grok VETO {sym}: {r.get('note','')[:60]} — skipping")
-        elif verdict == "caution" and sym:
-            log(f"🟡 Grok caution on {sym}: {r.get('note','')[:60]}")
-
-    # ── Round 3 — Claude confirms its best trades ──────────────
-    log("🔵 Round 3 — Claude confirming best trades...")
-    c_review_prompt = f"""Your proposed trades: {c_trades}. Grok's risk review: {(grok_review or {}).get('reviewed', [])}.
+    c_review_prompt = f"""Your autonomous trades: {c_trades}. Grok's trades: {g_trades}.
 Your budget: ${pool['claude']:.2f}. Confirm your best 1-2 trades (owner=claude).
-Min $8. Confidence 80%+.
+No overlap with Grok if possible. Min $8. Confidence 80%+.
 JSON: {{"refined_trades":[{{"action":"buy|sell","symbol":"NVDA","notional_usd":15.0,"confidence":85,"f":"flags","r":"<8w>","owner":"claude"}}]}}"""
 
-    # Re-check health here (not c_ok from before Round 1) — a
-    # credits_exhausted failure in Round 1 flips claude_healthy to False
-    # immediately, and we don't want Round 3 to hit the same dead API.
-    claude_r2 = (ask_with_retry(ask_claude_guarded, c_review_prompt,
-        "You are Claude confirming your proposed trades. ONLY valid JSON under 500 chars.")
-        if shared_state.get("claude_healthy", True) else None)
+    g_review_prompt = f"""Your autonomous trades: {g_trades}. Claude's trades: {c_trades}.
+Your budget: ${pool['grok']:.2f}. Confirm your best 1-2 trades (owner=grok).
+Use Twitter sentiment. No overlap with Claude. Min $8. Confidence 80%+.
+JSON: {{"refined_trades":[{{"action":"buy|sell","symbol":"NVDA","notional_usd":15.0,"confidence":85,"f":"flags","r":"<8w>","owner":"grok"}}]}}"""
 
-    if claude_r2: log(f"🔵 Claude confirmed: {len(claude_r2.get('refined_trades',[]))} trades")
+    claude_r2 = ask_with_retry(ask_claude, c_review_prompt,
+        "You are Claude confirming your autonomous trades. ONLY valid JSON under 500 chars.")
+    grok_r2   = ask_with_retry(ask_grok, g_review_prompt,
+        "You are Grok confirming your autonomous trades. ONLY valid JSON under 500 chars.")
 
-    c_ref = (claude_r2 or {}).get("refined_trades", (claude_r1 or {}).get("proposed_trades",[])[:2])
-    final_trades = [t for t in c_ref if t.get("symbol") not in vetoed]
-    for t in final_trades:
-        t["owner"] = "claude"
-        t.setdefault("fee_estimate", estimate_fees(float(t.get("notional_usd", 0) or 0)))
+    if claude_r2: log(f"🔵 Claude autonomous: {len(claude_r2.get('refined_trades',[]))} trades confirmed")
+    if grok_r2:   log(f"🔴 Grok autonomous:   {len(grok_r2.get('refined_trades',[]))} trades confirmed")
 
+    # ── COLLABORATIVE BIG-TICKET CHECK (Round 3) ─────────────────
+    # Only fires when BOTH AIs agree at 95%+ with news + 5 signals
+    log("🤝 Round 3 — Collaborative big-ticket gate check...")
+
+    collab_trades = []
+    collab_budget = pool.get("collaborative", 0)
+
+    # Find highest-confidence matching trades from both AIs
+    c_proposals = (claude_r1 or {}).get("proposed_trades", [])
+    g_proposals = (grok_r1 or {}).get("proposed_trades", [])
+
+    # Also gather collaborative candidates both AIs flagged
+    c_collab_candidates = (claude_r1 or {}).get("collaborative_candidates", [])
+    g_collab_candidates = (grok_r1   or {}).get("collaborative_candidates", [])
+    all_collab_syms = set(
+        [c.get("symbol") for c in c_collab_candidates if c.get("symbol")] +
+        [c.get("symbol") for c in g_collab_candidates if c.get("symbol")]
+    )
+    if all_collab_syms:
+        log(f"🤝 Collaborative candidates flagged by AIs: {list(all_collab_syms)}")
+
+    # Add collaborative candidates as synthetic trade proposals for gate check
+    for sym in all_collab_syms:
+        c_conf_val = next((c.get("confidence",85) for c in c_collab_candidates if c.get("symbol")==sym), 85)
+        g_conf_val = next((c.get("confidence",85) for c in g_collab_candidates if c.get("symbol")==sym), 85)
+        if c_conf_val >= 85 and g_conf_val >= 85:
+            c_proposals.append({"symbol":sym,"action":"buy","confidence":c_conf_val,"signals":["collab_candidate","politician_or_gainer"],"rationale":f"Flagged by Claude as collaborative"})
+            g_proposals.append({"symbol":sym,"action":"buy","confidence":g_conf_val,"signals":["collab_candidate","politician_or_gainer"],"rationale":f"Flagged by Grok as collaborative"})
+
+    for c_trade in c_proposals:
+        for g_trade in g_proposals:
+            if c_trade.get("symbol") == g_trade.get("symbol"):
+                worthy, reason = is_collaborative_trade_worthy(
+                    c_trade, g_trade, chart_section, news,
+                    equity=equity, collab_pool=collab_budget
+                )
+                if worthy:
+                    log(f"🚨 COLLABORATIVE GATE PASSED: {c_trade.get('symbol')} — {reason}")
+                    # Size the collaborative trade — minimum $1,000
+                    collab_notional = min(
+                        collab_budget * RULES["collab_max_trade_pct"],
+                        collab_budget - 50  # keep buffer
+                    )
+                    collab_notional = max(collab_notional, RULES["collab_min_trade_size"])
+                    fee_est = estimate_fees(collab_notional)
+                    collab_trades.append({
+                        "action":       c_trade.get("action", "buy"),
+                        "symbol":       c_trade.get("symbol"),
+                        "notional_usd": round(collab_notional, 2),
+                        "confidence":   min(c_trade.get("confidence",95), g_trade.get("confidence",95)),
+                        "owner":        "shared",
+                        "rationale":    f"COLLABORATIVE: Claude+Grok both 95%+ | {c_trade.get('rationale','')[:60]}",
+                        "fee_estimate": fee_est,
+                        "is_collab":    True,
+                    })
+                    log(f"💥 BIG TICKET: {c_trade.get('symbol')} ${collab_notional:.2f} from collaborative pool!")
+                else:
+                    log(f"⛔ Collaborative gate FAILED: {c_trade.get('symbol')} — {reason}")
+
+    # Combine autonomous + collaborative trades
+    c_ref   = (claude_r2 or {}).get("refined_trades", c_proposals[:2])
+    g_ref   = (grok_r2   or {}).get("refined_trades", g_proposals[:2])
+    all_trades = c_ref + g_ref + collab_trades
+
+    # Deduplicate — collab takes priority over autonomous for same symbol
+    seen_symbols = set()
+    final_trades = []
+    # Add collab first (priority)
+    for t in collab_trades:
+        if t.get("symbol") not in seen_symbols:
+            final_trades.append(t)
+            seen_symbols.add(t.get("symbol"))
+    # Add autonomous trades (no overlap with collab)
+    for t in c_ref + g_ref:
+        if t.get("symbol") not in seen_symbols:
+            final_trades.append(t)
+            seen_symbols.add(t.get("symbol"))
+
+    all_owned = shared_state["claude_positions"] + shared_state["grok_positions"]
     total_alloc = sum(t.get("notional_usd", 0) for t in final_trades)
-    log(f"🎯 Final plan: {len(final_trades)} Claude trade(s), Grok-reviewed | ${total_alloc:.2f} to deploy | Cash: ${cash:.2f}")
+
+    log(f"🤝 Final plan: {len(collab_trades)} collaborative + {len(c_ref)} Claude + {len(g_ref)} Grok trades")
+    log(f"💰 Total to deploy: ${total_alloc:.2f} | Cash: ${cash:.2f}")
 
     for t in final_trades:
-        log(f"   [CLAUDE] {t.get('action','?').upper()} {t.get('symbol','?')} "
+        tag = "💥 COLLAB" if t.get("is_collab") else f"[{t.get('owner','?').upper()}]"
+        log(f"   {tag} {t.get('action','?').upper()} {t.get('symbol','?')} "
             f"${t.get('notional_usd',0):.2f} conf={t.get('confidence','?')}% "
             f"fee≈${t.get('fee_estimate',0):.3f}")
 
     # Update bearish watchlist
-    for sym in (claude_r1 or {}).get("bearish_watchlist", []):
-        if sym not in shared_state["bearish_watchlist"]:
-            shared_state["bearish_watchlist"].append(sym)
+    for r in [claude_r1, grok_r1]:
+        if r:
+            for sym in r.get("bearish_watchlist", []):
+                if sym not in shared_state["bearish_watchlist"]:
+                    shared_state["bearish_watchlist"].append(sym)
     if shared_state["bearish_watchlist"]:
         log(f"📋 Bearish watchlist: {shared_state['bearish_watchlist']}")
 
     autonomy_unlocked = equity >= 150
-    return final_trades, autonomy_unlocked, {"joint_message": f"{len(final_trades)} Claude trade(s), Grok-reviewed"}
+    return final_trades, autonomy_unlocked, {"joint_message": f"{len(collab_trades)} collab + {len(c_ref+g_ref)} autonomous trades"}
 
 def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, features):
     remaining_cash = cash
@@ -2435,12 +2346,10 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                 log(f"⚠️ Already own {symbol}"); continue
             # Dynamic position sizing — scale with equity, not fixed AI suggestion
             def _dynamic_notional(eq, cash_avail, owner_budget):
-                if eq < 500:
-                    # Maximize cash use while small — match the tier
-                    # risk_pct already shown to the AI in the prompt
-                    # (was a flatter 20%/15% cap that left cash sitting
-                    # idle across multiple trades to fully deploy).
-                    target = round(eq * get_stock_tier(eq)["risk_pct"], 2)
+                if eq < 200:
+                    target = round(eq * 0.20, 2)   # 20% of equity
+                elif eq < 500:
+                    target = round(eq * 0.15, 2)   # 15% of equity
                 elif eq < 2000:
                     target = round(eq * 0.12, 2)   # 12% of equity
                 else:
@@ -2577,12 +2486,6 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
                     log(f"⚠️ Exit strategy assign failed: {ex} — defaulting to A")
                     assign_exit_strategy(symbol, "A", notional/10, 80, "default")
 
-                # ── Broker-side protective stop (survives bot outages).
-                # Runs after exit-strategy assignment so Turtle positions
-                # get their 2N stop. Unfilled buys are covered later by
-                # ensure_protective_stops.
-                _arm_stop_after_buy(order, symbol, limit_price or 0)
-
             except Exception as e: log(f"❌ Buy {symbol}: {e}")
 
         elif action == "short":
@@ -2633,22 +2536,12 @@ def execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, feat
 # [check_ai_health → moved to ai_clients.py]
 def get_cash_thresholds(equity):
     """Return cash thresholds (sleep/watch/active) scaled to equity."""
-    sleep_thresh = RULES["cash_sleep_threshold"]  # Always $8
-
-    if equity < 500:
-        # Maximize cash use while the account is small: wake for a real
-        # decision cycle as soon as there's enough cash to size a trade
-        # (min trade is $8), instead of waiting for it to build up to the
-        # standard $20-30 watch/active bands — that left cash sitting
-        # idle for cycles at a time. Reverts to standard scaling at $500+.
-        watch_thresh  = 12.0
-        active_thresh = 15.0
-    else:
-        watch_thresh  = max(
-            RULES["threshold_floor"],
-            round(equity * RULES["threshold_equity_pct"], 2)
-        )
-        active_thresh = round(watch_thresh * RULES["threshold_active_mult"], 2)
+    sleep_thresh  = RULES["cash_sleep_threshold"]  # Always $8
+    watch_thresh  = max(
+        RULES["threshold_floor"],
+        round(equity * RULES["threshold_equity_pct"], 2)
+    )
+    active_thresh = round(watch_thresh * RULES["threshold_active_mult"], 2)
 
     return {
         "sleep":  sleep_thresh,
@@ -2668,16 +2561,13 @@ def run_autopilot(positions, pos_symbols, cash, equity):
     log("🤖 AUTOPILOT MODE — Pure technical rules, no AI calls")
     log(f"   Rules: BUY if RSI<{RULES['autopilot_rsi_buy']} + MACD+ | SELL if RSI>{RULES['autopilot_rsi_sell']}")
 
-    tp_target = get_quick_take_profit_pct(equity) or RULES["take_profit_pct"]
-
     # Check exits first
     for pos in positions:
         symbol  = pos["symbol"]
         pnl_pct = float(pos["unrealized_plpc"])
-        if pnl_pct >= tp_target:
-            log(f"🎯 AUTOPILOT take-profit: {symbol} +{pnl_pct*100:.1f}% >= {tp_target*100:.1f}%")
+        if pnl_pct >= RULES["take_profit_pct"]:
+            log(f"🎯 AUTOPILOT take-profit: {symbol} +{pnl_pct*100:.1f}%")
             try:
-                cancel_stock_orders(symbol, "(before autopilot TP close)")
                 alpaca("DELETE", f"/v2/positions/{symbol}")
                 record_trade("take_profit", symbol, pos.get("qty"), float(pos.get("current_price",0)),
                              float(pos.get("market_value",0)), "bot",
@@ -2691,7 +2581,6 @@ def run_autopilot(positions, pos_symbols, cash, equity):
         elif pnl_pct <= -RULES["stop_loss_pct"]:
             log(f"🛑 AUTOPILOT stop-loss: {symbol} {pnl_pct*100:.1f}%")
             try:
-                cancel_stock_orders(symbol, "(before autopilot SL close)")
                 alpaca("DELETE", f"/v2/positions/{symbol}")
                 record_trade("stop_loss", symbol, pos.get("qty"), float(pos.get("current_price",0)),
                              float(pos.get("market_value",0)), "bot",
@@ -2868,7 +2757,7 @@ Respond ONLY with JSON:
     grok_decision   = None
 
     try:
-        claude_decision = ask_with_retry(ask_claude_guarded, low_cash_prompt,
+        claude_decision = ask_with_retry(ask_claude, low_cash_prompt,
             "You are Claude managing low cash situation. ONLY valid JSON under 500 chars.")
         if claude_decision:
             log(f"🔵 Claude low-cash: action={claude_decision.get('action')} sell={claude_decision.get('sell_recommendation')} next={claude_decision.get('next_buy_target')}")
@@ -2876,7 +2765,7 @@ Respond ONLY with JSON:
         log(f"❌ Claude low-cash: {e}")
 
     try:
-        grok_decision = ask_with_retry(ask_grok_guarded, low_cash_prompt,
+        grok_decision = ask_with_retry(ask_grok, low_cash_prompt,
             "You are Grok managing low cash situation. ONLY valid JSON under 500 chars.")
         if grok_decision:
             log(f"🔴 Grok low-cash: action={grok_decision.get('action')} sell={grok_decision.get('sell_recommendation')} next={grok_decision.get('next_buy_target')}")
@@ -2884,21 +2773,18 @@ Respond ONLY with JSON:
         log(f"❌ Grok low-cash: {e}")
 
     # ── DECISION LOGIC ──────────────────────────────────────
-    # Claude is the sole decision-maker; Grok's read is advisory context,
-    # logged alongside Claude's call but never required to act.
+    # Only sell if BOTH AIs agree on same symbol
     c_sell = (claude_decision or {}).get("sell_recommendation", "none").upper()
     g_sell = (grok_decision   or {}).get("sell_recommendation", "none").upper()
     c_action = (claude_decision or {}).get("action", "hold").lower()
     g_action = (grok_decision   or {}).get("action", "hold").lower()
 
     # Check if any position hit take-profit or stop-loss automatically
-    tp_target = (get_quick_take_profit_pct(equity) or RULES["take_profit_pct"]) * 100
     sold_something = False
     for p in pos_details:
-        if p["pnl_pct"] >= tp_target:
-            log(f"🎯 [{p['owner']}] Auto take-profit: {p['symbol']} at +{p['pnl_pct']:.1f}% (target {tp_target:.1f}%)")
+        if p["pnl_pct"] >= RULES["take_profit_pct"] * 100:
+            log(f"🎯 [{p['owner']}] Auto take-profit: {p['symbol']} at +{p['pnl_pct']:.1f}%")
             try:
-                cancel_stock_orders(p["symbol"], "(before low-cash TP close)")
                 alpaca("DELETE", f"/v2/positions/{p['symbol']}")
                 record_trade("take_profit", p["symbol"], None, p["price"], p["value"],
                              p["owner"].lower(), reason="low-cash auto take-profit",
@@ -2913,7 +2799,6 @@ Respond ONLY with JSON:
         elif p["pnl_pct"] <= -RULES["stop_loss_pct"] * 100:
             log(f"🛑 [{p['owner']}] Auto stop-loss: {p['symbol']} at {p['pnl_pct']:.1f}%")
             try:
-                cancel_stock_orders(p["symbol"], "(before low-cash SL close)")
                 alpaca("DELETE", f"/v2/positions/{p['symbol']}")
                 record_trade("stop_loss", p["symbol"], None, p["price"], p["value"],
                              p["owner"].lower(), reason="low-cash auto stop-loss",
@@ -2925,20 +2810,17 @@ Respond ONLY with JSON:
             except Exception as e:
                 log(f"❌ Sell {p['symbol']}: {e}")
 
-    # Claude decides whether to sell; Grok's agreement (or not) is logged
-    # as supporting context only, and is never required to act.
-    if c_sell != "NONE" and c_sell in pos_symbols and not sold_something:
-        grok_note = ("Grok agrees" if c_sell == g_sell
-                     else f"Grok says {g_sell or 'HOLD'} (advisory only)")
-        log(f"🔵 Claude decision: SELL {c_sell} to free up cash ({grok_note})")
+    # If both AIs agree to sell same symbol AND it's not already auto-sold
+    if c_sell == g_sell and c_sell != "NONE" and c_sell in pos_symbols and not sold_something:
+        log(f"🤝 Both AIs agree: SELL {c_sell} to free up cash")
         log(f"   Claude reason: {(claude_decision or {}).get('sell_reason','')}")
+        log(f"   Grok reason:   {(grok_decision   or {}).get('sell_reason','')}")
         try:
-            cancel_stock_orders(c_sell, "(before low-cash sell)")
             alpaca("DELETE", f"/v2/positions/{c_sell}")
             sold_pos = next((p for p in pos_details if p["symbol"] == c_sell), {})
             record_trade("sell", c_sell, None, sold_pos.get("price"), sold_pos.get("value"),
                          sold_pos.get("owner","shared").lower(),
-                         reason=f"low-cash: Claude decision — {(claude_decision or {}).get('sell_reason','')}",
+                         reason=f"low-cash: both AIs agreed — {(claude_decision or {}).get('sell_reason','')}",
                          pnl_usd=sold_pos.get("pnl_usd"), pnl_pct=(sold_pos.get("pnl_pct",0)/100 if sold_pos.get("pnl_pct") else None))
             shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != c_sell]
             shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != c_sell]
@@ -2947,22 +2829,27 @@ Respond ONLY with JSON:
         except Exception as e:
             log(f"❌ Sell {c_sell}: {e}")
 
-    elif c_action == "hold":
-        log(f"🔵 Claude decision: HOLD all positions — not worth selling yet")
-        if g_action != "hold":
-            log(f"   (Grok's read was: {g_action} {g_sell} — advisory only)")
+    elif c_action == "hold" and g_action == "hold":
+        log(f"🤝 Both AIs agree: HOLD all positions — not worth selling yet")
         log(f"   Best position: {max(pos_details, key=lambda x: x['pnl_pct'])['symbol'] if pos_details else 'none'}")
+
+    elif c_sell != g_sell and c_sell != "NONE" and g_sell != "NONE":
+        log(f"⚠️ AIs disagree on what to sell (Claude={c_sell} Grok={g_sell}) — HOLDING")
+        log(f"   Will wait for clearer signal or auto stop-loss/take-profit")
 
     # ── NEXT STRATEGY LOG ───────────────────────────────────
     c_next = (claude_decision or {}).get("next_buy_target", "")
     g_next = (grok_decision   or {}).get("next_buy_target", "")
 
-    log(f"📋 NEXT BUY TARGET (ready when cash available):")
-    if c_next: log(f"   🔵 Claude (decision):  {c_next} — {(claude_decision or {}).get('next_buy_reason','')[:80]}")
-    if g_next: log(f"   🔴 Grok (advisory):    {g_next} — {(grok_decision   or {}).get('next_buy_reason','')[:80]}")
+    log(f"📋 NEXT BUY TARGETS (ready when cash available):")
+    if c_next: log(f"   🔵 Claude: {c_next} — {(claude_decision or {}).get('next_buy_reason','')[:80]}")
+    if g_next: log(f"   🔴 Grok:   {g_next} — {(grok_decision   or {}).get('next_buy_reason','')[:80]}")
 
-    if c_next:
+    if c_next == g_next and c_next:
+        log(f"   🤝 AGREED: Both targeting {c_next} — will buy first chance!")
         shared_state["next_buy_target"] = c_next
+    elif c_next or g_next:
+        shared_state["next_buy_target"] = c_next or g_next
 
     log("=" * 50)
     log(f"💸 Low cash cycle complete | Cash: ${cash:.2f} | Positions: {len(positions)}")
@@ -3052,3 +2939,1875 @@ def _boot_binance_sync():
     except Exception as e:
         log(f"⚠️ Binance history sync failed: {e}")
 threading.Thread(target=_boot_binance_sync, daemon=True).start()
+# sleep_manager needs get_cash_thresholds (defined ~line 2640)
+_sleep_manager._set_context(log, shared_state,
+                             get_cash_thresholds_fn = get_cash_thresholds,
+                             get_spy_trend_fn       = get_spy_trend,
+                             save_state_fn_ref      = _save_all_persistent_state)
+_pdt_manager._set_context(
+    log_fn                = log,
+    shared_state_ref      = shared_state,
+    rules                 = RULES,
+    alpaca_fn             = alpaca,
+    ask_claude_fn         = ask_claude,
+    ask_grok_fn           = ask_grok,
+    parse_json_fn         = parse_json,
+    smart_sell_fn         = smart_sell,
+    record_trade_fn       = record_trade,
+    get_bars_fn           = get_bars,
+    compute_indicators_fn = compute_indicators,
+)
+
+# ── Core Reserve context wiring ──────────────────────────────
+# The reserve module is fully isolated — receives only what it needs
+# to fetch prices and place orders on its own behalf. The tactical
+# AIs cannot reach into core_reserve's state at all.
+if HAVE_CORE_RESERVE:
+    try:
+        # Stock-price fetcher for Core Reserve. Uses DATA_URL (different domain
+        # from trading API). Returns 0.0 on failure — caller handles it.
+        # Falls back to bars endpoint if quotes is unavailable (e.g. weekends).
+        def _core_reserve_stock_price(symbol: str) -> float:
+            try:
+                snap_url = f"{DATA_URL}/v2/stocks/{symbol}/quotes/latest"
+                headers  = {"APCA-API-KEY-ID": ALPACA_KEY,
+                            "APCA-API-SECRET-KEY": ALPACA_SECRET}
+                r = requests.get(snap_url, headers=headers, timeout=5)
+                if r.ok:
+                    quote = r.json().get("quote", {})
+                    bid = float(quote.get("bp", 0))
+                    ask = float(quote.get("ap", 0))
+                    if bid > 0 and ask > 0:
+                        return round((bid + ask) / 2, 2)
+                    if ask > 0:
+                        return ask
+                # Fallback: latest bar close (works pre-market / after-hours)
+                bars = get_bars(symbol, days=1)
+                if bars and len(bars) > 0:
+                    last = bars[-1]
+                    if isinstance(last, dict) and last.get("c"):
+                        return float(last["c"])
+            except Exception:
+                pass
+            return 0.0
+
+        core_reserve._set_context(
+            log_fn          = log,
+            binance_get_fn  = binance_crypto.binance_get,
+            binance_post_fn = binance_crypto.binance_post,
+            alpaca_fn       = alpaca,
+            wallet_fn       = binance_crypto.get_full_wallet,
+            record_trade_fn = record_trade,
+            stock_price_fn  = _core_reserve_stock_price,
+        )
+        log(f"🏦 Core Reserve module loaded — activation threshold ${core_reserve.ACTIVATION_THRESHOLD:.0f}")
+    except Exception as _cre:
+        log(f"⚠️ Core Reserve init failed: {_cre}")
+
+# ── Strategic Brain context wiring (Phase A: plumbing only) ──────────
+# The strategic brain receives the same dependencies needed to do its job
+# when activated in Phase B. In Phase A, ENABLE_STRATEGIST=False keeps
+# all of this dormant — endpoints respond with state, but no AI calls.
+if HAVE_STRATEGIC_BRAIN:
+    try:
+        # Wallet getter — used by strategic_brain to auto-upgrade strategist
+        # model tier when wallet crosses $5,000 threshold.
+        def _strategist_wallet() -> float:
+            try:
+                acct = alpaca("GET", "/v2/account") or {}
+                stock_eq = float(acct.get("equity", 0) or 0)
+                wallet   = binance_crypto.get_full_wallet() or {}
+                crypto_v = float(wallet.get("total_value", 0) or 0)
+                return stock_eq + crypto_v
+            except Exception:
+                return 0.0
+
+        # Trade history getter — strategist reads only its own AI's trades
+        def _strategist_trade_history(owner: str = None, limit: int = 30) -> list:
+            try:
+                # Latest closed trades from the persistent trade history,
+                # filtered by owner (claude/grok/core_reserve)
+                from portfolio_manager import trade_history as _th
+                if not _th:
+                    return []
+                # Filter to closes only (sell-side actions with pnl_usd populated)
+                exit_actions = {"sell", "stop_loss", "take_profit",
+                                "trail_stop", "time_stop"}
+                results = []
+                for t in reversed(_th):
+                    if t.get("action") not in exit_actions:
+                        continue
+                    if owner and t.get("owner") != owner:
+                        continue
+                    results.append(t)
+                    if len(results) >= limit:
+                        break
+                return results
+            except Exception as e:
+                log(f"⚠️ Strategist trade history fetch failed: {e}")
+                return []
+
+        # Market context — what's happening macro that the strategist should
+        # consider when writing strategy. SPY, BTC, VIX, and current positions.
+        def _strategist_market_context() -> dict:
+            ctx = {}
+            try:
+                # SPY price
+                snap_url = f"{DATA_URL}/v2/stocks/SPY/quotes/latest"
+                headers  = {"APCA-API-KEY-ID": ALPACA_KEY,
+                            "APCA-API-SECRET-KEY": ALPACA_SECRET}
+                r = requests.get(snap_url, headers=headers, timeout=5)
+                if r.ok:
+                    q = r.json().get("quote", {})
+                    bid = float(q.get("bp", 0)); ask = float(q.get("ap", 0))
+                    if bid > 0 and ask > 0:
+                        ctx["spy_price"] = round((bid + ask) / 2, 2)
+                # BTC price
+                btc_r = binance_crypto.binance_get(
+                    "/api/v3/ticker/price", {"symbol": "BTCUSDT"})
+                if btc_r and "price" in btc_r:
+                    ctx["btc_price"] = float(btc_r["price"])
+                # Combined wallet
+                ctx["combined_wallet"] = _strategist_wallet()
+                # Open positions count
+                try:
+                    pos = alpaca("GET", "/v2/positions") or []
+                    ctx["stock_positions"] = len(pos) if isinstance(pos, list) else 0
+                except Exception:
+                    ctx["stock_positions"] = 0
+                try:
+                    crypto_pos = (binance_crypto.get_full_wallet() or {}).get("tradeable", [])
+                    ctx["crypto_positions"] = len(crypto_pos)
+                except Exception:
+                    ctx["crypto_positions"] = 0
+            except Exception as e:
+                log(f"⚠️ Strategist market context fetch failed: {e}")
+            return ctx
+
+        # Strategist API wrappers — these read the model registry per-call
+        # so wallet-tier upgrades take effect automatically. In Phase A,
+        # these are NOT called (ENABLE_STRATEGIST is False). They exist so
+        # the wiring is verified and Phase B is a 1-line activation.
+        def _ask_claude_strategist(prompt: str, system: str = "", max_tokens: int = 4000) -> str:
+            spec = strategic_brain.get_active_model("strategist", "claude",
+                                                   wallet=_strategist_wallet())
+            with httpx.Client(timeout=120) as http:
+                res = http.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_KEY,
+                             "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    json={"model": spec["model_id"],
+                          "max_tokens": min(max_tokens, spec.get("max_tokens", 4000)),
+                          "system": system or "You are a strategic trading AI. Output valid JSON only.",
+                          "messages": [{"role": "user", "content": prompt}]},
+                )
+                if not res.is_success:
+                    raise Exception(f"{res.status_code}: {res.text}")
+                return res.json()["content"][0]["text"]
+
+        def _ask_grok_strategist(prompt: str, system: str = "", max_tokens: int = 4000) -> str:
+            # Build fallback chain: spec first, then known-available models.
+            # If GROK_MODEL env var is set, that overrides everything.
+            import os
+            spec = strategic_brain.get_active_model("strategist", "grok",
+                                                   wallet=_strategist_wallet())
+            override = os.environ.get("GROK_MODEL", "").strip()
+            if override:
+                candidates = [override]
+            else:
+                # Try the spec's model first, then fall back through models
+                # known available on the team (console.x.ai).
+                candidates = [spec["model_id"]]
+                for alt in ["grok-4.20-0309-reasoning",
+                            "grok-4.20-0309-non-reasoning",
+                            "grok-4.3",
+                            "grok-build-0.1"]:
+                    if alt not in candidates:
+                        candidates.append(alt)
+            # Reuse a cached working model first if we have one (saves 404s)
+            cached = getattr(_ask_grok_strategist, "_working_model", None)
+            if cached:
+                candidates = [cached] + [c for c in candidates if c != cached]
+
+            last_err = None
+            with httpx.Client(timeout=120) as http:
+                for model_id in candidates:
+                    try:
+                        res = http.post(
+                            "https://api.x.ai/v1/chat/completions",
+                            headers={"Authorization": f"Bearer {GROK_KEY}",
+                                     "Content-Type": "application/json"},
+                            json={"model": model_id,
+                                  "max_tokens": min(max_tokens, spec.get("max_tokens", 4000)),
+                                  "messages": [
+                                      {"role": "system", "content": system or "You are a strategic trading AI. Output valid JSON only."},
+                                      {"role": "user",   "content": prompt},
+                                  ]},
+                        )
+                        if res.is_success:
+                            _ask_grok_strategist._working_model = model_id
+                            return res.json()["choices"][0]["message"]["content"]
+                        if res.status_code == 404:
+                            last_err = f"{model_id} 404"
+                            continue
+                        raise Exception(f"{res.status_code}: {res.text}")
+                    except httpx.HTTPError as e:
+                        last_err = f"{model_id}: {e}"
+                        continue
+            raise Exception(f"All Grok strategist models failed. Last: {last_err}. "
+                            f"Set GROK_MODEL env var to a model your team has access to.")
+
+        strategic_brain._set_context(
+            log_fn                    = log,
+            ask_claude_strategist_fn  = _ask_claude_strategist,
+            ask_grok_strategist_fn    = _ask_grok_strategist,
+            get_trade_history_fn      = _strategist_trade_history,
+            get_market_context_fn     = _strategist_market_context,
+            record_trade_fn           = record_trade,
+            get_wallet_fn             = _strategist_wallet,
+        )
+        # Surface the active model spec for visibility
+        wallet_now = _strategist_wallet()
+        c_spec = strategic_brain.get_active_model("strategist", "claude", wallet=wallet_now)
+        g_spec = strategic_brain.get_active_model("strategist", "grok",   wallet=wallet_now)
+        active = "ACTIVE" if strategic_brain.ENABLE_STRATEGIST else "DORMANT (Phase A)"
+        log(f"🧭 Strategic Brain {active} — wallet ${wallet_now:.2f}")
+        log(f"   Claude-Strategist: {c_spec['model_id']} "
+            f"(${c_spec['input_cost_per_1m']:.2f}/{c_spec['output_cost_per_1m']:.2f} per 1M)")
+        log(f"   Grok-Strategist:   {g_spec['model_id']} "
+            f"(${g_spec['input_cost_per_1m']:.2f}/{g_spec['output_cost_per_1m']:.2f} per 1M)")
+    except Exception as _sbe:
+        log(f"⚠️ Strategic Brain init failed: {_sbe}")
+
+
+
+# [_replay_trade_history_into_memory → portfolio_manager.py]
+def run_cycle():
+    log("── 🤝 Collaboration Cycle ──")
+    if not is_market_open():
+        log("Market closed."); return
+
+    account   = alpaca("GET", "/v2/account")
+    equity    = float(account["equity"])
+    cash      = float(account["cash"])
+    features  = check_account_features(account, equity)
+    pool      = get_trading_pool(equity)
+
+    log(f"💰 REAL Equity: ${equity:.2f} | Cash: ${cash:.2f} | P&L: ${equity-RULES['total_budget']:+.2f}")
+
+    # Update month/year rollover and display gains summary
+    update_gain_metrics(equity)
+    log(format_gains(equity))
+
+    # ── Execute any pending PDT hold councils ─────────────────
+    # These were queued when PDT blocked a sell — now AIs are awake
+    pending_councils = {k: v for k, v in shared_state.items()
+                        if k.startswith("pdt_council_pending_")}
+    for key, council in list(pending_councils.items()):
+        sym = council.get("symbol", "")
+        pos = council.get("pos", {})
+        log(f"📊 Running PDT hold council for {sym} (queued from earlier)...")
+        try:
+            plan = run_pdt_hold_council(sym, pos, ask_claude, ask_grok)
+            if plan:
+                log(f"   ✅ Council complete: hold {plan.get('hold_days')}d "
+                    f"exit=${plan.get('exit_target')} stop=${plan.get('stop_price')}")
+        except Exception as e:
+            log(f"   ⚠️ Council failed: {e}")
+        del shared_state[key]
+
+    # ── Reassess holds with new data if price surged ──────────
+    needs_reassess = {k: v for k, v in shared_state.items()
+                      if k.startswith("pdt_hold_") and v.get("needs_reassess")}
+    for key, plan in list(needs_reassess.items()):
+        sym = plan.get("symbol", "")
+        log(f"📊 PDT SURGE REASSESS: {sym} price moved significantly — re-running council...")
+        try:
+            positions = {p["symbol"]: p for p in alpaca("GET", "/v2/positions")}
+            if sym in positions:
+                new_plan = run_pdt_hold_council(sym, positions[sym], ask_claude, ask_grok)
+                if new_plan:
+                    log(f"   ✅ Updated plan: hold {new_plan.get('hold_days')}d "
+                        f"exit=${new_plan.get('exit_target')}")
+            else:
+                del shared_state[key]  # Position gone
+        except Exception as e:
+            log(f"   ⚠️ Reassess failed: {e}")
+            shared_state[key]["needs_reassess"] = False
+
+    # Check for tier upgrades
+    tier_upgraded, tier_data = check_autonomy_tier(equity)
+    autonomy = get_autonomy_status(equity)
+    if not shared_state["autonomy_mode"]:
+        log(f"🎯 Autonomy progress: {autonomy['progress_pct']}% — need ${autonomy['needed']:.2f} for Tier 1 (${autonomy['next_fund']} each AI)")
+    else:
+        log(f"🔓 Tier {shared_state['autonomy_tier']}: Claude=${shared_state['claude_auto_fund']:.2f} | Grok=${shared_state['grok_auto_fund']:.2f}")
+        if autonomy.get("needed", 0) > 0:
+            log(f"🎯 Next tier: ${autonomy['needed']:.2f} away — {autonomy.get('next_description','')}")
+
+    if pool["autonomy_active"]:
+        log(f"💼 Tier {pool['tier']}: Claude=${pool['claude']:.2f}(auto) | Grok=${pool['grok']:.2f}(auto) | Collab=${pool['collaborative']:.2f} | Reserve=${pool['reserve']:.2f}")
+    else:
+        log(f"💼 Pool: ${pool['trading']:.2f} collaborative | Reserve=${pool['reserve']:.2f} (safe)")
+
+    # Collaborative big-ticket status
+    collab_needed = max(0, RULES["collab_unlock_equity"] - equity)
+    if collab_needed > 0:
+        collab_pct = round(equity / RULES["collab_unlock_equity"] * 100, 1)
+        log(f"🔒 Collaborative big-ticket: LOCKED — need ${collab_needed:.0f} more (${equity:.0f}/${RULES['collab_unlock_equity']} = {collab_pct}% | min trade ${RULES['collab_min_trade_size']:,})")
+    else:
+        log(f"💥 Collaborative big-ticket: UNLOCKED — pool=${pool.get('collaborative',0):.2f} | min trade ${RULES['collab_min_trade_size']:,}")
+
+    # Daily loss limit — compare to today's starting equity, not all-time budget
+    # Use equity at market open (stored in shared_state) as the baseline
+    # This prevents false triggers from cumulative losses across days
+    day_start_equity = shared_state.get("day_start_equity", equity)
+    if day_start_equity <= 0:
+        day_start_equity = equity
+    loss_pct = (day_start_equity - equity) / day_start_equity if day_start_equity > equity else 0
+    if loss_pct >= RULES["daily_loss_limit_pct"]:
+        log(f"🛑 Daily loss limit {loss_pct*100:.1f}% — STOPPING today. "
+            f"(start=${day_start_equity:.2f} now=${equity:.2f})")
+        return
+
+    positions   = alpaca("GET", "/v2/positions")
+    pos_symbols = [p["symbol"] for p in positions]
+    open_count  = len(positions)
+    log(f"Positions ({open_count}): {pos_symbols or 'none'}")
+
+    track_pnl(positions)
+    log(f"📊 Today: Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}")
+
+    check_exit_conditions(positions)
+    positions   = alpaca("GET", "/v2/positions")
+    pos_symbols = [p["symbol"] for p in positions]
+    open_count  = len(positions)
+
+    # ── AI HEALTH CHECK ─────────────────────────────────────
+    c_ok, g_ok, failover_mode = check_ai_health()
+
+    # ── DYNAMIC CASH THRESHOLDS ──────────────────────────────
+    thresholds       = get_cash_thresholds(equity)
+    sleep_threshold  = thresholds["sleep"]
+    watch_threshold  = thresholds["watch"]
+    active_threshold = thresholds["active"]
+    has_positions    = open_count > 0
+
+    log(f"💵 Cash thresholds — sleep=${sleep_threshold} watch=${watch_threshold:.2f} active=${active_threshold:.2f}")
+
+    # TIER 1: No cash AND no positions — fully flat
+    if cash < sleep_threshold and not has_positions:
+        log(f"😴 CASH SLEEP (${cash:.2f} < ${sleep_threshold}) — No AI calls, fully flat")
+        return
+
+    # TIER 2: No cash but has positions — profit-taking mode
+    if cash < sleep_threshold and has_positions:
+        log(f"💸 LOW CASH (${cash:.2f}) — Profit-taking focus")
+        run_low_cash_cycle(positions, pos_symbols, cash, equity, features)
+        return
+
+    # TIER 3: Between sleep and active — both AIs sleep, bot monitors alone
+    if sleep_threshold <= cash < active_threshold:
+        log(f"😴 BOT AUTONOMOUS (${cash:.2f}) — Both AIs sleeping until cash >= ${active_threshold:.2f}")
+        log(f"   Bot monitoring {len(positions)} positions | Zero AI calls")
+        shared_state["watch_mode_active"] = False
+        shared_state["ai_sleeping"]       = True
+        if not shared_state.get("sleep_reason"):
+            shared_state["sleep_reason"] = f"cash ${cash:.2f} below threshold ${active_threshold:.2f}"
+        # Bot just runs autonomous monitor — no AI calls at all
+        fires = run_autonomous_monitor(positions, pos_symbols, cash, equity)
+        if fires > 0:
+            log(f"   Bot executed {fires} autonomous exit(s)")
+        log(f"   Next wake: cash >= ${active_threshold:.2f} | 2+ stops | 4pm review | 8:30am research")
+        log(f"   API saved: 0 calls used vs 5 normal")
+        return
+
+    # Cash is sufficient for full collaboration
+    shared_state["watch_mode_active"] = False
+
+    # TIER 4: Both AIs down — autopilot
+    if failover_mode == "autopilot":
+        log(f"🆘 AUTOPILOT — Both AIs down, pure technical rules")
+        run_autopilot(positions, pos_symbols, cash, equity)
+        return
+
+    # ── SPY TREND FILTER ─────────────────────────────────────
+    spy_trend, spy_price, spy_sma50, spy_change = get_spy_trend()
+    log(f"📈 SPY trend: {spy_trend.upper()} | price=${spy_price:.2f} vs SMA50=${spy_sma50:.2f} | 5d={spy_change:+.2f}%")
+
+    if spy_trend == "bear":
+        log(f"🐻 BEAR MARKET FILTER — SPY below SMA50")
+        log(f"   New buys paused. Managing existing positions only.")
+        log(f"   Existing stops and take-profits still active.")
+        # Still run check_exit_conditions but skip new buys
+        # We signal this to collaborative_session via shared_state
+        shared_state["spy_trend"] = "bear"
+    else:
+        shared_state["spy_trend"] = spy_trend
+        if spy_trend == "bull":
+            log(f"🐂 BULL MARKET — Full trading active")
+
+    log("📡 Fetching news + market...")
+    news       = get_news_context()
+    market_ctx = get_market_context()
+    log("📊 Computing indicators...")
+    chart_section = get_chart_section()
+
+    # ── Phase 1 features ──────────────────────────────────────
+    log("😱 Fetching Fear & Greed Index...")
+    fear_greed = get_fear_greed_index()
+
+    log("📅 Checking earnings calendar...")
+    pos_syms_list = [p["symbol"] for p in positions] if positions else []
+    earnings_warnings = get_earnings_calendar(pos_syms_list + list(RULES.get("universe", [])))
+
+    # Append to market_ctx so AIs see it
+    if fear_greed:
+        fgi_val  = fear_greed.get("value", 50)
+        fgi_sig  = fear_greed.get("signal", "")
+        market_ctx += f"\nFear & Greed Index: {fgi_val}/100 — {fgi_sig}"
+    if earnings_warnings:
+        warn_str = " | ".join([f"{s}: {v['warning']}" for s, v in earnings_warnings.items()])
+        market_ctx += f"\n⚠️ EARNINGS RISK: {warn_str}"
+        log(f"⚠️ Earnings risk symbols: {list(earnings_warnings.keys())}")
+
+    final_trades, autonomy_unlocked, final_plan = collaborative_session(
+        equity, cash, positions, pos_symbols, open_count,
+        chart_section, news, market_ctx, features, pool
+    )
+
+    if not final_trades:
+        log("⏳ No trades agreed — holding.")
+        # No trades = nothing to monitor → AIs stay awake for next cycle
+    else:
+        execute_trades(final_trades, cash, pos_symbols, open_count, final_plan, features)
+
+        # ── Generate trading brief then sleep ───────────────
+        positions_after = alpaca("GET", "/v2/positions")
+        acct_after      = alpaca("GET", "/v2/account")
+        cash_after      = float(acct_after["cash"])
+        eq_after        = float(acct_after["equity"])
+        pool_after      = get_trading_pool(eq_after)
+
+        if positions_after or cash_after < get_cash_thresholds(eq_after)["active"]:
+            log("📋 AIs writing trading brief before sleeping...")
+            try:
+                # Get fresh intelligence for the brief
+                news_b  = get_news_context()
+                mkt_b   = get_market_context()
+                chart_b = get_chart_section()
+                pol_b, pol_trades_b = get_politician_trades()
+                inv_b, inv_hold_b   = get_top_investor_portfolios()
+                gainers_b = get_biggest_gainers()
+                ipos_b    = get_recent_ipos()
+                smart_b   = analyze_smart_money(
+                    analyze_politician_signals(pol_trades_b, chart_b),
+                    inv_hold_b, gainers_b
+                )
+                generate_trading_brief(
+                    eq_after, cash_after, positions_after, pool_after,
+                    chart_b, news_b, mkt_b, pol_b, inv_b,
+                    gainers_b, ipos_b, smart_b
+                )
+            except Exception as be:
+                log(f"⚠️ Brief generation failed: {be} — bot uses default rules")
+
+            ai_sleep(f"brief written — bot monitoring {len(positions_after)} positions + watchlist")
+        else:
+            log("⏳ No positions, sufficient cash — AIs staying awake for next opportunity")
+
+    shared_state["last_sync"] = datetime.now().isoformat()
+    log("── Cycle complete ──\n")
+
+def run_premarket():
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    mins_to_open = max(0, 570 - (now_et.hour * 60 + now_et.minute))
+    log(f"📊 PRE-MARKET ({mins_to_open}min to open) — Research phase...")
+
+    # Reset PDT intraday tracking for new day
+    reset_intraday_buys_if_new_day()
+
+    account = alpaca("GET", "/v2/account")
+    equity  = float(account["equity"])
+
+    # Reset day_start_equity each morning so daily loss limit is accurate
+    shared_state["day_start_equity"] = equity
+    prompt_builder._day_start_equity = equity
+    try:
+        _repair_reset()
+    except Exception:
+        pass
+    # Reset Claude Code escalation state — allow re-escalation of recurring errors
+    try:
+        reset_escalation_state()
+    except Exception:
+        pass
+    # Sunday 3am ET — trigger scheduled maintenance
+    try:
+        if _CC_TRIGGER_AVAILABLE and _cc_trigger:
+            if now_et.weekday() == 6 and now_et.hour == 3:  # Sunday 3am
+                log("🔧 Sunday maintenance — waking Claude Code SSH for weekly audit")
+                threading.Thread(
+                    target=_cc_trigger.trigger_scheduled_maintenance,
+                    args=("weekly",),
+                    daemon=True,
+                ).start()
+    except Exception:
+        pass
+    # Trim trade history to rolling 6 months
+    try:
+        _trim_trade_history_to_6months()
+    except Exception:
+        pass
+    update_gain_metrics(equity)
+    # Reset crypto day baseline
+    try:
+        w = crypto_trader.staking  # verify trader exists
+        shared_state["crypto_day_start"] = shared_state.get(
+            "crypto_day_start", 0)   # will be refreshed on next crypto cycle
+        shared_state["crypto_last_day"] = None  # force baseline refresh
+    except Exception: pass
+    log(f"📅 New day — day_start_equity set to ${equity:.2f}")
+    pool    = get_trading_pool(equity)
+
+    intel        = get_full_market_intelligence()
+    chart        = intel["chart_section"]
+    news         = intel["news"]
+    market       = intel["market_ctx"]
+    pol_text     = intel["pol_text"]
+    pol_signals  = intel["pol_signals"]
+    gainers      = intel["gainers"]
+    inv_text     = intel["inv_text"]
+    smart_money  = intel["smart_money"]
+
+    ipos         = intel.get("ipos", [])
+    pol_mimick   = pol_signals.get("top_mimick", [])
+    pol_buys     = pol_signals.get("universe_buys", [])
+    gainer_syms  = [g["symbol"] for g in gainers if g.get("in_universe")]
+    triple_syms  = smart_money.get("triple_confirmation", [])
+    top_collab   = smart_money.get("top_collab", [])
+    ipo_syms     = [i["symbol"] for i in ipos[:5]]
+    hot_ipos     = [i for i in ipos if abs(i.get("mom_5d", 0)) > 5]
+
+    research_prompt = prompt_builder.build_premarket(
+        equity      = equity,
+        pool        = pool,
+        chart       = chart,
+        news        = news,
+        market      = market,
+        pol_text    = pol_text,
+        pol_mimick  = pol_mimick,
+        triple_syms = triple_syms,
+        top_collab  = top_collab,
+        gainers     = gainers,
+        ipos        = ipos,
+        hot_ipos    = hot_ipos,
+        inv_text    = inv_text,
+        projections = shared_state.get("last_projections", {}),
+    )
+
+    try:
+        c_research = ask_claude(research_prompt,
+            "You are Claude doing pre-market research. Plain text response.", max_tokens=400)
+        log(f"🔵 Claude research:\n{c_research[:400]}")
+    except Exception as e:
+        log(f"❌ Claude research: {e}")
+
+    try:
+        g_research = ask_grok(research_prompt,
+            "You are Grok doing pre-market research with Twitter access. Plain text.", max_tokens=400)
+        log(f"🔴 Grok research:\n{g_research[:400]}")
+    except Exception as e:
+        log(f"❌ Grok research: {e}")
+
+def run_afterhours():
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    mins_since_close = (now_et.hour * 60 + now_et.minute) - 960
+    log(f"📈 AFTER-HOURS ({mins_since_close}min after close) — Review + planning...")
+
+    try:
+        account   = alpaca("GET", "/v2/account")
+        positions = alpaca("GET", "/v2/positions")
+        equity    = float(account["equity"])
+        pnl       = equity - RULES["total_budget"]
+        pool      = get_trading_pool(equity)
+
+        log(f"💰 Day End: ${equity:.2f} | P&L: ${pnl:+.2f}")
+        log(f"💼 Reserve: ${pool['reserve']:.2f} (protected) | Trading pool: ${pool['trading']:.2f}")
+        log(f"📊 Today: Claude ${shared_state['claude_daily_pnl']:+.2f} | Grok ${shared_state['grok_daily_pnl']:+.2f}")
+        log(f"🏆 Total: Claude ${shared_state['claude_total_pnl']:+.2f} | Grok ${shared_state['grok_total_pnl']:+.2f}")
+        log(f"🏅 Win days: Claude {shared_state['claude_win_days']} | Grok {shared_state['grok_win_days']}")
+        # Full gains summary
+        update_gain_metrics(equity)
+        log(format_gains(equity))
+
+        for p in positions:
+            pnl_pct = round(float(p["unrealized_plpc"])*100,2)
+            owner = "Claude" if p["symbol"] in shared_state["claude_positions"] else "Grok"
+            log(f"   [{owner}] {p['symbol']}: {pnl_pct:+.2f}%")
+
+        if not positions:
+            log("✅ Fully in cash overnight")
+
+        # Daily rebalance
+        rebalance_allocations(daily=True)
+
+        # Weekly rebalance check
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        week   = now_et.isocalendar()[1]
+        if shared_state.get("last_rebalance_week") != week and now_et.weekday() == 4:
+            log("📅 WEEKLY REBALANCE!")
+            rebalance_allocations(daily=False)
+
+        # Both AIs plan tomorrow
+        news  = get_news_context()
+        chart = get_chart_section()   # Refreshes projections + caches in shared_state
+
+        # ── PROJECTION ACCURACY TRACKING (uses track_projection_accuracy from projection_engine) ──
+        try:
+            for p in positions:
+                sym      = p["symbol"]
+                actual_h = float(p.get("high_of_day", p.get("current_price", 0)))
+                actual_l = float(p.get("low_of_day",  p.get("current_price", 0)))
+                if actual_h > 0 and actual_l > 0:
+                    track_projection_accuracy(sym, actual_h, actual_l)
+            if shared_state["proj_total_count"] > 0:
+                log(f"📐 Projection accuracy: "
+                    f"{shared_state['proj_hit_count']}/{shared_state['proj_total_count']} = "
+                    f"{shared_state['proj_accuracy_pct']}%")
+        except Exception as pa:
+            log(f"⚠️ Projection accuracy tracking: {pa}")
+
+        # Fetch end of day intelligence
+        # ── PHASE 1: Specialized After-Hours Research ──────
+        log("=" * 50)
+        log("📋 AFTER-HOURS PHASE 1: Specialized domain review")
+        log("=" * 50)
+        log("🔵 Claude reviewing: Politician filings + Investor moves")
+        log("🔴 Grok reviewing:   After-hours IPO moves + Tomorrow sentiment")
+
+        intel_ah    = get_full_market_intelligence()
+        pol_text_ah = intel_ah["pol_text"]
+        inv_text_ah = intel_ah["inv_text"]
+        ipos_ah     = intel_ah.get("ipos", [])
+        gainers_ah  = intel_ah["gainers"]
+        smart_ah    = intel_ah["smart_money"]
+        pol_mimick_ah = intel_ah.get("pol_signals", {}).get("top_mimick", [])
+
+        # Claude reviews smart money for tomorrow
+        claude_ah_prompt = prompt_builder.build_afterhours_claude(
+            pnl         = pnl,
+            positions   = positions,
+            pol_text    = pol_text_ah,
+            inv_text    = inv_text_ah,
+            smart_money = smart_ah,
+            spy_trend   = shared_state.get("spy_trend", "neutral"),
+        )
+
+        # Grok reviews momentum + politician overlap for tomorrow
+        grok_ah_prompt = prompt_builder.build_afterhours_grok(
+            pnl         = pnl,
+            positions   = positions,
+            ipos        = ipos_ah,
+            gainers     = gainers_ah,
+            news        = news,
+            spy_trend   = shared_state.get("spy_trend", "neutral"),
+            pol_text    = pol_text_ah,
+            pol_mimick  = pol_mimick_ah,
+        )
+
+        claude_ah = ""
+        grok_ah   = ""
+
+        try:
+            claude_ah = ask_claude(claude_ah_prompt,
+                "You are Claude doing after-hours smart money review. Plain text.", max_tokens=500)
+            log(f"🔵 Claude after-hours review:\n{claude_ah[:500]}")
+        except Exception as e:
+            log(f"❌ Claude after-hours: {e}")
+
+        try:
+            grok_ah = ask_grok(grok_ah_prompt,
+                "You are Grok doing after-hours momentum review. Plain text.", max_tokens=500)
+            log(f"🔴 Grok after-hours review:\n{grok_ah[:500]}")
+        except Exception as e:
+            log(f"❌ Grok after-hours: {e}")
+
+        # ── PHASE 2: Joint Tomorrow Plan ───────────────────
+        log("=" * 50)
+        log("📋 AFTER-HOURS PHASE 2: Joint plan for tomorrow")
+        log("=" * 50)
+
+        tomorrow_prompt = f"""Create TOMORROW'S JOINT AGREED PLAN.
+
+Claude's review (smart money): {claude_ah[:350] if claude_ah else "unavailable"}
+Grok's review (momentum):      {grok_ah[:350] if grok_ah else "unavailable"}
+
+Today's results: ${pnl:+.2f} total P&L
+New allocations: Claude {shared_state['claude_allocation']*100:.1f}% | Grok {shared_state['grok_allocation']*100:.1f}%
+Bearish watchlist: {shared_state['bearish_watchlist']}
+
+JOINT PLAN FOR TOMORROW:
+1. OVERNIGHT DECISION: Hold or sell each open position (specific reasoning)
+2. PRE-MARKET FOCUS: Top 3 stocks to watch at open
+3. CLAUDE'S STRATEGY tomorrow (smart money + technical)
+4. GROK'S STRATEGY tomorrow (momentum + IPO + sentiment)
+5. COLLABORATIVE TARGET: Best big-ticket candidate if both agree
+6. RISK LEVEL for tomorrow and position sizing guidance
+7. LESSONS from today: what worked, what didn't
+
+Both AIs agree on this plan. Plain text 200 words."""
+
+        try:
+            tomorrow_plan = ask_claude(tomorrow_prompt,
+                "You are creating tomorrow's agreed trading plan. Plain text.", max_tokens=500)
+            log(f"\n{'='*50}")
+            log(f"✅ TOMORROW'S JOINT PLAN (AGREED):")
+            log(f"{'='*50}")
+            log(f"{tomorrow_plan[:600]}")
+            log(f"{'='*50}\n")
+            shared_state["tomorrows_plan"] = tomorrow_plan
+        except Exception as e:
+            log(f"❌ Tomorrow plan: {e}")
+
+        # ── 🔒 STAKING REVIEW (once daily at afterhours) ──────
+        # Much better here than mid-cycle — no overlap with stock trading.
+        # AIs are already awake for afterhours so no extra wake cost.
+        if crypto_trader.is_enabled():
+            try:
+                log("=" * 50)
+                log("🔒 STAKING REVIEW — Daily check at afterhours")
+                log("=" * 50)
+                crypto_trader.staking.run_staking_cycle(
+                    projections   = crypto_trader._projections or {},
+                    ask_claude_fn = ask_claude,
+                    ask_grok_fn   = ask_grok,
+                )
+            except Exception as se:
+                log(f"⚠️ Staking review error: {se}")
+
+    except Exception as e:
+        log(f"❌ After-hours error: {e}")
+
+    finally:
+        if not shared_state.get("ai_sleeping", False):
+            ai_sleep(reason="afterhours review complete — sleeping until 8:30am")
+            log("😴 AIs sleeping after afterhours — next wake: 8:30am premarket")
+
+
+# ══════════════════════════════════════════════════════════════
+# HOURLY TREND SCAN + DEPOSIT DETECTION
+# Runs every hour while AIs sleep — pure Alpaca data, zero AI cost
+# Stores findings for AI to read when they wake up
+# ══════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════
+# TRADING BRIEF SYSTEM
+# AIs write a full brief before sleeping.
+# Bot reads the brief and executes precisely.
+# ══════════════════════════════════════════════════════════════
+
+def generate_trading_brief(equity, cash, positions, pool,
+                            chart_section, news, market_ctx,
+                            pol_text, inv_text, gainers, ipos, smart_money):
+    """Generate trading brief - AIs write instructions for the bot."""
+    log("=" * 55)
+    log("📋 GENERATING TRADING BRIEF — AIs writing instructions for bot")
+    log("=" * 55)
+
+    # Include trend scan findings in brief context
+    scan_results  = shared_state.get("trend_scan_results", [])
+    scan_deposits = [a for a in shared_state.get("trend_alerts",[])
+                     if a.get("type") == "deposit"]
+    scan_high_pri = [f for f in scan_results if f.get("priority") == "HIGH"]
+    scan_summary  = ", ".join([f"{f['symbol']}({f['type']})" for f in scan_high_pri[:5]])
+    deposit_note  = f"New deposits: +${sum(d.get('amount',0) for d in scan_deposits):.2f}" if scan_deposits else ""
+
+    if scan_summary:
+        log(f"   Bot found while sleeping: {scan_summary}")
+    if deposit_note:
+        log(f"   {deposit_note}")
+
+    chart_section = get_chart_section()  # Refreshes + caches projections in shared_state
+    proj_context  = proj_format_for_ai(shared_state.get("last_projections", {}))
+
+    pos_summary = []
+    for p in positions:
+        sym     = p["symbol"]
+        pnl_pct = round(float(p["unrealized_plpc"]) * 100, 2)
+        owner   = "Claude" if sym in shared_state["claude_positions"] else "Grok"
+        pos_summary.append(f"  {sym} [{owner}]: {pnl_pct:+.2f}% entry=${float(p['avg_entry_price']):.2f}")
+
+    thresholds   = get_cash_thresholds(equity)
+    spy_trend, spy_price, spy_sma50, spy_chg = get_spy_trend()
+    triple_syms  = smart_money.get("triple_confirmation", [])
+    top_collab   = smart_money.get("top_collab", [])
+    hot_ipos     = [i["symbol"] for i in ipos if abs(i.get("mom_5d",0)) > 5]
+
+    # ── PHASE 1: Claude writes account + position brief ──────
+    claude_brief_prompt = f"""You are CLAUDE — writing the trading brief for the bot to follow while you sleep.
+
+CURRENT STATE:
+Equity: ${equity:.2f} | Cash: ${cash:.2f} | SPY: {spy_trend.upper()} ({spy_chg:+.2f}%)
+Pool: Claude=${pool['claude']:.2f} | Grok=${pool['grok']:.2f} | Reserve=${pool['reserve']:.2f}
+Open positions:
+{chr(10).join(pos_summary) if pos_summary else '  None'}
+
+INTELLIGENCE:
+Politicians: {pol_text[:200]}
+Top investors: {inv_text[:150]}
+Triple confirmation: {triple_syms}
+Hot IPOs: {hot_ipos}
+Gainers: {[(g['symbol'],f'+{g["change"]:.1f}%') for g in gainers[:5]]}
+Market: {market_ctx}
+News: {news[:200]}
+Indicators: {chart_section[:300]}
+
+5-LAYER PROJECTIONS from projection_engine.py (use proj_high as TP, proj_low as entry):
+{proj_context[:400]}
+
+BOT FOUND WHILE YOU SLEPT (hourly trend scan):
+High priority findings: {scan_summary if scan_summary else "none"}
+{deposit_note}
+
+Write YOUR PART of the trading brief (account rules + position notes).
+Include any trend scan findings in your watchlist if relevant.
+Be specific — the bot follows this EXACTLY with no AI to ask.
+
+JSON (compact, no trailing commas, under 500 chars):
+{{
+  "market_bias": "bullish/bearish/neutral",
+  "risk_level": "low/medium/high",
+  "max_new_trades": 1,
+  "spy_rule": "trade_all",
+  "claude_watchlist": [
+    {{"symbol":"NVDA","why":"brief","entry_max":0,"strategy":"A/B","confidence":85}}
+  ],
+  "account_notes": "brief instruction for bot"
+}}
+  "wake_instructions": [
+    {{"type":"price_below","symbol":"NVDA","threshold":170.0,"reason":"approaching support — reassess","priority":"high"}},
+    {{"type":"pnl_above","symbol":"PLTR","threshold":5.5,"reason":"near TP — may want to take profit early","priority":"normal"}},
+    {{"type":"time_after","threshold":"14:30","reason":"reassess before power hour","priority":"normal"}}
+  ]
+}}"""
+
+    # ── PHASE 2: Grok writes momentum + watchlist brief ──────
+    grok_brief_prompt = f"""You are GROK — writing the trading brief for the bot to follow while you sleep.
+
+CURRENT STATE:
+Equity: ${equity:.2f} | Cash: ${cash:.2f} | SPY: {spy_trend.upper()} ({spy_chg:+.2f}%)
+Open positions:
+{chr(10).join(pos_summary) if pos_summary else '  None'}
+
+MOMENTUM INTELLIGENCE:
+Hot IPOs: {[(i['symbol'],f"mom={i['mom_5d']}%",f"{i['days_old']}d old") for i in ipos[:5]]}
+Biggest gainers: {[(g['symbol'],f'+{g["change"]:.1f}%') for g in gainers[:5]]}
+News: {news[:200]}
+
+5-LAYER PROJECTIONS (set entry_max = proj_low, TP = proj_high):
+{proj_context[:350]}
+
+Write YOUR PART of the trading brief (momentum picks + IPO watchlist).
+The bot executes your watchlist automatically when cash is available.
+
+JSON (keep under 600 chars):
+{{
+  "market_sentiment": "bullish/bearish/neutral",
+  "momentum_strength": "strong/moderate/weak",
+  "position_notes": {{
+    "SYMBOL": {{
+      "strategy": "A/B",
+      "conviction": "high/medium/low",
+      "thesis": "brief",
+      "special_rule": "brief",
+      "trail_pct": 0.05
+    }}
+  }},
+  "grok_watchlist": [
+    {{"symbol":"NVDA","why":"IPO momentum/gainer","entry_max":0,"strategy":"B","confidence":85}}
+  ],
+  "collab_targets": [
+    {{"symbol":"NVDA","condition":"both 95%+ on next wake","why":"triple confirmation"}}
+  ],
+  "sentiment_notes": "key sentiment insight for bot context"
+}}"""
+
+    claude_brief = None
+    grok_brief   = None
+
+    try:
+        claude_brief = safe_ask_claude(claude_brief_prompt,
+            "You are Claude writing a trading brief. Respond ONLY with a compact valid JSON object. "
+            "No markdown fences, no extra text, no trailing commas. Keep under 500 chars.",
+            retries=3)
+        if claude_brief:
+            log(f"🔵 Claude brief: bias={claude_brief.get('market_bias')} "
+                f"risk={claude_brief.get('risk_level')} "
+                f"watchlist={[w.get('symbol') for w in claude_brief.get('claude_watchlist',[])]}")
+    except Exception as e:
+        log(f"❌ Claude brief: {e}")
+
+    try:
+        grok_brief = safe_ask_grok(grok_brief_prompt,
+            "You are Grok writing a trading brief. Respond ONLY with a compact valid JSON object. "
+            "No markdown fences, no extra text, no trailing commas. Keep under 500 chars.",
+            retries=3)
+        if grok_brief:
+            log(f"🔴 Grok brief: sentiment={grok_brief.get('market_sentiment')} "
+                f"momentum={grok_brief.get('momentum_strength')} "
+                f"watchlist={[w.get('symbol') for w in grok_brief.get('grok_watchlist',[])]}")
+    except Exception as e:
+        log(f"❌ Grok brief: {e}")
+
+    # ── PHASE 3: Merge both briefs into unified brief ─────────
+    if not claude_brief and not grok_brief:
+        log("⚠️ Both briefs failed — bot will use default rules only")
+        return
+
+    # Build merged watchlist (no duplicates)
+    merged_watchlist = []
+    seen_watchlist   = set()
+
+    c_watch = (claude_brief or {}).get("claude_watchlist", [])
+    g_watch = (grok_brief   or {}).get("grok_watchlist",  [])
+
+    for item in c_watch + g_watch:
+        sym = item.get("symbol","")
+        if sym and sym not in seen_watchlist and sym not in [p["symbol"] for p in positions]:
+            merged_watchlist.append({**item, "owner": "claude" if item in c_watch else "grok"})
+            seen_watchlist.add(sym)
+
+    # Merge position notes
+    merged_pos_notes = {}
+    c_pos = (claude_brief or {}).get("position_notes", {})
+    g_pos = (grok_brief   or {}).get("position_notes", {})
+    for sym in set(list(c_pos.keys()) + list(g_pos.keys())):
+        merged_pos_notes[sym] = {**(c_pos.get(sym,{})), **(g_pos.get(sym,{}))}
+        # Update stored exit strategy with brief's instructions
+        if sym in shared_state["position_exits"]:
+            if "strategy" in merged_pos_notes[sym]:
+                shared_state["position_exits"][sym]["strategy"]  = merged_pos_notes[sym]["strategy"]
+            if "trail_pct" in merged_pos_notes[sym]:
+                shared_state["position_exits"][sym]["trail_pct"] = merged_pos_notes[sym]["trail_pct"]
+            if "special_rule" in merged_pos_notes[sym]:
+                shared_state["position_exits"][sym]["ai_notes"]  = merged_pos_notes[sym]["special_rule"]
+
+    # Collab targets from Grok
+    collab_targets = (grok_brief or {}).get("collab_targets", [])
+
+    # Store the complete brief
+    shared_state["trading_brief"] = {
+        "account": {
+            "market_bias":    (claude_brief or {}).get("market_bias", "neutral"),
+            "risk_level":     (claude_brief or {}).get("risk_level", "medium"),
+            "max_new_trades": (claude_brief or {}).get("max_new_trades", 2),
+            "spy_rule":       (claude_brief or {}).get("spy_rule", "no_buy_bear"),
+            "daily_target":   (claude_brief or {}).get("daily_target_pct", 2.0) / 100,
+            "stop_day_if":    -(claude_brief or {}).get("stop_day_loss_pct", 5.0) / 100,
+            "brief_date":     datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "brief_notes":    (claude_brief or {}).get("account_notes","") + " | " +
+                              (grok_brief   or {}).get("sentiment_notes",""),
+        },
+        "positions":      merged_pos_notes,
+        "watchlist":      merged_watchlist,
+        "collab_targets": collab_targets,
+    }
+
+    # Also update sleeping_strategies with AI notes
+    for sym, notes in merged_pos_notes.items():
+        if sym in shared_state["sleeping_strategies"]:
+            shared_state["sleeping_strategies"][sym]["ai_notes"] = notes.get("special_rule","")
+            shared_state["sleeping_strategies"][sym]["conviction"] = notes.get("conviction","medium")
+
+    # ── Store AI custom wake instructions ─────────────────────
+    # Collect from both Claude and Grok briefs
+    all_wake_instrs = []
+    for brief_src in [claude_brief, grok_brief]:
+        if isinstance(brief_src, dict):
+            instrs = brief_src.get("wake_instructions", [])
+            if isinstance(instrs, list):
+                all_wake_instrs.extend(instrs)
+
+    if all_wake_instrs:
+        # Deduplicate by type+symbol combo
+        seen_keys = set()
+        unique_instrs = []
+        for instr in all_wake_instrs:
+            key = (instr.get("type"), instr.get("symbol",""), instr.get("threshold"))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_instrs.append(instr)
+        shared_state["ai_wake_instructions"] = unique_instrs
+        log(f"🤖 AI wrote {len(unique_instrs)} custom wake instruction(s):")
+        for instr in unique_instrs:
+            log(f"   → [{instr.get('priority','normal').upper()}] "
+                f"{instr.get('type')} {instr.get('symbol','')} "
+                f"@ {instr.get('threshold')} — {instr.get('reason','')[:60]}")
+    else:
+        shared_state["ai_wake_instructions"] = []
+
+    log(f"📋 TRADING BRIEF COMPLETE:")
+    log(f"   Market bias: {shared_state['trading_brief']['account']['market_bias'].upper()}")
+    log(f"   Risk level:  {shared_state['trading_brief']['account']['risk_level'].upper()}")
+    log(f"   Watchlist:   {[w['symbol'] for w in merged_watchlist]}")
+    log(f"   Collab targets: {[t.get('symbol') for t in collab_targets]}")
+    log(f"   Position rules: {list(merged_pos_notes.keys())}")
+    log(f"   Wake instructions: {len(shared_state['ai_wake_instructions'])}")
+    log(f"   Bot notes: {shared_state['trading_brief']['account']['brief_notes'][:100]}")
+    log("=" * 55)
+
+def execute_watchlist(cash, equity, pos_symbols, open_count):
+    """
+    Bot executes watchlist trades autonomously.
+    No AI needed — follows the brief exactly.
+    Runs while AIs are sleeping.
+    """
+    brief     = shared_state["trading_brief"]
+    watchlist = brief.get("watchlist", [])
+    account_b = brief.get("account", {})
+    max_trades = account_b.get("max_new_trades", 2)
+    risk_level = account_b.get("risk_level", "medium")
+    spy_rule   = account_b.get("spy_rule", "no_buy_bear")
+    thresholds = get_cash_thresholds(equity)
+
+    if not watchlist:
+        return 0
+    if cash < thresholds["active"]:
+        return 0
+    if open_count >= RULES["max_positions"]:
+        return 0
+
+    # Check SPY rule
+    spy_trend, _, _, _ = get_spy_trend()
+    if spy_rule == "no_buy_bear" and spy_trend == "bear":
+        log(f"🐻 Watchlist paused — SPY bearish (brief rule: {spy_rule})")
+        return 0
+
+    # Risk-based position sizing
+    size_pct = {"low": 0.25, "medium": 0.35, "high": 0.45}.get(risk_level, 0.35)
+
+    trades_made  = 0
+    remaining_cash = cash
+
+    for item in watchlist:
+        if trades_made >= max_trades:
+            break
+        if open_count + trades_made >= RULES["max_positions"]:
+            break
+
+        sym        = item.get("symbol","")
+        entry_max  = float(item.get("entry_max", 99999))
+        strategy   = item.get("strategy","A")
+        confidence = item.get("confidence",80)
+        owner      = item.get("owner","shared")
+        why        = item.get("why","")
+
+        if not sym or sym in pos_symbols:
+            continue
+        if confidence < RULES["min_confidence"]:
+            continue
+
+        # Never buy crypto pairs through Alpaca — Binance.US only
+        if is_crypto_symbol(sym):
+            log(f"🚫 WATCHLIST BLOCKED: {sym} is crypto — Binance.US only")
+            continue
+        try:
+            bars = get_bars(sym, days=10)
+            if not bars:
+                continue
+            ind           = compute_indicators(bars)
+            current_price = bars[-1]["c"]
+
+            # Standard entry_max check
+            if entry_max > 0 and current_price > entry_max:
+                log(f"⏭️ WATCHLIST: {sym} at ${current_price:.2f} > entry max ${entry_max:.2f} — waiting")
+                continue
+
+            # Projection-based entry gate — uses cached projection from shared_state
+            # (zero extra API calls needed since get_chart_section already ran)
+            proj       = shared_state.get("last_projections", {}).get(sym)
+            size_pct_s = size_pct  # default size
+
+            if proj and not proj.get("error") and proj.get("proj_low") and proj.get("confidence", 0) >= 55:
+                proj_low  = proj["proj_low"]
+                proj_high = proj["proj_high"]
+                proj_conf = proj["confidence"]
+                proj_bias = proj.get("bias", "neutral")
+                range_mid = (proj_low + proj_high) / 2
+
+                # Skip if price already past midpoint on a bearish day
+                if current_price > range_mid and proj_bias == "bearish":
+                    log(f"⏭️ WATCHLIST PROJ: {sym} ${current_price:.2f} > midrange "
+                        f"${range_mid:.2f} bearish — waiting for pullback")
+                    continue
+
+                # Reduce size if projection confidence is moderate
+                if proj_conf < 60:
+                    size_pct_s = size_pct * 0.60
+                    log(f"   ⚠️ WATCHLIST: {sym} proj conf={proj_conf} — sizing at 60%")
+                else:
+                    log(f"   📐 WATCHLIST PROJ: {sym} conf={proj_conf} range={proj_low}–{proj_high} "
+                        f"bias={proj_bias} — entry OK")
+
+        except Exception:
+            size_pct_s = size_pct
+            try:
+                current_price = get_bars(sym, days=3)[-1]["c"]
+            except Exception:
+                continue
+
+        notional = min(remaining_cash * size_pct_s, remaining_cash - 5)
+        if notional < 8:
+            log(f"⚠️ WATCHLIST: Not enough cash for {sym} (${remaining_cash:.2f})")
+            break
+
+        log(f"📋 WATCHLIST EXECUTE: {sym} — {why[:60]}")
+        log(f"   Price=${current_price:.2f} entry_max=${entry_max:.2f} size=${notional:.2f} strategy={strategy}")
+
+        try:
+            # Use limit order at midpoint
+            snap_url = f"{DATA_URL}/v2/stocks/{sym}/quotes/latest"
+            headers  = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+            limit_price = None
+            try:
+                snap_res = requests.get(snap_url, headers=headers, timeout=5)
+                if snap_res.ok:
+                    quote = snap_res.json().get("quote",{})
+                    bid   = float(quote.get("bp",0))
+                    ask   = float(quote.get("ap",0))
+                    if bid > 0 and ask > 0 and (entry_max == 0 or ask <= entry_max):
+                        limit_price = round((bid+ask)/2, 2)
+            except Exception: pass
+
+            if limit_price:
+                shares = round(notional / limit_price, 6)
+                order  = alpaca("POST", "/v2/orders", {
+                    "symbol": sym, "qty": str(shares),
+                    "side": "buy", "type": "limit",
+                    "limit_price": str(limit_price),
+                    "time_in_force": "day",
+                })
+                log(f"✅ WATCHLIST BUY {sym} {shares} @ ${limit_price} | owner={owner} | {order['id'][:8]}...")
+            else:
+                order = alpaca("POST", "/v2/orders", {
+                    "symbol": sym, "notional": str(round(notional,2)),
+                    "side": "buy", "type": "market", "time_in_force": "day",
+                })
+                log(f"✅ WATCHLIST MARKET BUY {sym} ${notional:.2f} | {order['id'][:8]}...")
+
+            remaining_cash -= notional
+            trades_made    += 1
+            pos_symbols.append(sym)
+
+            # Assign to owner
+            if owner == "claude":
+                shared_state["claude_positions"].append(sym)
+            elif owner == "grok":
+                shared_state["grok_positions"].append(sym)
+
+            # Assign exit strategy from brief
+            entry_px = limit_price or current_price
+            assign_exit_strategy(sym, strategy, entry_px, confidence,
+                                 f"watchlist: {why[:60]}")
+
+        except Exception as e:
+            log(f"❌ Watchlist buy {sym}: {e}")
+
+    if trades_made > 0:
+        log(f"📋 Watchlist executed {trades_made} trade(s) autonomously (AIs sleeping)")
+    return trades_made
+
+# ══════════════════════════════════════════════════════════════
+# AI SLEEP / WAKE SYSTEM
+# Bot runs fully autonomous while AIs sleep.
+# AIs only wake on specific triggers — saves 96% of API calls.
+# ══════════════════════════════════════════════════════════════
+
+# [ai_sleep → sleep_manager.py]
+# [ai_wake → sleep_manager.py]
+# [check_wake_conditions → sleep_manager.py]
+# [check_ai_wake_instructions → sleep_manager.py]
+def run_autonomous_monitor(positions, pos_symbols, cash, equity):
+    """
+    Fully autonomous bot operation while AIs sleep.
+    Executes stored exit strategies with zero AI calls.
+    Just pure rule-based execution.
+    """
+    if not positions:
+        return 0
+
+    stops_fired = 0
+    log(f"🤖 BOT AUTONOMOUS — {len(positions)} positions | Both AIs sleeping | 0 API calls")
+
+    # ── Check PDT hold plans every tick ──────────────────────
+    check_pdt_hold_plans()
+
+    for pos in positions:
+        symbol        = pos["symbol"]
+        pnl_pct       = float(pos["unrealized_plpc"])
+        pnl_usd       = float(pos["unrealized_pl"])
+        current_price = float(pos["current_price"])
+        pos_value     = float(pos["market_value"])
+
+        # Get stored strategy for this position
+        strategy_cfg = shared_state["sleeping_strategies"].get(
+            symbol,
+            shared_state["position_exits"].get(symbol, {})
+        )
+        strategy     = strategy_cfg.get("strategy", "A")
+        entry_price  = strategy_cfg.get("entry_price", current_price)
+        entry_date   = strategy_cfg.get("entry_date", datetime.now().strftime("%Y-%m-%d"))
+        trail_pct    = strategy_cfg.get("trail_pct", get_trail_pct(symbol))
+        ai_notes     = strategy_cfg.get("ai_notes", "")
+
+        # Update peak price
+        if current_price > strategy_cfg.get("peak_price", entry_price):
+            strategy_cfg["peak_price"] = current_price
+            shared_state["sleeping_strategies"][symbol] = strategy_cfg
+            shared_state["position_exits"][symbol]      = strategy_cfg
+
+        peak_price = strategy_cfg.get("peak_price", entry_price)
+
+        log(f"   [{strategy}] {symbol}: {pnl_pct*100:+.2f}% (${pnl_usd:+.2f}) "
+            f"peak=${peak_price:.2f} | {ai_notes[:40] if ai_notes else ''}")
+
+        sold = False
+
+        # ── STRATEGY T: Turtle exit (checked BEFORE universal % stop) ──
+        # Turtle has its own stop math (2N ATR). Don't apply the universal
+        # 5% stop to T positions — Turtle stops can be wider or tighter.
+        if strategy == "T":
+            t_atr    = strategy_cfg.get("atr_at_entry")
+            t_system = strategy_cfg.get("turtle_system", 1)
+            if t_atr and t_atr > 0:
+                try:
+                    t_exit = stock_turtle_check_exit(symbol, entry_price, t_atr, system=t_system)
+                except Exception as _te:
+                    log(f"   ⚠️ AUTO [T] {symbol}: exit check failed: {_te}")
+                    t_exit = {"should_exit": False, "reason": "exit check error"}
+                if t_exit.get("should_exit"):
+                    reason  = t_exit.get("reason", "turtle exit")
+                    is_stop = "2N stop" in reason
+                    log(f"🐢 AUTO TURTLE EXIT [T] {symbol} {pnl_pct*100:+.1f}% — {reason}")
+                    if smart_sell(symbol, f"autonomous turtle — {reason}", pos):
+                        owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                        record_trade("stop_loss" if is_stop else "take_profit",
+                                     symbol, pos.get("qty"), current_price,
+                                     pos_value, owner,
+                                     reason=f"autonomous turtle {reason}",
+                                     pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="T",
+                                     entry_price=entry_price)
+                        shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                        shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                        shared_state["position_exits"].pop(symbol, None)
+                        shared_state["sleeping_strategies"].pop(symbol, None)
+                        if is_stop:
+                            shared_state["stops_fired_today"] += 1
+                            stops_fired += 1
+                        sold = True
+            else:
+                # No ATR recorded — degrade to universal % stop below
+                pass
+            if sold:
+                continue
+            # If we reach here, T is configured but no exit fired → skip A/B/universal
+            if t_atr and t_atr > 0:
+                continue
+
+        # ── UNIVERSAL: Hard stop-loss ─────────────────────────
+        if pnl_pct <= -RULES["exit_A_stop_loss"]:
+            log(f"🛑 AUTO STOP-LOSS {symbol} {pnl_pct*100:.1f}% — bot executing (AIs sleeping)")
+            if smart_sell(symbol, "autonomous stop-loss", pos):
+                owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                record_trade("stop_loss", symbol, pos.get("qty"), current_price,
+                             pos_value, owner, reason="autonomous stop-loss (AIs sleeping)",
+                             pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy=strategy,
+                             entry_price=entry_price)
+                shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                shared_state["position_exits"].pop(symbol, None)
+                shared_state["sleeping_strategies"].pop(symbol, None)
+                shared_state["stops_fired_today"] += 1
+                stops_fired += 1
+                sold = True
+
+        # ── STRATEGY A: Fixed take-profit ─────────────────────
+        elif strategy == "A" and not sold:
+            if pnl_pct >= RULES["exit_A_take_profit"]:
+                log(f"🎯 AUTO TAKE-PROFIT [A] {symbol} +{pnl_pct*100:.1f}% — bot executing")
+                if smart_sell(symbol, "autonomous strategy A take-profit", pos):
+                    owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                    record_trade("take_profit", symbol, pos.get("qty"), current_price,
+                                 pos_value, owner, reason="autonomous strategy A take-profit",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="A",
+                                 entry_price=entry_price)
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+                    shared_state["sleeping_strategies"].pop(symbol, None)
+                    sold = True
+
+        # ── STRATEGY B: Trailing stop ─────────────────────────
+        elif strategy == "B" and not sold:
+            profit_at_peak  = (peak_price - entry_price) / entry_price
+            trail_active    = profit_at_peak >= RULES["exit_B_trail_activates"]
+            trail_stop      = peak_price * (1 - trail_pct)
+
+            if trail_active and current_price <= trail_stop:
+                log(f"🎯 AUTO TRAILING STOP [B] {symbol} "
+                    f"peak=${peak_price:.2f} stop=${trail_stop:.2f} "
+                    f"current=${current_price:.2f} | +{pnl_pct*100:.1f}%")
+                if smart_sell(symbol, f"autonomous strategy B trailing stop", pos):
+                    owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                    record_trade("trail_stop", symbol, pos.get("qty"), current_price,
+                                 pos_value, owner,
+                                 reason=f"autonomous strategy B trailing stop peak=${peak_price:.2f}",
+                                 pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="B",
+                                 entry_price=entry_price)
+                    shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                    shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                    shared_state["position_exits"].pop(symbol, None)
+                    shared_state["sleeping_strategies"].pop(symbol, None)
+                    sold = True
+
+            # Time stop
+            elif RULES["exit_B_time_stop_days"] and not sold:
+                try:
+                    days_held = (datetime.now() - datetime.strptime(entry_date, "%Y-%m-%d")).days
+                    if days_held >= RULES["exit_B_time_stop_days"] and pnl_pct < RULES["exit_B_trail_activates"]:
+                        log(f"⏰ AUTO TIME STOP [B] {symbol} — {days_held}d held, only {pnl_pct*100:+.2f}%")
+                        if smart_sell(symbol, f"autonomous time stop ({days_held}d)", pos):
+                            owner = "claude" if symbol in shared_state["claude_positions"] else "grok"
+                            record_trade("time_stop", symbol, pos.get("qty"), current_price,
+                                         pos_value, owner,
+                                         reason=f"autonomous time stop {days_held} days held",
+                                         pnl_usd=pnl_usd, pnl_pct=pnl_pct, strategy="B",
+                                         entry_price=entry_price)
+                            shared_state["claude_positions"] = [s for s in shared_state["claude_positions"] if s != symbol]
+                            shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
+                            shared_state["position_exits"].pop(symbol, None)
+                            shared_state["sleeping_strategies"].pop(symbol, None)
+                            sold = True
+                except Exception: pass
+
+    # ── Execute watchlist if cash became available ───────────
+    try:
+        acct_w  = alpaca("GET", "/v2/account")
+        cash_w  = float(acct_w["cash"])
+        eq_w    = float(acct_w["equity"])
+        pos_w   = alpaca("GET", "/v2/positions")
+        sym_w   = [p["symbol"] for p in pos_w]
+        thresh_w = get_cash_thresholds(eq_w)
+        if cash_w >= thresh_w["active"] and len(pos_w) < RULES["max_positions"]:
+            watchlist_count = len(shared_state["trading_brief"].get("watchlist",[]))
+            if watchlist_count > 0:
+                log(f"📋 Cash ${cash_w:.2f} available + {watchlist_count} watchlist items — executing")
+                wl_trades = execute_watchlist(cash_w, eq_w, sym_w, len(pos_w))
+                if wl_trades > 0:
+                    stops_fired = -1  # Signal that new trades were made (not stops)
+    except Exception as we:
+        log(f"⚠️ Watchlist check error: {we}")
+
+    return stops_fired
+
+def trading_loop():
+    log(f"🚀 COLLABORATIVE AI Trading System v2.0")
+    log(f"💰 Budget: ${RULES['total_budget']} | Reserve: {RULES['growth_reserve_pct']*100:.0f}% untouchable")
+    log(f"⚖️ Start: 50/50 split → performance-based rebalance daily + weekly")
+    log(f"🏆 Autonomy Tiers:")
+    for tier in RULES["autonomy_tiers"]:
+        log(f"   ${tier['equity']} → {tier['description']}")
+    log(f"🔒 Short selling unlocks at $2,000")
+    log(f"💥 Collaborative big-ticket unlocks at $3,000 (min trade ${RULES['collab_min_trade_size']:,})")
+    log(f"🆕 IPO detection: active (30-180 day old stocks, >500k volume)")
+    log(f"🛡️ Stop={RULES['stop_loss_pct']*100}% | TP={RULES['take_profit_pct']*100}% | Daily limit={RULES['daily_loss_limit_pct']*100}%")
+
+    if not all([ALPACA_KEY, ALPACA_SECRET, ANTHROPIC_KEY, GROK_KEY]):
+        log("❌ Missing env vars!"); return
+
+    # Initialize day/week/month/year tracking
+    account = alpaca("GET", "/v2/account")
+    equity  = float(account["equity"])
+    shared_state["day_start_equity"]   = equity
+    shared_state["week_start_equity"]  = equity
+    shared_state["month_start_equity"] = equity
+    shared_state["year_start_equity"]  = equity
+    shared_state["last_equity"]        = equity
+    update_gain_metrics(equity)
+
+    # Inject shared_state into crypto_trader for gains tracking
+    crypto_trader._shared_state = shared_state
+
+    last_premarket  = None
+    last_afterhours = None
+
+    # Record boot time — used for crypto 2.5min stagger offset
+    shared_state["boot_time"] = datetime.now(timezone.utc)
+    log("⏱️  Boot time recorded — crypto starts in 2.5 min (staggered)")
+
+    # ── Background monitors (no AI needed) ──────────────────
+    cash_check_interval = 60    # Check cash every 60 seconds
+    trend_scan_interval = 3600  # Trend scan every 60 minutes
+    last_cash_check     = 0
+    last_known_cash     = 0
+    last_trend_scan     = 0     # Run first scan 1 hour after start
+
+    # Initialize deposit tracking
+    try:
+        init_acct = alpaca("GET", "/v2/account")
+        shared_state["last_equity"] = float(init_acct["equity"])
+        shared_state["last_cash"]   = float(init_acct["cash"])
+        log(f"💵 Deposit tracker initialized: equity=${shared_state['last_equity']:.2f} "
+            f"cash=${shared_state['last_cash']:.2f}")
+    except Exception: pass
+
+    while True:
+        try:
+            # Check if Claude Code finished a repair job
+            try:
+                if _CC_TRIGGER_AVAILABLE and _cc_trigger:
+                    _cc_trigger.check_pending_repair_result()
+            except Exception:
+                pass
+
+            mode, interval = get_market_mode()
+            now_et   = datetime.now(ZoneInfo("America/New_York"))
+            today    = now_et.date()
+            now_unix = time.time()
+
+            # ── SILENT CASH MONITOR (no AI, no cost) ─────────
+            # Runs every 60 seconds regardless of market mode
+            # Only during market hours to save Alpaca API calls
+            mins_et = now_et.hour * 60 + now_et.minute
+            is_market_hours = 510 <= mins_et < 1020  # 8:30am-5pm ET
+
+            if is_market_hours and (now_unix - last_cash_check) >= cash_check_interval:
+                try:
+                    account      = alpaca("GET", "/v2/account")
+                    current_cash = float(account["cash"])
+                    current_eq   = float(account["equity"])
+                    thresholds   = get_cash_thresholds(current_eq)
+                    last_cash_check = now_unix
+
+                    # Cash increased past active threshold — wake both AIs
+                    if (shared_state["watch_mode_active"] and
+                        current_cash >= thresholds["active"] and
+                        last_known_cash < thresholds["active"]):
+                        log(f"💡 CASH MONITOR: ${current_cash:.2f} crossed active threshold "
+                            f"${thresholds['active']:.2f} — WAKING GROK immediately!")
+                        log(f"   No AI was needed to detect this — pure Alpaca API check")
+                        shared_state["watch_mode_active"] = False
+                        # Force immediate full cycle
+                        if mode in ("opening","prime","power_hour"):
+                            log(f"🚀 Triggering immediate full collaboration cycle!")
+                            run_cycle()
+                            last_cash_check = time.time()
+
+                    # Cash dropped to sleep level — log silently
+                    elif (current_cash < thresholds["sleep"] and
+                          last_known_cash >= thresholds["sleep"]):
+                        log(f"💤 CASH MONITOR: Cash dropped to ${current_cash:.2f} — entering sleep mode")
+
+                    # Cash entered watch zone
+                    elif (current_cash < thresholds["active"] and
+                          last_known_cash >= thresholds["active"] and
+                          current_cash >= thresholds["sleep"]):
+                        log(f"👁️ CASH MONITOR: Cash ${current_cash:.2f} entered watch zone "
+                            f"(${thresholds['sleep']}-${thresholds['active']:.2f})")
+                        log(f"   Switching to Claude-only monitoring")
+                        shared_state["watch_mode_active"] = True
+
+                    last_known_cash = current_cash
+                    shared_state["last_cash"] = current_cash
+
+                except Exception as ce:
+                    pass  # Silent — cash monitor never crashes the main loop
+
+            # ── CORE RESERVE HOURLY CHECK (rule-based, no AI) ───
+            # Walled-off long-term wealth compounder. Watches BTC + SPY
+            # for catastrophic drawdowns, mega-opportunities, take-profit
+            # triggers, and drift rebalancing. Runs at most once per hour.
+            if HAVE_CORE_RESERVE and core_reserve and core_reserve.ENABLE_CORE_RESERVE:
+                if not hasattr(run_cycle, "_last_core_check"):
+                    run_cycle._last_core_check = 0
+                if now_unix - run_cycle._last_core_check >= 3600:    # 1 hour
+                    try:
+                        result = core_reserve.run_hourly_check()
+                        run_cycle._last_core_check = now_unix
+                        if result.get("fired"):
+                            log(f"🏦 Core Reserve fired: {', '.join(result['fired'])}")
+                    except Exception as cre:
+                        log(f"⚠️ Core Reserve check failed: {cre}")
+                        run_cycle._last_core_check = now_unix    # Don't retry-storm on failure
+
+            # ── MAIN TRADING LOGIC ───────────────────────────
+
+            if mode == "sleep":
+                next_check = (now_et + timedelta(minutes=interval)).strftime("%H:%M ET")
+                log(f"😴 Sleeping {interval} min. Next: {next_check}")
+
+            elif mode == "premarket":
+                # Run once per calendar day — guard prevents re-running every 5-min tick
+                _today = datetime.now(ZoneInfo("America/New_York")).date()
+                if last_premarket != _today:
+                    last_premarket = _today
+                    if shared_state["ai_sleeping"]:
+                        ai_wake("8:30am premarket — daily research always runs")
+                    run_premarket()
+                    try:
+                        acct_check   = alpaca("GET", "/v2/account")
+                        cash_check   = float(acct_check["cash"])
+                        eq_check     = float(acct_check["equity"])
+                        thresh_check = get_cash_thresholds(eq_check)
+                        if cash_check < thresh_check["active"]:
+                            ai_sleep("premarket research done — both AIs sleeping, bot takes over")
+                    except Exception: pass
+
+            elif mode in ("opening", "prime", "power_hour"):
+                labels = {"opening":"🔔 OPENING","prime":"🚀 PRIME","power_hour":"⚡ POWER HOUR"}
+
+                if shared_state["ai_sleeping"]:
+                    # ── BOT AUTONOMOUS MODE ───────────────────
+                    # AIs sleeping — bot monitors and executes stored strategies
+                    try:
+                        acct      = alpaca("GET", "/v2/account")
+                        cash_now  = float(acct["cash"])
+                        eq_now    = float(acct["equity"])
+                        pos_now   = alpaca("GET", "/v2/positions")
+                        sym_now   = [p["symbol"] for p in pos_now]
+
+                        # Check SPY for crash guard
+                        spy_trend_now, spy_price_now, spy_sma_now, spy_chg_now = get_spy_trend()
+
+                        # Check wake conditions
+                        should_wake, wake_reason = check_wake_conditions(
+                            cash_now, eq_now, pos_now, spy_chg_now
+                        )
+
+                        if should_wake:
+                            ai_wake(wake_reason)
+                            log(f"{labels[mode]} — AIs woke up, running collaboration")
+                            run_cycle()
+                        else:
+                            # Bot executes stored strategies autonomously
+                            log(f"🤖 {labels[mode]} — BOT AUTONOMOUS (AIs sleeping)")
+                            log(f"   Cash: ${cash_now:.2f} | Positions: {sym_now or 'none'}")
+                            log(f"   Sleep reason: {shared_state['sleep_reason']}")
+                            fires = run_autonomous_monitor(pos_now, sym_now, cash_now, eq_now)
+                            if fires > 0:
+                                log(f"   {fires} position(s) exited autonomously")
+                    except Exception as ae:
+                        log(f"❌ Autonomous monitor error: {ae}")
+                else:
+                    # AIs awake — full collaboration
+                    log(f"{labels[mode]} — Full collaboration")
+                    run_cycle()
+
+            elif mode == "afterhours":
+                # Run once per calendar day — guard prevents re-running every 5-min tick
+                _today = datetime.now(ZoneInfo("America/New_York")).date()
+                if last_afterhours != _today:
+                    last_afterhours = _today
+                    if shared_state["ai_sleeping"]:
+                        ai_wake("4pm afterhours — daily review always runs")
+                    run_afterhours()
+                    try:
+                        acct_ah   = alpaca("GET", "/v2/account")
+                        cash_ah   = float(acct_ah["cash"])
+                        eq_ah     = float(acct_ah["equity"])
+                        thresh_ah = get_cash_thresholds(eq_ah)
+                        pos_ah    = alpaca("GET", "/v2/positions")
+                        if cash_ah < thresh_ah["active"] and pos_ah:
+                            ai_sleep("afterhours done — both AIs sleeping, bot guards overnight")
+                        elif not pos_ah and cash_ah < thresh_ah["active"]:
+                            ai_sleep("afterhours done — no positions, both AIs sleeping")
+                    except Exception: pass
+
+        except Exception as e:
+            log(f"❌ Loop error: {e}")
+            interval = 5
+
+        # ── 🪙 CRYPTO — 24/7 wall-clock timer, staggered 2.5min after stocks ──
+        # Offset: crypto first run starts 2.5 min after bot startup.
+        # Every run after that is exactly 60 min from last run.
+        # This staggers logs cleanly — stocks run first, crypto 2.5 min later.
+        try:
+            if crypto_trader.is_enabled():
+                spy_now     = shared_state.get("spy_trend", "neutral")
+                now_utc     = datetime.now(timezone.utc)
+                last_run    = shared_state.get("crypto_last_run")
+                # Use 'or' not .get() default — shared_state["boot_time"] is None initially
+                boot_time   = shared_state.get("boot_time") or now_utc
+
+                # First run: wait 2.5 min after boot so stocks go first
+                # Subsequent runs: every 60 min from last run
+                if last_run is None:
+                    secs_since_boot = (now_utc - boot_time).total_seconds()
+                    due = secs_since_boot >= 150  # 2.5 min = 150 seconds
+                else:
+                    due = (now_utc - last_run).total_seconds() >= 3600
+
+                if due:
+                    shared_state["crypto_last_run"] = now_utc
+                    if shared_state["ai_sleeping"]:
+                        log("🪙 Crypto: AIs sleeping — running standalone cycle")
+                    else:
+                        log("🪙 Crypto: running hourly cycle")
+                    crypto_trader.run_crypto_cycle(
+                        total_equity      = 0,
+                        ask_claude_fn     = ask_claude,
+                        ask_grok_fn       = ask_grok,
+                        spy_trend         = spy_now,
+                        prompt_builder    = prompt_builder,
+                        record_trade_fn   = record_trade,
+                        pol_text          = "",
+                        stock_projections = shared_state.get("last_projections", {}),
+                    )
+                else:
+                    # Exit monitor every 5-min tick — stops/TPs always protected
+                    exits = crypto_trader.run_exit_monitor(
+                        record_trade_fn = record_trade,
+                        prompt_builder  = prompt_builder,
+                    )
+                    if exits:
+                        log(f"🪙 Crypto: {exits} autonomous exit(s)")
+                    elif last_run is not None:
+                        # Countdown to next AI cycle
+                        secs_since = (now_utc - last_run).total_seconds()
+                        secs_left  = max(0, 3600 - secs_since)
+                        m, s       = int(secs_left // 60), int(secs_left % 60)
+                        log(f"🪙 Crypto: exit monitor OK | next AI cycle in {m}m {s}s")
+                    else:
+                        secs_elapsed = (now_utc - boot_time).total_seconds()
+                        secs_left    = max(0, 150 - secs_elapsed)
+                        log(f"🪙 Crypto: exit monitor OK | first cycle in {int(secs_left)}s")
+
+        except Exception as ce:
+            log(f"⚠️ Crypto loop error: {ce}")
+
+        mode, interval = get_market_mode()
+
+        # ── Crypto keeps the bot alive 24/7 ──────────────────
+        if crypto_trader.is_enabled() and interval > 5:
+            interval = 5
+
+        # ── Countdown timers ─────────────────────────────────
+        now_utc          = datetime.now(timezone.utc)
+        next_stock_time  = now_utc + timedelta(minutes=interval)
+        next_stock_str   = next_stock_time.astimezone(
+                               ZoneInfo("America/New_York")
+                           ).strftime("%H:%M:%S ET")
+
+        # Crypto: next AI cycle
+        crypto_last      = shared_state.get("crypto_last_run")
+        boot_time        = shared_state.get("boot_time") or now_utc
+        # Guard: ensure these are datetime objects not strings from volume restore
+        if isinstance(crypto_last, str):
+            crypto_last = None
+        if isinstance(boot_time, str):
+            boot_time = now_utc
+        if crypto_last is None:
+            # Still waiting for first run (2.5 min stagger)
+            secs_elapsed = (now_utc - boot_time).total_seconds()
+            secs_left    = max(0, 150 - secs_elapsed)
+            next_crypto_str = f"first run in {int(secs_left)}s"
+        else:
+            if isinstance(crypto_last, str):
+                try:
+                    crypto_last = datetime.fromisoformat(crypto_last.replace("Z","+00:00"))
+                except Exception:
+                    crypto_last = now_utc
+            secs_since_crypto = (now_utc - crypto_last).total_seconds()
+            secs_to_crypto    = max(0, 3600 - secs_since_crypto)
+            mins_to_crypto    = int(secs_to_crypto // 60)
+            secs_rem          = int(secs_to_crypto % 60)
+            next_crypto_ai    = (now_utc + timedelta(seconds=secs_to_crypto)
+                                 ).astimezone(ZoneInfo("America/New_York")
+                                 ).strftime("%H:%M:%S ET")
+            next_crypto_str   = f"{mins_to_crypto}m {secs_rem}s → AI cycle @ {next_crypto_ai}"
+
+        log(f"⏱  Stock next: {interval}m → {next_stock_str} | "
+            f"Crypto next: {next_crypto_str}")
+
+        # ── 15-min clean snapshot ─────────────────────────────
+        # Prints a clearly-delimited status block every 15 min so
+        # you can grep/scroll straight to "═══ SNAPSHOT" in Railway logs.
+        last_snap = shared_state.get("last_snapshot_time")
+        # Guard: ensure last_snap is datetime not string (can be str if loaded from volume)
+        if isinstance(last_snap, str):
+            last_snap = None
+        if last_snap is None or (now_utc - last_snap).total_seconds() >= 900:
+            shared_state["last_snapshot_time"] = now_utc
+            now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+            _snap_lines = []
+            _snap_lines.append(
+                f"═══════════════════ 📊 SNAPSHOT {now_et.strftime('%H:%M ET')} "
+                f"═══════════════════"
+            )
+            # ── Account ──────────────────────────────────────
+            try:
+                acct    = alpaca("GET", "/v2/account")
+                equity  = round(float(acct.get("equity", 0)), 2)
+                cash    = round(float(acct.get("cash",   0)), 2)
+                day_pnl = round(float(acct.get("equity", 0))
+                                - shared_state.get("day_start_equity", equity), 2)
+                pnl_pct = round(day_pnl / shared_state.get("day_start_equity", equity) * 100, 2) \
+                          if shared_state.get("day_start_equity", 0) > 0 else 0.0
+                pnl_icon = "🟢" if day_pnl >= 0 else "🔴"
+                _snap_lines.append(
+                    f"💰 STOCKS  equity=${equity:.2f}  cash=${cash:.2f}  "
+                    f"day P&L: {pnl_icon} ${day_pnl:+.2f} ({pnl_pct:+.2f}%)"
+                )
+            except Exception as _e:
+                _snap_lines.append(f"💰 STOCKS  (equity fetch error: {_e})")
+
+            # ── Stock positions ───────────────────────────────
+            try:
+                s_pos = alpaca("GET", "/v2/positions")
+                if s_pos:
+                    _snap_lines.append(f"📈 STOCK POSITIONS ({len(s_pos)}):")
+                    for p in s_pos:
+                        sym      = p["symbol"]
+                        entry    = float(p["avg_entry_price"])
+                        current  = float(p["current_price"])
+                        pnl_p    = round(float(p["unrealized_plpc"]) * 100, 2)
+                        pnl_u    = round(float(p["unrealized_pl"]), 2)
+                        value    = round(float(p["market_value"]), 2)
+                        owner    = "Claude" if sym in shared_state.get("claude_positions", []) else "Grok"
+                        icon     = "🟢" if pnl_p >= 0 else "🔴"
+                        # position_exits is the live source; sleeping_strategies is backup
+                        _exits  = shared_state.get("position_exits", {})
+                        _sleeps = shared_state.get("sleeping_strategies", {})
+                        strat_lbl = (_exits.get(sym, {}).get("strategy")
+                                     or _sleeps.get(sym, {}).get("strategy")
+                                     or "A")
+                        _snap_lines.append(
+                            f"   {icon} [{owner}] {sym}  entry=${entry:.2f} → now=${current:.2f}  "
+                            f"P&L={pnl_p:+.2f}% (${pnl_u:+.2f})  val=${value:.2f}  strat={strat_lbl}"
+                        )
+                else:
+                    _snap_lines.append("📈 STOCK POSITIONS: none")
+            except Exception as _e:
+                _snap_lines.append(f"📈 STOCK POSITIONS (fetch error: {_e})")
+
+            # ── Crypto wallet + positions ─────────────────────
+            try:
+                if crypto_trader.is_enabled():
+                    from binance_crypto import get_crypto_price as _gcp, get_open_crypto_orders as _goo
+                    snap   = crypto_trader.get_wallet_snapshot()
+                    usdt   = round(snap.get("usdt_free", 0), 2)
+                    c_wall = round(snap.get("total_usdt_value", 0), 2)
+                    c_day  = shared_state.get("crypto_day_pnl", 0.0)
+                    c_icon = "🟢" if c_day >= 0 else "🔴"
+                    _snap_lines.append(
+                        f"🪙 CRYPTO  wallet=${c_wall:.2f}  USDT free=${usdt:.2f}  "
+                        f"day P&L: {c_icon} ${c_day:+.2f}"
+                    )
+
+                    # ── Bot-tracked positions (opened via bot) ────
+                    c_pos = crypto_trader.positions
+                    if c_pos:
+                        _snap_lines.append(f"🪙 BOT POSITIONS ({len(c_pos)}):")
+                        for sym, pos in c_pos.items():
+                            try:
+                                cur_px = _gcp(sym)
+                            except Exception:
+                                cur_px = pos.peak_price
+                            p_pnl  = pos.pnl_pct(cur_px)
+                            p_icon = "🟢" if p_pnl >= 0 else "🔴"
+                            hrs    = round(pos.hours_held(), 1)
+                            _snap_lines.append(
+                                f"   {p_icon} {sym}  entry=${pos.entry_price:.6f} "
+                                f"→ now=${cur_px:.6f}  P&L={p_pnl:+.2f}%  "
+                                f"stop=${pos.stop_price:.6f}  TP=${pos.tp_price:.6f}  "
+                                f"held={hrs}h  qty={pos.qty}"
+                            )
+
+                    # ── All wallet holdings (including external/manual) ──
+                    tradeable = snap.get("tradeable", [])
+                    if tradeable:
+                        # Threshold matches binance_crypto.MIN_DISPLAY_VALUE ($1)
+                        _MIN_DISPLAY = 1.00
+                        visible_holdings = [h for h in tradeable
+                                            if h.get("value_usdt", 0) >= _MIN_DISPLAY]
+                        dust_holdings    = [h for h in tradeable
+                                            if h.get("value_usdt", 0) < _MIN_DISPLAY
+                                            and h.get("qty", 0) > 0.000001]
+
+                        _snap_lines.append(
+                            f"🪙 WALLET HOLDINGS ({len(visible_holdings)} active"
+                            + (f" / {len(dust_holdings)} dust" if dust_holdings else "")
+                            + "):"
+                        )
+                        for h in visible_holdings:
+                            sym   = h.get("symbol", "?")
+                            asset = h.get("asset", "?")
+                            qty   = h.get("qty", 0)
+                            px    = h.get("price", 0)
+                            val   = h.get("value_usdt", 0)
+                            lock  = h.get("locked", 0)
+                            lock_note = f" (🔒{lock:.4f} locked)" if lock > 0.0001 else ""
+                            # Check if bot is tracking this
+                            bot_tracked = "🤖" if sym in c_pos else "👤"
+                            _snap_lines.append(
+                                f"   {bot_tracked} {asset}: {qty:.4f} = ${val:.2f} "
+                                f"@ ${px:.6f}{lock_note}"
+                            )
+                        # Single-line dust summary — keeps snapshot clean
+                        if dust_holdings:
+                            dust_total = sum(h.get("value_usdt", 0) for h in dust_holdings)
+                            dust_names = ", ".join(h.get("asset", "?") for h in dust_holdings[:6])
+                            if len(dust_holdings) > 6:
+                                dust_names += f", +{len(dust_holdings)-6}"
+                            _snap_lines.append(
+                                f"   🧹 Dust: ~${dust_total:.2f} ({dust_names})"
+                            )
+
+                    # ── Open limit orders ─────────────────────────
+                    try:
+                        open_orders = _goo()
+                        if open_orders:
+                            _snap_lines.append(f"🪙 OPEN ORDERS ({len(open_orders)}):")
+                            for o in open_orders:
+                                side  = o.get("side", "?")
+                                osym  = o.get("symbol", "?")
+                                opx   = float(o.get("price", 0))
+                                oqty  = float(o.get("origQty", 0))
+                                ofill = float(o.get("executedQty", 0))
+                                icon  = "🟢" if side == "BUY" else "🔴"
+                                _snap_lines.append(
+                                    f"   {icon} {side} {osym}  {oqty:.4f} @ ${opx:.6f}  "
+                                    f"filled={ofill:.4f}"
+                                )
+                    except Exception:
+                        pass
+
+                    if not tradeable and not c_pos:
+                        _snap_lines.append("🪙 CRYPTO: no holdings")
+                else:
+                    _snap_lines.append("🪙 CRYPTO: disabled")
+            except Exception as _e:
+                _snap_lines.append(f"🪙 CRYPTO (error: {_e})")
+
+            # ── AI status ─────────────────────────────────────
+            ai_state = "😴 SLEEPING" if shared_state.get("ai_sleeping") else "✅ AWAKE"
+            _snap_lines.append(f"🤖 AIs: {ai_state}")
+            if shared_state.get("ai_sleeping"):
+                instr = shared_state.get("ai_wake_instructions", [])
+                _snap_lines.append(f"   Wake triggers active: {len(instr)}")
+
+            _snap_lines.append("═" * 60)
+            for _line in _snap_lines:
+                log(_line)
+
+        log(f"Sleeping {interval} min [mode: {mode}]...")
+        time.sleep(interval * 60)
+
+if __name__ == "__main__":
+    t = threading.Thread(target=trading_loop, daemon=True)
+    t.start()
+    port = int(os.environ.get("PORT", 8080))
+    log(f"🌐 Proxy on port {port}")
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)

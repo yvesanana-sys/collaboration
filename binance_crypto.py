@@ -156,10 +156,7 @@ CRYPTO_RULES = {
     # ── Position sizing (tier-based) ─────────────────────────
     # More aggressive at small equity — needed to compound to goal
     "max_positions":        3,       # Aggressive — 3 concurrent crypto positions (was 2)
-    "min_trade_usdt":       10.0,    # Binance.US minimum notional ($10)
-    # Order floor: min notional + buffer so fees/price ticks between
-    # sizing and fill never push an order under the exchange minimum.
-    "min_order_usdt":       10.50,
+    "min_trade_usdt":       8.0,     # Binance.US minimum
     # ── Entry filters ─────────────────────────────────────────
     "min_confidence":       60,      # Aggressive — lowered to 60 (was 65)
     "vol_spike_multiplier": 1.5,     # Volume must be 1.5x average to confirm breakout
@@ -197,27 +194,22 @@ CRYPTO_RULES = {
 # ── Tier-based risk sizing ─────────────────────────────────────
 # At small equity we must take bigger % risks to compound toward goal
 # As equity grows, risk per trade shrinks (protecting gains)
-# tp_pct: quick-flip take-profit override (classic-strategy positions
-# only — Turtle keeps its own Donchian/2N exit, never a fixed TP). At
-# small wallet size we bank any real gain fast and redeploy the cash
-# instead of waiting for the flat 8% CRYPTO_RULES["take_profit_pct"].
-# None at the top tier = no override, existing 8% tp_price stands.
 CRYPTO_TIERS = [
     # AGGRESSIVE PROFILE + DISCOVERY MODE ENABLED
     # coins list is ADVISORY (prefer these) — AI can buy anything from scan
     # if confidence ≥ 70%. No hard tier restrictions on buys.
-    {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3, "tp_pct": 0.015,
+    {"min_equity":   0, "max_equity": 150,  "risk_pct": 0.30, "max_pos": 3,
      "coins": None,  # DISCOVERY MODE — AI can pick from top market movers
-     "note": "Tier 1 — AGGRESSIVE + DISCOVERY: 30% risk, 3 positions, any trending coin, 1.5% quick TP"},
-    {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3, "tp_pct": 0.03,
+     "note": "Tier 1 — AGGRESSIVE + DISCOVERY: 30% risk, 3 positions, any trending coin"},
+    {"min_equity": 150, "max_equity": 300,  "risk_pct": 0.25, "max_pos": 3,
      "coins": None,
-     "note": "Tier 2 — 25% risk, 3 positions, full discovery, 3% quick TP"},
-    {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4, "tp_pct": 0.05,
+     "note": "Tier 2 — 25% risk, 3 positions, full discovery"},
+    {"min_equity": 300, "max_equity": 600,  "risk_pct": 0.20, "max_pos": 4,
      "coins": None,
-     "note": "Tier 3 — 20% risk, 4 positions, full discovery, 5% quick TP"},
-    {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5, "tp_pct": None,
+     "note": "Tier 3 — 20% risk, 4 positions, full discovery"},
+    {"min_equity": 600, "max_equity": 9999, "risk_pct": 0.15, "max_pos": 5,
      "coins": None,
-     "note": "Tier 4 — 15% risk, 5 positions, full discovery, standard 8% TP (patient)"},
+     "note": "Tier 4 — 15% risk, 5 positions, full discovery"},
 ]
 
 def effective_fees(has_bnb: bool = False) -> dict:
@@ -254,15 +246,6 @@ def get_crypto_tier(wallet_value: float) -> dict:
         if t["min_equity"] <= wallet_value < t["max_equity"]:
             return t
     return CRYPTO_TIERS[-1]
-
-
-def get_crypto_quick_take_profit_pct(wallet_value: float):
-    """
-    Small-wallet quick-flip take-profit override, or None at the top
-    tier (meaning: use the existing fixed 8% tp_price / trailing logic
-    as-is). Single source of truth for run_exit_monitor.
-    """
-    return get_crypto_tier(wallet_value).get("tp_pct")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1795,46 +1778,6 @@ def get_live_asset_balance(symbol: str) -> float:
         return 0.0
 
 
-def reconcile_ghost_exit(symbol: str, entry_time) -> dict:
-    """
-    A tracked position's live Binance balance dropped to zero/dust without
-    the bot selling it — almost always a broker-side STOP_LOSS order that
-    filled directly on the exchange (survives bot restarts/redeploys by
-    design). Query Binance's own fill history since entry to recover the
-    real exit price/qty/fees so the loss can still be recorded, instead of
-    the position just vanishing from trade history.
-
-    Returns {} if no matching SELL fill is found (caller should fall back
-    to an estimate using the current mark price rather than lose the
-    trade entirely).
-    """
-    try:
-        start_ms = int(entry_time.timestamp() * 1000)
-        trades = binance_get("/api/v3/myTrades",
-                              {"symbol": symbol, "startTime": start_ms, "limit": 100},
-                              signed=True)
-        sells = [t for t in (trades or [])
-                 if not t.get("isBuyer") and float(t.get("qty", 0)) > 0]
-        if not sells:
-            return {}
-        total_qty   = sum(float(t["qty"]) for t in sells)
-        total_quote = sum(float(t["quoteQty"]) for t in sells)
-        total_fee   = sum(float(t.get("commission", 0)) for t in sells
-                           if t.get("commissionAsset") in ("USDT", "USD", "USDC"))
-        if total_qty <= 0:
-            return {}
-        return {
-            "qty":             total_qty,
-            "avg_price":       total_quote / total_qty,
-            "gross_proceeds":  total_quote,
-            "fee_usd":         total_fee,
-            "last_fill_time":  max(int(t["time"]) for t in sells),
-        }
-    except Exception as e:
-        print(f"[CRYPTO] ⚠️ reconcile_ghost_exit({symbol}) failed: {e}", flush=True)
-        return {}
-
-
 def place_crypto_sell(symbol: str, qty: float,
                       limit_price: float = None,
                       force_limit: bool = False) -> dict:
@@ -2343,11 +2286,6 @@ class CryptoTrader:
                 if status != "NEW" or filled_qty > 0:
                     continue
 
-                # Protective STOP_LOSS orders rest at the broker by design
-                # (survive bot outages) — never auto-cancel them as stale.
-                if "STOP" in order.get("type", ""):
-                    continue
-
                 age_mins = (time.time() * 1000 - order_time) / 60000
                 threshold = 30 if side == "BUY" else 60
                 if age_mins < threshold:
@@ -2367,16 +2305,6 @@ class CryptoTrader:
         if not self.positions:
             return 0
 
-        # ── Quick-flip take-profit tier (computed once per cycle, not
-        # per-position, to avoid extra API calls). Falls back to None
-        # (no override — existing 8% tp_price stands) on any failure.
-        quick_tp = None
-        try:
-            wallet_value = get_full_wallet().get("total_value", 0)
-            quick_tp = get_crypto_quick_take_profit_pct(wallet_value)
-        except Exception as we:
-            self._log(f"   ⚠️ Quick-TP wallet lookup failed: {we}")
-
         exits = 0
         for symbol, pos in list(self.positions.items()):
             try:
@@ -2384,53 +2312,18 @@ class CryptoTrader:
 
                 # ── Ghost position cleanup ───────────────────────
                 # If wallet balance for this symbol is dust ($ < $1.50)
-                # or zero, the position was sold outside the bot — almost
-                # always a broker-side STOP_LOSS order filling directly on
-                # Binance. Reconcile against Binance's own fill history so
-                # the loss still lands in trade history/performance/the
-                # AI's memory instead of vanishing (see reconcile_ghost_exit).
+                # or zero, the position was sold outside the bot (manual
+                # sale, prior liquidation). Clear the tracker silently
+                # so we don't spam logs every cycle and don't fire
+                # ghost stop/TP exits on a phantom holding.
                 try:
                     asset = symbol.replace("USDT", "")
                     live_qty = get_live_asset_balance(symbol)
                     live_val = live_qty * current if current > 0 else 0
                     if live_qty == 0 or 0 < live_val < 1.5:
-                        recon = reconcile_ghost_exit(symbol, pos.entry_time)
-                        if recon:
-                            pnl_usd = round(recon["gross_proceeds"] - recon["fee_usd"]
-                                             - pos.entry_price * recon["qty"], 2)
-                            pnl_pct = round((recon["avg_price"] / pos.entry_price - 1) * 100, 2)
-                            self._log(f"   🧹 {symbol}: ghost position — reconciled broker-side "
-                                      f"exit @ ${recon['avg_price']:.6f} | P&L: ${pnl_usd:+.2f} "
-                                      f"({pnl_pct:+.2f}%) — likely stop-loss fill")
-                        else:
-                            # No matching fill found on Binance — still record an
-                            # ESTIMATE off the current mark rather than lose the
-                            # trade silently. Clearly tagged as inexact.
-                            pnl_usd = round((current - pos.entry_price) * pos.qty, 2)
-                            pnl_pct = pos.pnl_pct(current)
-                            self._log(f"   🧹 {symbol}: ghost position detected "
-                                      f"(live qty={live_qty:.8f}, ~${live_val:.4f}) — no Binance "
-                                      f"fill found, recording ESTIMATE P&L: ${pnl_usd:+.2f} "
-                                      f"({pnl_pct:+.2f}%)")
-                        if record_trade_fn:
-                            try:
-                                record_trade_fn(
-                                    action       = "stop_loss",
-                                    symbol       = symbol,
-                                    qty          = recon.get("qty", pos.qty) if recon else pos.qty,
-                                    price        = recon.get("avg_price", current) if recon else current,
-                                    notional     = round((recon.get("avg_price", current) if recon else current)
-                                                          * (recon.get("qty", pos.qty) if recon else pos.qty), 2),
-                                    owner        = pos.owner,
-                                    pnl_usd      = pnl_usd,
-                                    pnl_pct      = pnl_pct / 100,
-                                    strategy     = "crypto",
-                                    entry_price  = pos.entry_price,
-                                    reason       = "crypto:stop_loss (broker-side"
-                                                   + ("" if recon else ", estimated") + ")",
-                                )
-                            except Exception as rte:
-                                self._log(f"   ⚠️ ghost-exit record_trade failed: {rte}")
+                        self._log(f"   🧹 {symbol}: ghost position detected "
+                                  f"(live qty={live_qty:.8f}, ~${live_val:.4f}) — "
+                                  f"clearing tracker (sold outside bot)")
                         del self.positions[symbol]
                         continue
                 except Exception as ge:
@@ -2466,11 +2359,6 @@ class CryptoTrader:
                         exit_reason = f"turtle_2N_stop ({pnl:.2f}%)"
                     else:
                         exit_reason = f"stop_loss ({pnl:.2f}%)"
-                elif (exit_reason is None and pos.strategy_type != "turtle"
-                      and quick_tp is not None and pnl >= quick_tp * 100):
-                    # Small-wallet velocity override — bank any real gain
-                    # above the tier floor instead of holding for 8%.
-                    exit_reason = f"take_profit (quick tier {pnl:.2f}%)"
                 elif exit_reason is None and pos.should_take_profit(current):
                     exit_reason = f"take_profit ({pnl:.2f}%)"
                 elif exit_reason is None and pos.should_time_exit():
@@ -2548,41 +2436,8 @@ class CryptoTrader:
             ghost_errors = ("ZERO_BALANCE", "DUST_BALANCE", "QTY_ROUNDED_TO_ZERO")
             if isinstance(result, dict) and result.get("error") in ghost_errors:
                 err = result.get("error")
-                recon = reconcile_ghost_exit(pos.symbol, pos.entry_time)
-                if recon:
-                    pnl_usd = round(recon["gross_proceeds"] - recon["fee_usd"]
-                                     - pos.entry_price * recon["qty"], 2)
-                    pnl_pct = round((recon["avg_price"] / pos.entry_price - 1) * 100, 2)
-                    exit_price = recon["avg_price"]
-                    exit_qty   = recon["qty"]
-                    self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — reconciled "
-                              f"broker-side exit @ ${exit_price:.6f} | P&L: ${pnl_usd:+.2f} "
-                              f"({pnl_pct:+.2f}%)")
-                else:
-                    exit_price = current_price
-                    exit_qty   = pos.qty
-                    pnl_usd = round((current_price - pos.entry_price) * pos.qty, 2)
-                    pnl_pct = pos.pnl_pct(current_price)
-                    self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — no Binance fill "
-                              f"found, recording ESTIMATE P&L: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)")
-                if record_trade_fn:
-                    try:
-                        record_trade_fn(
-                            action       = reason.split("(")[0].strip(),
-                            symbol       = pos.symbol,
-                            qty          = exit_qty,
-                            price        = exit_price,
-                            notional     = round(exit_price * exit_qty, 2),
-                            owner        = pos.owner,
-                            pnl_usd      = pnl_usd,
-                            pnl_pct      = pnl_pct / 100,
-                            strategy     = "crypto",
-                            entry_price  = pos.entry_price,
-                            reason       = f"crypto:{reason} (ghost, "
-                                           + ("reconciled)" if recon else "estimated)"),
-                        )
-                    except Exception as rte:
-                        self._log(f"   ⚠️ ghost-exit record_trade failed: {rte}")
+                self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — "
+                          f"removing tracker (likely sold outside bot)")
                 del self.positions[pos.symbol]
                 return True  # Treat as success to prevent infinite retries
 
@@ -2833,17 +2688,6 @@ class CryptoTrader:
         tier_coins    = tier["coins"]  # None = all universe unlocked
         trade_budget  = round(total_available * risk_pct, 2)
         CRYPTO_RULES["max_positions"] = tier_max_pos
-
-        # ── Floor the suggested budget at the exchange minimum ──
-        # A raw risk_pct slice of a small wallet can round below what
-        # Binance.US will actually accept (e.g. 30% of $19.64 = $5.89
-        # vs. a $10 minimum). If the wallet can afford the floor, ask
-        # the AI for a legal order size instead of one it can't place.
-        if (trade_budget < CRYPTO_RULES["min_order_usdt"]
-                and total_available >= CRYPTO_RULES["min_order_usdt"]):
-            self._log(f"   📐 Budget floored ${trade_budget:.2f} → "
-                      f"${CRYPTO_RULES['min_order_usdt']:.2f} (wallet can afford the exchange minimum)")
-            trade_budget = CRYPTO_RULES["min_order_usdt"]
 
         self._log(f"   📊 {tier['note']}")
         self._log(f"   💰 Risk per trade: {risk_pct*100:.0f}% = ${trade_budget:.2f} USDT")
@@ -3272,3 +3116,1143 @@ PRIORITY: Find best entry, buy low, plan exit above fees.
                 self._log(f"   🔴 Grok intel: {grok_intel[:200]}...")
         except Exception as e:
             self._log(f"   ⚠️ Grok research failed: {e}")
+
+        # ── Assemble full prompt (grok_intel now defined) ─────
+        # Find top breakout opportunities from projections
+        breakout_coins = [
+            f"{sym} 🚀" for sym, p in self._projections.items()
+            if p.get("indicators", {}).get("breakout_signal") == "BULLISH_BREAKOUT"
+        ]
+
+        prompt = f"""=== CRYPTO SWING TRADING — NOVATRADE [{situation_mode.upper().replace('_',' ')}] ===
+{wallet_text}
+
+TIER: {tier['note']}
+Available USDT: ${crypto_pool:.2f} | Wallet: ${crypto_equity:.2f} | Trade budget: ${trade_budget:.2f}
+Crypto P&L: ${self.total_pnl:+.2f} | Win rate: {int(win_rate)}% ({self.wins}W/{self.losses}L)
+{positions_text}
+{holdings_text}
+{staking_text}
+AGGRESSIVE SCALPING STRATEGY (small account compounding):
+- STOP: {CRYPTO_RULES['stop_loss_pct']*100:.0f}% hard stop (tight — cut losses fast)
+- TP TARGET: {CRYPTO_RULES['take_profit_pct']*100:.0f}% (bank wins fast, redeploy capital)
+- TRAIL: activate at +{CRYPTO_RULES['trail_activate_pct']*100:.0f}% gain, trail {CRYPTO_RULES['trail_pct']*100:.0f}% from peak (lock gains fast)
+- ENTRY: 20-period HIGH BREAKOUT + volume >{CRYPTO_RULES['vol_spike_multiplier']}x avg = strongest signal
+- ENTRY ALT: RSI < {CRYPTO_RULES['rsi_oversold_max']} oversold dip near proj_low = dip buy
+- SIZE: {risk_pct*100:.0f}% of wallet per trade = ${trade_budget:.2f}
+- MAX POSITIONS: {tier_max_pos} at this tier
+- TIME STOP: exit after {CRYPTO_RULES['max_hold_hours']}h regardless
+
+🌍 DISCOVERY MODE ENABLED:
+You can BUY ANY coin from the MARKET SCAN below, not just the tier list.
+If you see a ★ NEW coin trending with strong setup (confidence ≥ 70%),
+recommend it — bot will buy. No universe restriction.
+Good candidates: coins up 5-15% in 24h with volume spike + RSI 40-70.
+
+🚀 BREAKOUT COINS RIGHT NOW: {breakout_coins or 'none detected yet'}
+(Breakout = price just broke 20-period high + volume spike — highest priority entries)
+
+FEE RULES:
+- 0.1% round-trip → sell price must exceed entry × 1.001 minimum
+- At 30-80% targets, fees are negligible (<0.1% of profit)
+
+{mode_instruction}
+
+24H MOVERS: {stats_text}
+
+{scan_text}
+
+{proj_text}
+
+{stock_cross_ref}
+
+{pol_section}
+
+{smart_section}
+
+{f"LEARNED CONTEXT:{chr(10)}{lessons_text}" if lessons_text else ""}
+
+TASK — AGGRESSIVE SCALPING [{situation_mode.upper().replace('_',' ')}]:
+1. BREAKOUTS FIRST: Any coin showing BULLISH_BREAKOUT + volume spike? → BUY immediately
+2. DIPS SECOND: RSI < {CRYPTO_RULES['rsi_oversold_max']} near proj_low? → BUY the dip
+3. DISCOVERY: ★ NEW coins trending in market scan with strong setup? → BUY
+4. HOLD WINNERS: Position up 3%+ with momentum → hold, trail will protect
+5. CUT LOSERS: Down 5%+ with bearish signal → sell, rotate into better setup
+6. COIN-TO-COIN: Sell weakest coin → USDT → buy strongest breakout
+
+PROFIT TARGET REMINDER:
+  Small account = fast turnover. Target {CRYPTO_RULES['take_profit_pct']*100:.0f}% per trade.
+  Many small wins compound faster than waiting for big ones.
+  Trail at +{CRYPTO_RULES['trail_activate_pct']*100:.0f}% protects gains while staying in.
+
+COIN-TO-COIN EXAMPLE:
+  SHIB weak → sell_decisions: [{{"symbol": "SHIBUSDT", "reason": "weak, rotating to BTC breakout"}}]
+  BTC breakout → crypto_trades: [{{"symbol": "BTCUSDT", "action": "buy", "notional_usdt": {trade_budget:.1f}, "confidence": 82, "entry_target": 0.0, "tp_target": 0.0}}]
+
+JSON: {{"crypto_trades":[{{"symbol":"BTCUSDT","action":"buy","notional_usdt":{trade_budget:.1f},"confidence":80,"entry_target":95000.0,"tp_target":142000.0,"rationale":"breakout+vol"}}],"hold_decisions":[{{"symbol":"ETHUSDT","action":"hold","reason":"trending up, hold to 80% target"}}],"sell_decisions":[{{"symbol":"SOLUSDT","action":"sell","reason":"weak RSI, below 20-period low"}}],"avoid":["DOGEUSDT"],"market_note":"brief"}}
+
+{f'GROK LIVE INTEL (from X/web search right now):{chr(10)}{grok_intel}' if grok_intel else ''}"""
+
+        # ── Step 2: Ask both AIs with Grok intel included ─────
+        self._log("   🔵 Claude analyzing crypto...")
+        self._log("   🔴 Grok making final crypto decisions...")
+
+        claude_resp = None
+        grok_resp   = None
+
+        def _parse_crypto_resp(raw):
+            """
+            Parse JSON from AI crypto response with multiple layers:
+              1. Naive parse (NO abbrev expansion) — preserves sn/pt/cc/bw/st as-is
+              2. Autowrap on RAW — catches Grok's flat-trade abbrevs directly
+              3. If still no usable shape, run hardened parser w/ abbrev expansion
+              4. Autowrap once more after expansion
+            Order matters: autowrap on raw catches cases where the abbrev map
+            would mangle them (e.g. "pt"→"proposed_trades" when it really meant
+            entry price; "bw" → "bearish_watchlist" when it really meant notional).
+            """
+            if not raw:
+                return None
+            if isinstance(raw, dict):
+                return _autowrap_flat_trade(raw)
+
+            # Layer 1: naive parse on raw (no abbrev expansion yet)
+            parsed = None
+            try:
+                import json, re
+                clean = re.sub(r'```\w*', '', str(raw)).replace('```','').strip()
+                s = clean.find('{')
+                e = clean.rfind('}') + 1
+                if s >= 0 and e > s:
+                    parsed = json.loads(clean[s:e])
+            except Exception:
+                parsed = None
+
+            # Layer 2: autowrap on RAW — catches abbrev-key flat-trades
+            if isinstance(parsed, dict):
+                wrapped = _autowrap_flat_trade(parsed)
+                if wrapped and isinstance(wrapped, dict) and (
+                        "crypto_trades" in wrapped or "sell_decisions" in wrapped):
+                    return wrapped
+
+            # Layer 3: hardened global parser (truncation recovery + abbrev expansion)
+            try:
+                from ai_clients import parse_json as _global_parse_json
+                result = _global_parse_json(raw)
+                if result and isinstance(result, dict):
+                    wrapped = _autowrap_flat_trade(result)
+                    if wrapped and isinstance(wrapped, dict) and (
+                            "crypto_trades" in wrapped or "sell_decisions" in wrapped):
+                        return wrapped
+                    return wrapped or result
+            except Exception:
+                pass
+
+            # Layer 4: return parsed even if not viable — better than None
+            return _autowrap_flat_trade(parsed) if parsed else None
+
+        # ── Field aliases for messy AI responses ──
+        # Grok in particular invents compressed keys that don't follow our
+        # standard abbrev map. We accept multiple aliases per field.
+        _SYMBOL_ALIASES   = ("symbol", "s", "sym", "sn", "ticker",
+                             "strategy_name")  # sn/strategy_name sometimes IS the symbol
+        _ACTION_ALIASES   = ("action", "a", "side", "st")
+        _NOTIONAL_ALIASES = ("notional_usdt", "notional_usd", "notional",
+                             "n", "amount", "usd", "size", "bw")
+        _CONF_ALIASES     = ("confidence", "c", "cc", "conf")
+        _ENTRY_ALIASES    = ("entry_target", "entry", "price", "pt", "target")
+        _TP_ALIASES       = ("tp_target", "tp", "take_profit", "target_price")
+        _RATIONALE_ALIASES= ("rationale", "r", "reason", "thesis", "mt",
+                             "market_thesis")
+
+        def _first_match(d, keys, default=None):
+            """Return value of first matching key in d, else default."""
+            for k in keys:
+                if k in d and d[k] not in (None, ""):
+                    return d[k]
+            return default
+
+        def _autowrap_flat_trade(parsed):
+            """
+            Detect when an AI returned a single trade as a flat object instead
+            of the proper {strategy_name, market_thesis, crypto_trades:[...]}
+            schema, and reshape it into the expected form.
+
+            This handles two common Grok failure modes:
+            (a) Abbrev keys at root (sn/mt/pt/cc/bw/st) without crypto_trades wrapper
+            (b) Full-name keys at root (symbol/action/notional_usdt) without wrapper
+            """
+            if not isinstance(parsed, dict):
+                return parsed
+            # Already correctly shaped — pass through
+            if "crypto_trades" in parsed or "sell_decisions" in parsed:
+                return parsed
+
+            # Look for ANY action+symbol-like fields. If we find at least
+            # an action OR a notional, this looks like a flat trade.
+            has_action   = bool(_first_match(parsed, _ACTION_ALIASES))
+            has_notional = bool(_first_match(parsed, _NOTIONAL_ALIASES))
+            has_entry    = bool(_first_match(parsed, _ENTRY_ALIASES))
+            if not (has_action or has_notional or has_entry):
+                return parsed   # Not a trade-shape response
+
+            # Extract symbol — try direct fields, fall back to strategy_name
+            # if it looks like a USDT pair
+            sym = _first_match(parsed, _SYMBOL_ALIASES)
+            if isinstance(sym, str):
+                sym = sym.upper().strip()
+                if not sym.endswith(("USDT", "USDC", "BUSD", "USD")):
+                    # Could be just "DOGE" — append USDT
+                    if 2 <= len(sym) <= 8 and sym.isalnum():
+                        sym = sym + "USDT"
+                    else:
+                        sym = None
+            if not sym:
+                self._log(f"   🔧 Flat trade detected but no symbol extractable — skipping")
+                return parsed   # Can't salvage without a symbol
+
+            # Build the wrapped trade
+            try:
+                notional = float(_first_match(parsed, _NOTIONAL_ALIASES, 0)) or 0
+            except (ValueError, TypeError):
+                notional = 0
+            try:
+                conf = float(_first_match(parsed, _CONF_ALIASES, 0)) or 0
+                # Some AIs emit confidence as 0-1; normalize to 0-100
+                if 0 < conf <= 1.0:
+                    conf = conf * 100
+            except (ValueError, TypeError):
+                conf = 0
+            entry = _first_match(parsed, _ENTRY_ALIASES)
+            try:
+                # Strip $ and other formatting
+                if isinstance(entry, str):
+                    entry = float(entry.replace("$", "").replace(",", "").strip())
+                else:
+                    entry = float(entry) if entry else 0
+            except (ValueError, TypeError):
+                entry = 0
+            tp = _first_match(parsed, _TP_ALIASES)
+            try:
+                if isinstance(tp, str):
+                    tp = float(tp.replace("$", "").replace(",", "").strip())
+                else:
+                    tp = float(tp) if tp else 0
+            except (ValueError, TypeError):
+                tp = 0
+
+            wrapped = {
+                "strategy_name":  parsed.get("strategy_name") or "AUTOWRAPPED",
+                "market_thesis":  _first_match(parsed, _RATIONALE_ALIASES, "") or "",
+                "crypto_trades": [{
+                    "symbol":        sym,
+                    "action":        _first_match(parsed, _ACTION_ALIASES, "buy"),
+                    "notional_usdt": notional,
+                    "confidence":    int(conf),
+                    "entry_target":  entry,
+                    "tp_target":     tp,
+                    "rationale":     _first_match(parsed, _RATIONALE_ALIASES, "") or "",
+                }],
+                "sell_decisions": parsed.get("sell_decisions", []),
+            }
+            self._log(f"   🔧 Auto-wrapped flat trade response → {sym} "
+                      f"({wrapped['crypto_trades'][0]['action']}, "
+                      f"${notional:.2f}, conf={int(conf)}%)")
+            return wrapped
+
+        try:
+            raw = ask_claude_fn(prompt, claude_system)
+            claude_resp = _parse_crypto_resp(raw)
+            if not claude_resp:
+                self._log(f"   ⚠️ Claude crypto parse failed: {str(raw)[:100]}")
+        except Exception as e:
+            self._log(f"   ⚠️ Claude crypto failed: {e}")
+
+        try:
+            raw = ask_grok_fn(prompt, grok_system)
+            grok_resp = _parse_crypto_resp(raw)
+            if not grok_resp:
+                self._log(f"   ⚠️ Grok crypto parse failed: {str(raw)[:100]}")
+        except Exception as e:
+            self._log(f"   ⚠️ Grok crypto failed: {e}")
+
+        if not claude_resp and not grok_resp:
+            self._log("   ⚠️ Both AIs failed — skipping crypto cycle")
+            return 0
+
+        # ── Process SELL decisions on ALL wallet holdings ─────
+        # AI can sell any coin in wallet — not just bot-tracked positions
+        # This allows converting weak holdings to USDT for better trades
+        all_wallet = wallet.get("tradeable", []) + wallet.get("non_tradeable", [])
+        wallet_map = {p["asset"]: p for p in all_wallet}  # asset → holding
+
+        sell_decisions = []
+        for ai_name, resp in [("claude", claude_resp), ("grok", grok_resp)]:
+            if not resp or not isinstance(resp, dict):
+                continue
+            for sell in resp.get("sell_decisions", []):
+                sym = sell.get("symbol", "")
+                if sym:
+                    # ── Normalize: AI sometimes returns bare asset (UNI, ETH) ──
+                    # instead of trading pair (UNIUSDT, ETHUSDT). Binance rejects
+                    # symbol=UNI with 400 Bad Request. Auto-append USDT unless
+                    # symbol already ends in a known quote (USDT, USDC, BUSD, USD).
+                    sym_upper = sym.upper().strip()
+                    if not sym_upper.endswith(("USDT", "USDC", "BUSD", "USD")):
+                        sym_upper = sym_upper + "USDT"
+                    sell_decisions.append((sym_upper, sell.get("reason", "AI recommendation"), ai_name))
+
+        # Execute sells — both AIs agree OR single AI for weak/small coins
+        sell_counts = {}
+        for sym, reason, ai in sell_decisions:
+            sell_counts[sym] = sell_counts.get(sym, [])
+            sell_counts[sym].append((reason, ai))
+
+        for sym, decisions in sell_counts.items():
+            both_agree    = len(decisions) >= 2
+            proj          = self._projections.get(sym, {})
+            near_proj_high = False
+            if proj and not proj.get("error"):
+                try:
+                    curr = get_crypto_price(sym)
+                    ph   = proj.get("proj_high", 0)
+                    if ph and curr >= ph * 0.99:
+                        near_proj_high = True
+                except Exception:
+                    pass
+
+            # Single-AI sell allowed for small/weak coins — coins worth < $20
+            # with no strong projection that have been flagged for rotation
+            asset      = sym.replace("USDT", "")
+            holding    = wallet_map.get(asset, {})
+            coin_value = holding.get("value_usdt", 0) or holding.get("free", 0) * holding.get("price", 0)
+            weak_coin  = coin_value < 20.0 and not near_proj_high
+
+            if both_agree or near_proj_high or (len(decisions) == 1 and weak_coin):
+                sell_tag = ('both AIs' if both_agree
+                            else 'near proj_high' if near_proj_high
+                            else f'single AI ({decisions[0][1]}) weak coin')
+                try:
+                    asset = sym.replace("USDT", "")
+                    holding = wallet_map.get(asset)
+
+                    # ── Cancel any existing open orders for this symbol ──
+                    # Without this, an old unfilled LIMIT leaves part of the
+                    # balance locked and the new order either fails on LOT_SIZE
+                    # or re-stacks above market. After cancelling we re-read
+                    # the wallet so freed balance is usable.
+                    try:
+                        existing_orders = get_open_crypto_orders(sym)
+                        if existing_orders:
+                            for o in existing_orders:
+                                try:
+                                    cancel_crypto_order(sym, o["orderId"])
+                                    self._log(f"   🗑️ Cancelled stale {o.get('side','?')} "
+                                              f"order for {sym} (id={o.get('orderId')}) "
+                                              f"before fresh sell")
+                                except Exception as ce:
+                                    self._log(f"   ⚠️ Cancel failed {sym}: {ce}")
+                            import time as _t; _t.sleep(0.5)
+                            # Re-read wallet — locked balance should now be free
+                            refreshed = get_full_wallet()
+                            if not refreshed.get("error"):
+                                for p in (refreshed.get("tradeable", []) +
+                                          refreshed.get("non_tradeable", [])):
+                                    if p["asset"] == asset:
+                                        holding = p
+                                        break
+                    except Exception as sweep_e:
+                        self._log(f"   ⚠️ Pre-sell order sweep failed for {sym}: {sweep_e}")
+
+                    if holding and holding.get("free", 0) > 0:
+                        qty = holding["free"]
+
+                        # Get price — fallback to wallet stored price for micro-price coins
+                        curr = 0.0
+                        try:
+                            curr = get_crypto_price(sym)
+                        except Exception:
+                            pass
+                        if curr <= 0:
+                            curr = holding.get("price", 0)
+                            if curr > 0:
+                                self._log(f"   ℹ️ {sym} using wallet price ${curr:.8f}")
+
+                        val = qty * curr if curr > 0 else 0
+
+                        # Skip dust
+                        if curr > 0 and val < 2.0:
+                            self._log(f"   ⚠️ {sym} dust (${val:.4f}) — skipping sell")
+                            continue
+
+                        # Round qty to exchange step_size (prevents LOT_SIZE 400 errors)
+                        qty = _round_qty_step(qty, sym)
+                        if qty <= 0:
+                            self._log(f"   ⚠️ {sym} rounded to 0 qty — skipping")
+                            continue
+
+                        # MARKET sell — fills immediately (per NOVATRADE_MASTER:
+                        # all sell paths use MARKET orders to avoid PRICE_FILTER
+                        # rejections and unfilled resting limits)
+                        result = place_crypto_sell(sym, qty)
+
+                        if result.get("orderId"):
+                            usdt_est = round(qty * curr, 2) if curr > 0 else 0
+                            self._log(f"   ✅ MARKET sell: {sym} {qty} → ~${usdt_est:.2f} USDT | "
+                                      f"order={result['orderId']} [{sell_tag}]")
+                        else:
+                            self._log(f"   ⚠️ Sell failed: {result}")
+                    elif holding and holding.get("locked", 0) > 0:
+                        self._log(f"   ⚠️ {asset} is locked/staked — cannot sell "
+                                  f"({holding['locked']:.4f} locked)")
+                    else:
+                        self._log(f"   ⚠️ {asset} not found in wallet or zero balance")
+                except Exception as e:
+                    self._log(f"   ❌ Sell error for {sym}: {e}")
+
+        # ── Log hold decisions ─────────────────────────────────
+        for ai_name, resp in [("claude", claude_resp), ("grok", grok_resp)]:
+            if not resp or not isinstance(resp, dict):
+                continue
+            for hold in resp.get("hold_decisions", []):
+                sym    = hold.get("symbol", "")
+                reason = hold.get("reason", "")
+                if sym:
+                    self._log(f"   📌 {ai_name.title()} says HOLD {sym}: {reason[:60]}")
+
+        # Extract and validate trade proposals
+        new_positions = 0
+        proposals = []
+
+        # ── Wallet-scaling reserve (applies before AI pool split) ──
+        # Combine stock + crypto equity to get true total wallet value.
+        # Below $1000 → 0% reserve (AIs trade full balance).
+        # At $1000 → 10%, +1% per $1k, capped at 30% at $21k+.
+        try:
+            stock_equity = 0.0
+            if self._shared_state:
+                stock_equity = float(self._shared_state.get("equity", 0) or 0)
+        except Exception:
+            stock_equity = 0.0
+        combined_wallet = crypto_equity + stock_equity
+        reserve_pct     = get_wallet_reserve_pct(combined_wallet)
+        reserve_amount  = round(crypto_pool * reserve_pct, 2)
+        tradeable_usdt  = max(0.0, crypto_pool - reserve_amount)
+        if reserve_pct > 0:
+            self._log(f"   🛡️  Reserve: {reserve_pct*100:.0f}% = ${reserve_amount:.2f} held back "
+                      f"(combined wallet ${combined_wallet:.2f}) — tradeable: ${tradeable_usdt:.2f}")
+        else:
+            self._log(f"   🆓 Reserve: 0% (under ${RESERVE_FREE_THRESHOLD:.0f} combined) — "
+                      f"AIs trade full ${tradeable_usdt:.2f} USDT")
+
+        # ── Split USDT pool into per-AI slices ──────────────────
+        # In competition mode each AI sizes its trades only against
+        # its own share. Reserved / safety capital is taken from both
+        # equally so neither AI gets an unfair advantage.
+        if ENABLE_AI_COMPETITION:
+            # AI pools are split AFTER reserve is removed
+            claude_pool = round(tradeable_usdt * CLAUDE_POOL_PCT, 2)
+            grok_pool   = round(tradeable_usdt * GROK_POOL_PCT,   2)
+            self._log(f"   🥊 Pool split: Claude=${claude_pool:.2f} | "
+                      f"Grok=${grok_pool:.2f} (of ${tradeable_usdt:.2f} tradeable USDT)")
+        else:
+            claude_pool = tradeable_usdt
+            grok_pool   = tradeable_usdt
+
+        for ai_name, resp in [("claude", claude_resp), ("grok", grok_resp)]:
+            if not resp or not isinstance(resp, dict):
+                continue
+            trades = resp.get("crypto_trades", [])
+            for t in trades:
+                sym   = t.get("symbol", "")
+                # ── Normalize to trading pair (same reason as sell_decisions) ──
+                if sym:
+                    sym_up = sym.upper().strip()
+                    if not sym_up.endswith(("USDT", "USDC", "BUSD", "USD")):
+                        sym_up = sym_up + "USDT"
+                    sym = sym_up
+                conf  = t.get("confidence", 0)
+                notional = t.get("notional_usdt", 0)
+                entry = t.get("entry_target")
+                tp    = t.get("tp_target")
+
+                if sym not in CRYPTO_UNIVERSE:
+                    # Allow coins discovered via market scan (has real volume on Binance.US)
+                    scan_syms = {c["symbol"] for c in market_scan}
+                    if sym not in scan_syms or not sym.endswith("USDT"):
+                        self._log(f"   ⚠️ {sym} not in universe or market scan — skipping")
+                        continue
+                    self._log(f"   🌟 {sym} discovered via market scan — new opportunity!")
+                if conf < CRYPTO_RULES["min_confidence"]:
+                    continue
+                if sym in self.positions:
+                    continue
+                if notional < CRYPTO_RULES["min_trade_usdt"]:
+                    continue
+
+                # Validate against projection
+                proj = self._projections.get(sym, {})
+                if proj.get("error") or not proj.get("viable"):
+                    self._log(f"   ⚠️ {sym} projection not viable — skipping")
+                    continue
+
+                # Use ATR-based targets if available, else proj range
+                atr       = proj.get("atr", 0)
+                entry_px  = entry or proj["proj_low"]
+                if atr and atr > 0:
+                    tp_px  = tp or round(entry_px + 3.5 * atr, 6)
+                    stop_px= round(entry_px - 1.5 * atr, 6)
+                else:
+                    tp_px  = tp or proj["proj_high"]
+                    stop_px= round(entry_px * (1 - CRYPTO_RULES["stop_loss_pct"]), 6)
+
+                # ── Fee-aware profit check ────────────────────
+                # TP must clear: entry + round_trip_fee + min_profit
+                # Uses effective_fees() so BNB discount is applied
+                # automatically when the wallet holds BNB.
+                _has_bnb = bool(self._wallet_cache and self._wallet_cache.get("bnb"))
+                _fees    = effective_fees(has_bnb=_has_bnb)
+                fee_rt   = _fees["round_trip"]
+                # Floor net gain at fee × multiplier (default 3x = 0.18% no-BNB, 0.17% w/BNB).
+                # The Turtle gate and Donchian logic will reject choppy
+                # setups; this just ensures the bot doesn't take a trade
+                # whose own TP target is below the post-fee break-even.
+                min_profit = max(0.003, fee_rt * CRYPTO_RULES["min_profit_fee_multiple"])  # ≥ 0.3%
+                min_tp     = round(entry_px * (1 + fee_rt + min_profit), 8)
+                if tp_px < min_tp:
+                    tp_px = min_tp
+                    self._log(f"   📐 {sym} TP floored to ${tp_px:.8f} (fee-aware minimum, "
+                              f"{'BNB-disc ON' if _has_bnb else 'BNB-disc off'})")
+
+                # Check projected gain is worth trading
+                net_gain_pct = round((tp_px - entry_px) / entry_px * 100 - fee_rt * 100, 2)
+                if net_gain_pct < (min_profit * 100):
+                    self._log(f"   ⚠️ {sym} net gain only {net_gain_pct:.2f}% after fees "
+                              f"(need ≥{min_profit*100:.2f}%) — skipping")
+                    continue
+
+                # ── Per-AI pool sizing (AI Competition Mode) ──
+                # Each AI sizes against its own slice of USDT — they
+                # can never starve each other. Falls back to shared
+                # pool if ENABLE_AI_COMPETITION is False.
+                if ENABLE_AI_COMPETITION:
+                    ai_pool = (claude_pool if ai_name == "claude" else grok_pool)
+                    pool_for_sizing = ai_pool
+                else:
+                    pool_for_sizing = crypto_pool
+
+                proposals.append({
+                    "symbol":    sym,
+                    "notional":  min(notional, max(pool_for_sizing, total_sellable) * 0.6),
+                    "entry":     entry_px,
+                    "tp":        tp_px,
+                    "stop":      stop_px,
+                    "conf":      conf,
+                    "owner":     ai_name,
+                    "rationale": t.get("rationale", ""),
+                })
+
+        # ── Build final proposal list ────────────────────────────
+        # COMPETITION MODE: each AI's picks stand alone — no merging.
+        # The same symbol can be bought by both AIs independently,
+        # creating a head-to-head comparison on identical conditions.
+        # SHARED MODE (legacy): merge duplicates and tag as "shared".
+        if ENABLE_AI_COMPETITION:
+            # Sort by confidence — highest-conviction proposals get USDT first
+            # within each AI's pool. We DON'T deduplicate symbols across AIs.
+            final_proposals = sorted(proposals, key=lambda x: -x["conf"])
+            if final_proposals:
+                claude_picks = sum(1 for p in final_proposals if p["owner"] == "claude")
+                grok_picks   = sum(1 for p in final_proposals if p["owner"] == "grok")
+                self._log(f"   🥊 Competition mode: Claude={claude_picks} pick(s), "
+                          f"Grok={grok_picks} pick(s) — each trades own pool")
+        else:
+            # Legacy merge: combine duplicates, tag agreed coins as "shared"
+            seen = {}
+            for p in proposals:
+                sym = p["symbol"]
+                if sym in seen:
+                    seen[sym]["conf"] = min(98, seen[sym]["conf"] + 10)
+                    seen[sym]["owner"] = "shared"
+                else:
+                    seen[sym] = p
+            final_proposals = sorted(seen.values(), key=lambda x: -x["conf"])
+
+        # ── Execute: sell weak coins first if needed, then buy ──
+        # If USDT is low but AI wants to buy, auto-sell the weakest
+        # agreed coin first to fund the buy — no manual intervention needed
+        for proposal in final_proposals[:CRYPTO_RULES["max_positions"] - len(self.positions)]:
+            sym      = proposal["symbol"]
+            notional = proposal["notional"]
+            entry    = proposal["entry"]
+            tp_price = proposal["tp"]
+            owner    = proposal["owner"]
+            conf     = proposal["conf"]
+
+            # ── Competition guard: each AI must afford it from own pool ──
+            # If the AI's slice is empty (e.g. it already used it on a
+            # higher-conf pick this cycle), skip and let the other AI
+            # try its picks instead.
+            if ENABLE_AI_COMPETITION and owner in ("claude", "grok"):
+                ai_pool_avail = claude_pool if owner == "claude" else grok_pool
+                if ai_pool_avail < CRYPTO_RULES["min_trade_usdt"]:
+                    self._log(f"   🥊 {owner.title()} pool exhausted "
+                              f"(${ai_pool_avail:.2f} < ${CRYPTO_RULES['min_trade_usdt']}) "
+                              f"— skipping {sym}, giving slot to other AI")
+                    continue
+                # Cap notional to AI's own pool — never overspend
+                if notional > ai_pool_avail:
+                    notional = round(ai_pool_avail * 0.95, 2)  # 95% leaves room for fees
+                    self._log(f"   🥊 {owner.title()} sizing {sym} to ${notional:.2f} "
+                              f"(pool cap)")
+
+            # ── TURTLE ENTRY GATE (crypto) ──────────────────────
+            # If THIS AI's playbook is Turtle, the only valid entry is a
+            # daily Donchian breakout. Reject otherwise. Runs BEFORE any
+            # sell-to-fund or order placement so we never liquidate a
+            # holding to fund a doomed trade.
+            turtle_pre_entry = None
+            _playbook_is_turtle = False
+            _cs_gate = {}
+            try:
+                import strategic_brain as _sb_gate
+                _ai_for_gate = owner if owner in ("claude", "grok") else "claude"
+                _ps_gate     = _sb_gate.load_strategy(_ai_for_gate)
+                _cs_gate     = _ps_gate.get("current_strategy", {}) or {}
+                _playbook_is_turtle = (_cs_gate.get("strategy_type") == "turtle")
+            except Exception as _pb_err:
+                # Can't load playbook → fail OPEN (don't block trading on
+                # missing state file).
+                self._log(f"   ⚠️ Turtle gate: couldn't load playbook for {sym}: {_pb_err} — fail-open")
+                _playbook_is_turtle = False
+
+            if _playbook_is_turtle:
+                try:
+                    _entry_period = (_cs_gate.get("rules", {}) or {}).get("entry_donchian_period", 20)
+                    _t_system     = 2 if _entry_period > 30 else 1
+                    turtle_pre_entry = turtle_check_entry(sym, system=_t_system)
+                    if not turtle_pre_entry.get("eligible"):
+                        self._log(f"   🐢 GATE REJECT {sym}: Turtle active ({_ai_for_gate}), "
+                                  f"no {_entry_period}d breakout — "
+                                  f"{turtle_pre_entry.get('reason','')[:90]}")
+                        continue
+                    self._log(f"   🐢 GATE PASS {sym}: Turtle System {_t_system} breakout — "
+                              f"ATR=${turtle_pre_entry.get('atr',0):.4f}, "
+                              f"2N stop=${turtle_pre_entry.get('stop_price',0):.4f}")
+                except Exception as _tge:
+                    # Playbook IS Turtle and signal check errored — fail CLOSED.
+                    self._log(f"   🐢 GATE ERROR {sym}: {_tge} — skipping (fail-closed)")
+                    continue
+
+            # If not enough USDT — try to sell a weak coin first
+            if crypto_pool < notional:
+                needed    = notional - crypto_pool
+                sold_usdt = 0.0
+
+                # Find coins both AIs agree to sell (from sell_decisions above)
+                agreed_sells = [s for s, d in sell_counts.items() if len(d) >= 2]
+
+                # If no agreed sells, try single-AI sell for coins with bearish proj
+                if not agreed_sells:
+                    for ai_name, resp in [("claude", claude_resp), ("grok", grok_resp)]:
+                        if not resp: continue
+                        for sell in resp.get("sell_decisions", []):
+                            ssym = sell.get("symbol", "")
+                            if ssym and ssym not in agreed_sells:
+                                proj = self._projections.get(ssym, {})
+                                if proj.get("bias") in ("bearish", "neutral"):
+                                    agreed_sells.append(ssym)
+
+                for sell_sym in agreed_sells:
+                    if sold_usdt >= needed:
+                        break
+                    asset   = sell_sym.replace("USDT", "")
+                    holding = wallet_map.get(asset)
+                    if not holding or holding.get("free", 0) <= 0:
+                        continue
+                    try:
+                        # ── Cancel any existing open orders for this symbol ──
+                        try:
+                            existing_orders = get_open_crypto_orders(sell_sym)
+                            if existing_orders:
+                                for o in existing_orders:
+                                    try:
+                                        cancel_crypto_order(sell_sym, o["orderId"])
+                                        self._log(f"   🗑️ Cancelled stale {o.get('side','?')} "
+                                                  f"order for {sell_sym} before rotation sell")
+                                    except Exception as ce:
+                                        self._log(f"   ⚠️ Cancel failed {sell_sym}: {ce}")
+                                import time as _t; _t.sleep(0.5)
+                                # Re-read holding so freed balance is picked up
+                                refreshed = get_full_wallet()
+                                if not refreshed.get("error"):
+                                    asset_name = sell_sym.replace("USDT", "")
+                                    for p in (refreshed.get("tradeable", []) +
+                                              refreshed.get("non_tradeable", [])):
+                                        if p["asset"] == asset_name:
+                                            holding = p
+                                            break
+                        except Exception as sweep_e:
+                            self._log(f"   ⚠️ Pre-sell sweep failed for {sell_sym}: {sweep_e}")
+
+                        # Try live price first, fall back to wallet stored price
+                        curr_price = 0.0
+                        try:
+                            curr_price = get_crypto_price(sell_sym)
+                        except Exception:
+                            pass
+
+                        # Fallback: use wallet's stored price (already read this cycle)
+                        if curr_price <= 0:
+                            curr_price = holding.get("price", 0)
+                            if curr_price > 0:
+                                self._log(f"   ℹ️ {sell_sym} using wallet price ${curr_price:.8f}")
+
+                        qty = holding["free"]
+                        val = qty * curr_price if curr_price > 0 else 0
+
+                        # Skip dust
+                        if curr_price > 0 and val < 2.0:
+                            self._log(f"   ⚠️ {sell_sym} dust (${val:.4f}) — skipping sell")
+                            continue
+
+                        # Round qty to exchange step_size (prevents LOT_SIZE 400 errors)
+                        qty = _round_qty_step(qty, sell_sym)
+                        if qty <= 0:
+                            self._log(f"   ⚠️ {sell_sym} rounded to 0 qty — skipping")
+                            continue
+
+                        # MARKET sell — place_crypto_sell defaults to MARKET
+                        result = place_crypto_sell(sell_sym, qty)
+
+                        if result.get("orderId"):
+                            est_val     = val if val > 0 else 0
+                            sold_usdt  += est_val
+                            crypto_pool += est_val
+                            self._log(f"   🔄 Sold {sell_sym} {qty} ~${est_val:.2f} → USDT "
+                                      f"to fund {sym} buy | order={result['orderId']}")
+                            import time as _t; _t.sleep(1.5)
+                        else:
+                            self._log(f"   ⚠️ Pre-sell failed for {sell_sym}: {result}")
+                    except Exception as e:
+                        self._log(f"   ⚠️ Pre-sell error {sell_sym}: {e}")
+
+            if crypto_pool < notional:
+                self._log(f"   💸 Still insufficient USDT (${crypto_pool:.2f}) "
+                          f"for {sym} (${notional:.2f}) — skipping")
+                continue
+
+            try:
+                self._log(f"   🟢 BUYING {sym} | ${notional:.2f} USDT | "
+                          f"entry≤${entry} TP=${tp_price} | conf={conf}% [{owner}]")
+                result = place_crypto_buy(sym, notional, entry)
+
+                if result.get("orderId"):
+                    qty = float(result.get("origQty", notional / max(entry, 0.000001)))
+                    # Build position kwargs; layer in Turtle metadata if gated through
+                    pos_kwargs = dict(
+                        symbol      = sym,
+                        qty         = qty,
+                        entry_price = entry,
+                        entry_time  = datetime.now(timezone.utc),
+                        tp_price    = tp_price,
+                        owner       = owner,
+                    )
+                    if turtle_pre_entry and turtle_pre_entry.get("eligible"):
+                        _atr_val = turtle_pre_entry.get("atr")
+                        if _atr_val and _atr_val > 0:
+                            _ep_rule  = (_cs_gate.get("rules", {}) or {}).get("entry_donchian_period", 20)
+                            _tsys_val = 2 if _ep_rule > 30 else 1
+                            pos_kwargs["strategy_type"]       = "turtle"
+                            pos_kwargs["turtle_system"]       = _tsys_val
+                            pos_kwargs["atr_at_entry"]        = _atr_val
+                            pos_kwargs["stop_price_override"] = round(entry - (2 * _atr_val), 6)
+                            self._log(f"   🐢 TURTLE armed: 2N stop=${pos_kwargs['stop_price_override']:.6f} (ATR=${_atr_val:.4f})")
+                    pos = CryptoPosition(**pos_kwargs)
+                    self.positions[sym] = pos
+                    crypto_pool -= notional
+                    # In competition mode, also debit the owner's slice
+                    # so subsequent proposals from the same AI see the
+                    # reduced budget.
+                    if ENABLE_AI_COMPETITION:
+                        if owner == "claude":
+                            claude_pool = max(0.0, claude_pool - notional)
+                        elif owner == "grok":
+                            grok_pool   = max(0.0, grok_pool   - notional)
+                    new_positions += 1
+                    # Mark as verified — price lookups will use this symbol directly
+                    _VERIFIED_SYMBOLS.add(sym)
+                    self._log(f"   ✅ Order placed: {result.get('orderId')} | "
+                              f"stop=${pos.stop_price:.6f} TP=${pos.tp_price:.6f} | "
+                              f"[{owner}] pool remaining: "
+                              + (f"Claude=${claude_pool:.2f} Grok=${grok_pool:.2f}"
+                                 if ENABLE_AI_COMPETITION else f"${crypto_pool:.2f}"))
+                else:
+                    self._log(f"   ❌ Order failed for {sym}: {result}")
+
+            except Exception as e:
+                self._log(f"   ❌ Buy error for {sym}: {e}")
+
+        # ── Display AI strategy summary ────────────────────────
+        self._log(f"   📋 CRYPTO STRATEGY SUMMARY (Cycle #{self.cycle_count}):")
+        self._log(f"   Mode: {situation_mode.upper().replace('_',' ')} | "
+                  f"USDT: ${crypto_pool:.2f} | Wallet: ${crypto_equity:.2f}")
+        # Gains summary
+        self.update_crypto_baselines(crypto_equity)
+        gains_str = self.format_crypto_gains(crypto_equity)
+        if gains_str:
+            self._log(f"   {gains_str}")
+
+        # AI Leaderboard — Claude vs Grok scoreboard (crypto-only)
+        try:
+            lb_line = self.format_leaderboard_line(self.trade_history)
+            if lb_line:
+                self._log(f"   {lb_line}")
+        except Exception as _e:
+            pass  # Leaderboard is informational — never break cycle
+
+        if grok_intel:
+            self._log(f"   🌐 Grok live intel: {grok_intel[:180].strip()}")
+
+        for ai_name, resp in [("Claude", claude_resp), ("Grok", grok_resp)]:
+            if not resp or not isinstance(resp, dict):
+                self._log(f"   {ai_name}: no response")
+                continue
+            note  = resp.get("market_note", "")
+            avoid = resp.get("avoid", [])
+            buys  = [t.get("symbol","") for t in resp.get("crypto_trades", [])
+                     if t.get("action") == "buy"]
+            holds = [h.get("symbol","") for h in resp.get("hold_decisions", [])]
+            sells = [s.get("symbol","") for s in resp.get("sell_decisions", [])]
+            self._log(f"   {ai_name}: "
+                      + (f"BUY={buys} " if buys else "no buys ")
+                      + (f"HOLD={holds} " if holds else "")
+                      + (f"SELL={sells} " if sells else "")
+                      + (f"AVOID={avoid} " if avoid else "")
+                      + (f"| {note[:80]}" if note else ""))
+
+        if not final_proposals:
+            if not has_usdt and not has_coins:
+                self._log(f"   💡 No trades: nothing to trade.")
+            elif not has_usdt:
+                self._log(f"   💡 No buys executed — waiting for USDT from coin sales or deposit.")
+                self._log(f"      Tip: AI can sell coins to generate USDT if both AIs agree.")
+            else:
+                self._log(f"   💡 No trades: AIs found no high-confidence setups this cycle.")
+
+        self._log_positions()
+        self.last_cycle = datetime.now().isoformat()
+        return new_positions
+
+    def _log_positions(self):
+        """Log current crypto positions."""
+        if not self.positions:
+            return
+        for sym, pos in self.positions.items():
+            try:
+                current = get_crypto_price(sym)
+                pnl     = pos.pnl_pct(current)
+                icon    = "📈" if pnl >= 0 else "📉"
+                self._log(f"   {icon} {sym}: entry=${pos.entry_price} "
+                          f"now=${current:.4f} P&L={pnl:+.2f}% "
+                          f"({pos.hours_held():.1f}h) | "
+                          f"stop=${pos.stop_price} TP=${pos.tp_price}")
+            except Exception:
+                pass
+
+    # ── STATUS & STATS ──────────────────────────────────────
+    def get_status(self) -> dict:
+        """Return full crypto status for /crypto_status API endpoint."""
+        positions_data = {}
+        for sym, pos in self.positions.items():
+            try:
+                current = get_crypto_price(sym)
+                positions_data[sym] = {
+                    **pos.to_dict(),
+                    "current_price": current,
+                    "pnl_pct":       pos.pnl_pct(current),
+                    "pnl_usd":       round((current - pos.entry_price) * pos.qty, 2),
+                }
+            except Exception:
+                positions_data[sym] = pos.to_dict()
+
+        # Read live wallet
+        try:
+            wallet = get_full_wallet()
+        except Exception:
+            wallet = {"error": "wallet read failed", "usdt_free": 0, "total_value": 0}
+
+        return {
+            "enabled":        self._enabled,
+            "cycle_count":    self.cycle_count,
+            "wallet":         {
+                "usdt_free":    wallet.get("usdt_free", 0),
+                "total_value":  wallet.get("total_value", 0),
+                "summary":      wallet.get("wallet_summary", ""),
+                "tradeable":    wallet.get("tradeable", []),
+                "non_tradeable": wallet.get("non_tradeable", []),
+                "bnb":          wallet.get("bnb"),
+            },
+            "staking":        self.staking.get_staking_summary(),
+            "bot_positions":  positions_data,
+            "position_count": len(self.positions),
+            "total_pnl":      round(self.total_pnl, 2),
+            "wins":           self.wins,
+            "losses":         self.losses,
+            "win_rate":       round(self.wins / max(self.wins + self.losses, 1) * 100, 1),
+            "last_cycle":     self.last_cycle,
+            "last_projections": {
+                k: {
+                    "close":      v.get("close"),
+                    "proj_high":  v.get("proj_high"),
+                    "proj_low":   v.get("proj_low"),
+                    "bias":       v.get("bias"),
+                    "confidence": v.get("confidence"),
+                    "viable":     v.get("viable"),
+                }
+                for k, v in self._projections.items()
+                if not v.get("error")
+            },
+            "recent_trades": list(reversed(self.trade_history))[:10],
+            "fees": {
+                **effective_fees(has_bnb=bool(
+                    self._wallet_cache and self._wallet_cache.get("bnb")
+                )),
+                "base_taker_pct":      CRYPTO_RULES["taker_fee"] * 100,
+                "base_maker_pct":      CRYPTO_RULES["maker_fee"] * 100,
+                "base_round_trip_pct": CRYPTO_RULES["round_trip_fee"] * 100,
+                "bnb_discount_pct":    CRYPTO_RULES["bnb_fee_discount"] * 100,
+                "min_profit_fee_x":    CRYPTO_RULES["min_profit_fee_multiple"],
+            },
+            "rules": {
+                "stop_pct":       f"{CRYPTO_RULES['stop_loss_pct']*100:.0f}%",
+                "tp_pct":         f"{CRYPTO_RULES['take_profit_pct']*100:.0f}%",
+                "max_hold_hours": CRYPTO_RULES["max_hold_hours"],
+                "maker_fee":      f"{CRYPTO_RULES['maker_fee']*100:.3f}%",
+                "taker_fee":      f"{CRYPTO_RULES['taker_fee']*100:.3f}%",
+                "pool_pct":       f"{CRYPTO_RULES['crypto_pool_pct']*100:.0f}%",
+            }
+        }
+
+    # ── SNAPSHOT HELPERS (for unified R1 call) ──────────────
+    # Called from collaborative_session() to build crypto section
+    # of the R1 prompt — NO extra AI call needed.
+
+    def get_projections_snapshot(self) -> str:
+        """Formatted crypto projections for R1 prompt. Recomputes if empty."""
+        if not self._enabled:
+            return ""
+        try:
+            if not self._projections:
+                self._projections = get_all_crypto_projections()
+            return format_crypto_projections_for_ai(self._projections)
+        except Exception as e:
+            self._log(f"⚠️ Projection snapshot failed: {e}")
+            return ""
+
+    def get_wallet_snapshot(self) -> dict:
+        """Wallet summary dict for R1 prompt."""
+        if not self._enabled:
+            return {"summary": "", "usdt_free": 0, "holdings_text": ""}
+        try:
+            wallet = get_full_wallet()
+            holdings_lines = []
+            for h in wallet.get("tradeable", []):
+                proj = self._projections.get(h["symbol"], {})
+                note = ""
+                if proj and not proj.get("error"):
+                    curr = h["price"]
+                    ph   = proj.get("proj_high", 0)
+                    pl   = proj.get("proj_low", 0)
+                    if ph and pl:
+                        if curr >= ph * 0.98:
+                            note = " ⚠️ NEAR PROJ HIGH"
+                        elif curr <= pl * 1.02:
+                            note = " 🟢 AT PROJ LOW"
+                        else:
+                            note = f" → {round((ph-curr)/curr*100,1):.1f}% to TP"
+                holdings_lines.append(
+                    f"  {h['asset']}: {h['qty']:.4f} = ${h['value_usdt']:.2f}"
+                    f" @ ${h['price']:.4f}{note}"
+                )
+            return {
+                "summary":       wallet.get("wallet_summary", ""),
+                "usdt_free":     wallet.get("usdt_free", 0),
+                "total_usdt_value": wallet.get("total_value", wallet.get("usdt_free", 0)),
+                "holdings_text": "\n".join(holdings_lines) if holdings_lines else "",
+                "tradeable":     wallet.get("tradeable", []),
+            }
+        except Exception as e:
+            self._log(f"⚠️ Wallet snapshot failed: {e}")
+            return {"summary": "", "usdt_free": 0, "holdings_text": ""}
+
+    def get_stats_snapshot(self) -> str:
+        """Top 8 24h movers as compact string for R1 prompt."""
+        if not self._enabled:
+            return ""
+        try:
+            stats = get_all_crypto_stats()
+            return str([(s["symbol"], f"{s['change_pct']:+.1f}%") for s in stats[:8]])
+        except Exception:
+            return ""
+
+    def get_stock_cross_ref(self, stock_projections: dict) -> str:
+        """BTC-correlated stock signals. BTC leads NVDA/AMD/MSTR/COIN by ~12h."""
+        if not self._enabled or not stock_projections:
+            return ""
+        correlated = ["NVDA", "AMD", "MSTR", "COIN"]
+        lines = []
+        for sym in correlated:
+            proj = stock_projections.get(sym, {})
+            if proj and not proj.get("error"):
+                bias = proj.get("bias", "neutral")
+                conf = proj.get("confidence", 0)
+                if conf >= 55:
+                    lines.append(f"  {sym}: {bias.upper()} conf={conf}")
+        if not lines:
+            return ""
+        return ("BTC-correlated stocks (BTC leads ~12h):\n" + "\n".join(lines))
+
+    def execute_from_r1(self, claude_r1: dict, grok_r1: dict,
+                        crypto_pool: float,
+                        record_trade_fn=None,
+                        prompt_builder=None) -> int:
+        """
+        Extract crypto_trades from R1 responses and execute them.
+        Called from collaborative_session() — unified execution path.
+        No extra AI call. Returns number of new positions opened.
+        """
+        if not self._enabled:
+            return 0
+
+        self.run_exit_monitor()
+
+        if len(self.positions) >= CRYPTO_RULES["max_positions"]:
+            return 0
+
+        proposals = []
+        for ai_name, resp in [("claude", claude_r1), ("grok", grok_r1)]:
+            if not resp or not isinstance(resp, dict):
+                continue
+            for t in resp.get("crypto_trades", []):
+                sym      = t.get("symbol", "")
+                # ── Normalize to trading pair ──
+                if sym:
+                    sym_up = sym.upper().strip()
+                    if not sym_up.endswith(("USDT", "USDC", "BUSD", "USD")):
+                        sym_up = sym_up + "USDT"
+                    sym = sym_up
+                conf     = t.get("confidence", 0)
+                notional = t.get("notional_usdt", 0)
+                entry    = t.get("entry_target")
+                tp       = t.get("tp_target")
+                if sym not in CRYPTO_UNIVERSE:
+                    continue
+                if conf < CRYPTO_RULES["min_confidence"]:
+                    continue
+                if sym in self.positions:
+                    continue
+                if notional < CRYPTO_RULES["min_trade_usdt"]:
+                    continue
+                proj = self._projections.get(sym, {})
+                if proj.get("error") or not proj.get("viable"):
+                    self._log(f"   🪙 {sym} proj not viable — skip")
+                    continue
+                proposals.append({
+                    "symbol":    sym,
+                    "notional":  min(notional, crypto_pool * 0.6),
+                    "entry":     entry or proj["proj_low"],
+                    "tp":        tp    or proj["proj_high"],
+                    "conf":      conf,
+                    "owner":     ai_name,
+                    "rationale": t.get("rationale", ""),
+                })
+
+        # Deduplicate — both agree = shared + confidence boost
+        seen = {}
+        for p in proposals:
+            sym = p["symbol"]
+            if sym in seen:
+                seen[sym]["conf"]  = min(98, seen[sym]["conf"] + 10)
+                seen[sym]["owner"] = "shared"
+            else:
+                seen[sym] = p
+
+        final = sorted(seen.values(), key=lambda x: -x["conf"])
+        new_positions = 0
+
+        for prop in final[:CRYPTO_RULES["max_positions"] - len(self.positions)]:
+            if crypto_pool < prop["notional"]:
+                self._log(f"   🪙 Insufficient USDT for {prop['symbol']}")
+                continue
+
+            # ── TURTLE ENTRY GATE (crypto, projection path) ─────
+            sym2_pre = prop["symbol"]
+            owner2   = prop["owner"]
+            turtle_pre_entry_2 = None
+            _playbook_is_turtle_2 = False
+            _cs_gate_2 = {}
+            try:
+                import strategic_brain as _sb_gate2
+                _ai_for_gate2 = owner2 if owner2 in ("claude", "grok") else "claude"
+                _ps_gate2     = _sb_gate2.load_strategy(_ai_for_gate2)
+                _cs_gate_2    = _ps_gate2.get("current_strategy", {}) or {}
+                _playbook_is_turtle_2 = (_cs_gate_2.get("strategy_type") == "turtle")
+            except Exception as _pb2_err:
+                self._log(f"   ⚠️ Turtle gate (path 2): couldn't load playbook for {sym2_pre}: {_pb2_err} — fail-open")
+                _playbook_is_turtle_2 = False
+
+            if _playbook_is_turtle_2:
+                try:
+                    _ep2 = (_cs_gate_2.get("rules", {}) or {}).get("entry_donchian_period", 20)
+                    _ts2 = 2 if _ep2 > 30 else 1
+                    turtle_pre_entry_2 = turtle_check_entry(sym2_pre, system=_ts2)
+                    if not turtle_pre_entry_2.get("eligible"):
+                        self._log(f"   🐢 GATE REJECT {sym2_pre}: Turtle active ({_ai_for_gate2}), "
+                                  f"no {_ep2}d breakout — "
+                                  f"{turtle_pre_entry_2.get('reason','')[:90]}")
+                        continue
+                    self._log(f"   🐢 GATE PASS {sym2_pre}: Turtle System {_ts2} breakout — "
+                              f"ATR=${turtle_pre_entry_2.get('atr',0):.4f}")
+                except Exception as _tge2:
+                    self._log(f"   🐢 GATE ERROR (path 2) {sym2_pre}: {_tge2} — skipping (fail-closed)")
+                    continue
+
+            try:
+                sym = prop["symbol"]
+                self._log(f"   🪙 BUY {sym} | ${prop['notional']:.2f} USDT | "
+                          f"entry≤${prop['entry']} TP=${prop['tp']} | "
+                          f"conf={prop['conf']}% [{prop['owner']}]")
+                result = place_crypto_buy(sym, prop["notional"], prop["entry"])
+                if result.get("orderId"):
+                    qty = float(result.get("origQty", prop["notional"] / prop["entry"]))
+                    pos_kwargs2 = dict(
+                        symbol      = sym,
+                        qty         = qty,
+                        entry_price = prop["entry"],
+                        entry_time  = datetime.now(timezone.utc),
+                        tp_price    = prop["tp"],
+                        owner       = prop["owner"],
+                    )
+                    if turtle_pre_entry_2 and turtle_pre_entry_2.get("eligible"):
+                        _atr2 = turtle_pre_entry_2.get("atr")
+                        if _atr2 and _atr2 > 0:
+                            _ep2_rule = (_cs_gate_2.get("rules", {}) or {}).get("entry_donchian_period", 20)
+                            _ts2_val  = 2 if _ep2_rule > 30 else 1
+                            pos_kwargs2["strategy_type"]       = "turtle"
+                            pos_kwargs2["turtle_system"]       = _ts2_val
+                            pos_kwargs2["atr_at_entry"]        = _atr2
+                            pos_kwargs2["stop_price_override"] = round(prop["entry"] - (2 * _atr2), 6)
+                            self._log(f"   🐢 TURTLE armed (path 2): 2N stop=${pos_kwargs2['stop_price_override']:.6f}")
+                    pos = CryptoPosition(**pos_kwargs2)
+                    self.positions[sym] = pos
+                    crypto_pool -= prop["notional"]
+                    new_positions += 1
+                    self._log(f"   ✅ Crypto order {result['orderId']} | "
+                              f"stop=${pos.stop_price} TP=${pos.tp_price}")
+                else:
+                    self._log(f"   ❌ Crypto order failed: {result}")
+            except Exception as e:
+                self._log(f"   ❌ Crypto buy error {prop['symbol']}: {e}")
+
+        return new_positions

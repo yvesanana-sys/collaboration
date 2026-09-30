@@ -21,20 +21,14 @@ GROK_KEY         = os.environ.get("GROK_KEY", "")
 # ── Shared references (injected by bot) ──────────────────────
 log          = print
 shared_state = {}
-# bot_with_proxy.py's _set_context call for this module doesn't pass a
-# rules dict (unlike market_data.py / intelligence.py), so this local
-# default stands in. Value matches portfolio_manager.py RULES["failover_max_retries"].
-RULES        = {"failover_max_retries": 3}
 
 
-def _set_context(log_fn, shared_state_ref=None, rules_ref=None):
-    """Called by bot to inject log, shared_state, and (optionally) rules."""
-    global log, shared_state, RULES, ANTHROPIC_KEY, GROK_KEY
+def _set_context(log_fn, shared_state_ref=None):
+    """Called by bot to inject log and shared_state."""
+    global log, shared_state, ANTHROPIC_KEY, GROK_KEY
     log = log_fn
     if shared_state_ref is not None:
         shared_state = shared_state_ref
-    if rules_ref is not None:
-        RULES = rules_ref
     # Re-read keys at runtime (Railway env vars)
     ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
     GROK_KEY      = os.environ.get("GROK_KEY", "")
@@ -269,10 +263,7 @@ def safe_ask_claude(prompt, system, retries=3):
             shared_state["claude_fail_count"] = 0
             shared_state["claude_fail_reason"] = None
         else:
-            # get(..., 0) — this key isn't pre-seeded in shared_state's
-            # initial dict, so a plain += raises KeyError on the first
-            # failure since boot.
-            shared_state["claude_fail_count"] = shared_state.get("claude_fail_count", 0) + 1
+            shared_state["claude_fail_count"] += 1
             if shared_state["claude_fail_count"] >= RULES["failover_max_retries"]:
                 shared_state["claude_healthy"]   = False
                 shared_state["last_claude_fail"] = datetime.now().isoformat()
@@ -280,7 +271,7 @@ def safe_ask_claude(prompt, system, retries=3):
         return result
     except Exception as e:
         error_type = classify_ai_error(str(e))
-        shared_state["claude_fail_count"] = shared_state.get("claude_fail_count", 0) + 1
+        shared_state["claude_fail_count"]  += 1
         shared_state["claude_fail_reason"]  = error_type
 
         if error_type == "credits_exhausted":
@@ -315,7 +306,7 @@ def safe_ask_grok(prompt, system, retries=3):
             shared_state["grok_fail_count"] = 0
             shared_state["grok_fail_reason"] = None
         else:
-            shared_state["grok_fail_count"] = shared_state.get("grok_fail_count", 0) + 1
+            shared_state["grok_fail_count"] += 1
             if shared_state["grok_fail_count"] >= RULES["failover_max_retries"]:
                 shared_state["grok_healthy"]   = False
                 shared_state["last_grok_fail"] = datetime.now().isoformat()
@@ -323,7 +314,7 @@ def safe_ask_grok(prompt, system, retries=3):
         return result
     except Exception as e:
         error_type = classify_ai_error(str(e))
-        shared_state["grok_fail_count"] = shared_state.get("grok_fail_count", 0) + 1
+        shared_state["grok_fail_count"]  += 1
         shared_state["grok_fail_reason"]  = error_type
 
         if error_type == "credits_exhausted":
@@ -386,40 +377,3 @@ def check_ai_health():
     except Exception as e:
         log(f"⚠️ check_ai_health: {e}")
         return True, True, None
-
-def get_grok_balance():
-    """
-    Best-effort check of remaining xAI API credit balance, using the
-    same GROK_KEY already used for trading calls — no separate
-    Management API credential needed.
-
-    NOTE: this hits an endpoint that isn't part of xAI's documented
-    chat-completions surface and may not be stable — it fails soft
-    (returns None) on any error or unexpected response shape, and is
-    never called from a trading code path, so a change on xAI's side
-    can only make this display "unknown," never affect trading.
-
-    Returns dict {remaining_balance, spent_balance, total_granted}
-    (USD floats) on success, or None.
-    """
-    if not GROK_KEY:
-        return None
-    try:
-        res = requests.get(
-            "https://api.x.ai/v1/api-key",
-            headers={"Authorization": f"Bearer {GROK_KEY}"},
-            timeout=10,
-        )
-        if not res.ok:
-            return None
-        data = res.json()
-        if "remaining_balance" not in data:
-            return None
-        return {
-            "remaining_balance": float(data.get("remaining_balance", 0) or 0),
-            "spent_balance":     float(data.get("spent_balance", 0) or 0),
-            "total_granted":     float(data.get("total_granted", 0) or 0),
-        }
-    except Exception as e:
-        log(f"⚠️ Grok balance check failed (non-fatal): {e}")
-        return None
