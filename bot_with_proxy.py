@@ -998,3 +998,503 @@ def _get_reserve_info():
         combined = stock_eq + crypto_eq
         pct = binance_crypto.get_wallet_reserve_pct(combined)
         return {
+            "combined_wallet":  round(combined, 2),
+            "stock_equity":     round(stock_eq, 2),
+            "crypto_equity":    round(crypto_eq, 2),
+            "reserve_pct":      pct,
+            "reserve_usd":      round(usdt_free * pct, 2),
+            "tradeable_usdt":   round(usdt_free * (1 - pct), 2),
+            "free_threshold":   getattr(binance_crypto, "RESERVE_FREE_THRESHOLD", 1000.0),
+            "cap_pct":          getattr(binance_crypto, "RESERVE_CAP_PCT", 0.30),
+            "label":            binance_crypto.get_wallet_reserve_label(combined),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.route("/memory")
+def memory_endpoint():
+    """
+    AI Memory inspection endpoint — surfaces what the AIs have learned.
+
+    Returns:
+      total_closed, total_wins, win_rate_overall — aggregate performance
+      lessons_count, symbols_tracked              — memory size
+      ai_patterns      → per-AI win rates and best setups
+      market_regimes   → bull/bear/neutral performance
+      top_symbols      → 10 most-traded symbols with stats
+      recent_lessons   → 8 most recent lesson entries
+      last_save_iso    → when memory was last persisted to /data
+      memory_file      → path on Railway volume
+
+    Example: /memory → JSON with full learning state
+    """
+    try:
+        if not hasattr(prompt_builder, "memory"):
+            return jsonify({"error": "memory not initialized"}), 500
+        return jsonify(prompt_builder.memory.get_stats())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/core_reserve")
+def core_reserve_endpoint():
+    """
+    Core Reserve status — long-term wealth compounder, walled off from AIs.
+
+    Returns the current reserve composition (BTC/SPY/cash split), target
+    allocation, P&L vs total contributions, ATH and entry prices for both
+    BTC and SPY, recent contingency events (defensive trims, opportunity
+    buys, take-profits, rebalances), and activation status.
+
+    The tactical AIs cannot see this data. It's surfaced only on the
+    dashboard so the user can monitor what the long-term layer is doing.
+    """
+    try:
+        if not HAVE_CORE_RESERVE or not core_reserve:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(core_reserve.get_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/evolution")
+def evolution_endpoint():
+    """
+    AI Evolution status — current tier, P&L, eligibility for next tier.
+
+    Pass A: surfaces tier 0 status for both AIs, plus rivalry standings
+    and hard-banned phrase list (transparency).
+    Pass B (future): will also show pending prompt proposals, audit log,
+    and apply/revert history.
+    """
+    try:
+        if not HAVE_AI_EVOLUTION or not ai_evolution:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        # Translate prompt_builder memory stats into the shape ai_evolution expects
+        c_stats = {"trades": 0, "total_pnl": 0.0}
+        g_stats = {"trades": 0, "total_pnl": 0.0}
+        try:
+            mem_stats = prompt_builder.memory.get_stats()
+            ai_p      = mem_stats.get("ai_patterns", {})
+            for ai, dest in (("claude", c_stats), ("grok", g_stats)):
+                p = ai_p.get(ai, {})
+                w = int(p.get("wins", 0) or 0)
+                l = int(p.get("losses", 0) or 0)
+                dest["trades"]    = w + l
+                dest["total_pnl"] = float(p.get("total_pnl_usd", 0) or 0)
+        except Exception:
+            pass
+        result = ai_evolution.get_full_status(c_stats, g_stats)
+        result["enabled"] = True
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/strategy")
+def strategy_overview_endpoint():
+    """
+    Strategic brain overview — current state, model registry, both strategies.
+
+    Phase A: Returns enabled=False with state info. Strategists are
+    dormant (no API calls, no strategy writes). Useful for verifying
+    the integration is wired correctly.
+    Phase B: Returns full strategist activity, recent activations,
+    cost tracking, and links to per-AI strategy files.
+    """
+    try:
+        if not HAVE_STRATEGIC_BRAIN or not strategic_brain:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(strategic_brain.get_full_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/strategy/<ai_name>")
+def strategy_ai_endpoint(ai_name):
+    """
+    Per-AI strategy file — current strategy + performance + history.
+
+    Phase A: Returns the default Tier-0 strategy (auto-created at boot).
+    No API calls, no actual writes. Reading is free.
+
+    URL params:
+      /strategy/claude — Claude's strategy file
+      /strategy/grok   — Grok's strategy file
+
+    Returns 404 for any other ai_name.
+    """
+    try:
+        if ai_name not in ("claude", "grok"):
+            return jsonify({"error": f"unknown AI '{ai_name}'"}), 404
+        if not HAVE_STRATEGIC_BRAIN or not strategic_brain:
+            return jsonify({"enabled": False, "reason": "module not loaded"})
+        return jsonify(strategic_brain.load_strategy(ai_name))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/projection")
+def projection_endpoint():
+    """
+    Live daily range projections for all universe symbols (or a single symbol).
+    Uses the 5-layer model from projection_engine.py.
+
+    Query params:
+      ?symbol=NVDA  — single symbol projection
+      ?full=1       — include layer_details breakdown
+    """
+    try:
+        symbol  = request.args.get("symbol","").upper()
+        full    = request.args.get("full","0") == "1"
+        symbols = [symbol] if symbol else RULES["universe"]
+        results = {}
+
+        for sym in symbols:
+            try:
+                bars = get_bars(sym)
+                ind  = compute_indicators(bars)
+                proj = get_projection(sym, bars, ind=ind)
+                if not full:
+                    proj.pop("layer_details", None)
+                results[sym] = proj
+            except Exception as e:
+                results[sym] = {"symbol": sym, "error": str(e)}
+
+        # Cache for bot autonomous use
+        shared_state["last_projections"] = {k: v for k, v in results.items() if not v.get("error")}
+        shared_state["last_proj_time"]   = datetime.now().isoformat()
+
+        return jsonify({
+            "projections":      results,
+            "formatted_prompt": proj_format_for_ai(results, include_low_conf=True),
+            "accuracy": {
+                "hit_count":    shared_state["proj_hit_count"],
+                "total_count":  shared_state["proj_total_count"],
+                "accuracy_pct": shared_state["proj_accuracy_pct"],
+            },
+            "cached_at":    shared_state["last_proj_time"],
+            "symbol_count": len(results),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/prompt_memory")
+def prompt_memory_endpoint():
+    """
+    Live view of the adaptive prompt memory — lessons learned from closed trades.
+    Shows win rates by situation mode, AI patterns, regime stats, recent lessons.
+    GET /prompt_memory
+    """
+    try:
+        return jsonify(prompt_builder.get_memory_stats())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/crypto_status")
+def crypto_status_endpoint():
+    """
+    Live Binance.US crypto trading status.
+    Shows open positions, P&L, projections, recent trades, rules.
+    GET /crypto_status
+    """
+    try:
+        return jsonify(crypto_trader.get_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/deploy", methods=["GET", "POST"])
+def deploy_endpoint():
+    """
+    Push all bot files to GitHub, triggering Railway auto-deploy.
+    GET  /deploy          — show deploy status / setup instructions
+    POST /deploy          — trigger immediate push to GitHub
+    POST /deploy?msg=text — push with custom commit message
+
+    Requires GITHUB_TOKEN + GITHUB_REPO env vars in Railway.
+    """
+    if request.method == "GET":
+        configured = bool(GITHUB_TOKEN and GITHUB_REPO)
+
+        # ?push=1 triggers deploy from browser — no POST needed
+        if request.args.get("push") == "1" and configured:
+            msg = request.args.get("msg", "NovaTrade auto-deploy via browser")
+            def _do_deploy():
+                github_push_all(commit_msg=msg)
+            threading.Thread(target=_do_deploy, daemon=True).start()
+            return jsonify({
+                "status":  "deploying",
+                "message": f"Pushing to {GITHUB_REPO}:{GITHUB_BRANCH}...",
+                "note":    "Check Railway logs in ~30s",
+            }), 202
+
+        return jsonify({
+            "configured":    configured,
+            "repo":          GITHUB_REPO or "not set",
+            "branch":        GITHUB_BRANCH,
+            "files":         _DEPLOY_FILES,
+            "deploy_url":    "Add ?push=1 to this URL to trigger deploy from browser",
+            "setup_required": {} if configured else {
+                "GITHUB_TOKEN": "Create at github.com/settings/tokens (repo scope)",
+                "GITHUB_REPO":  "Your repo e.g. yvesanana-sys/collaboration",
+            }
+        })
+
+    # POST — trigger deploy
+    try:
+        msg = None
+        if request.is_json:
+            msg = request.json.get("message")
+        if not msg:
+            msg = request.args.get("msg")
+
+        # Run in background thread — never blocks or crashes the bot
+        def _do_deploy():
+            github_push_all(commit_msg=msg)
+
+        t = threading.Thread(target=_do_deploy, daemon=True)
+        t.start()
+
+        return jsonify({
+            "status":  "deploying",
+            "message": f"Pushing to {GITHUB_REPO}:{GITHUB_BRANCH} in background...",
+            "note":    "Check Railway logs in ~30s for result",
+        }), 202
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+    try:
+        _repair_scan(msg)
+    except Exception:
+        pass
+    # Feed rolling buffer to Claude Code trigger for log snapshots
+    try:
+        if _CC_TRIGGER_AVAILABLE and _cc_trigger:
+            _cc_trigger.buffer_log_line(str(msg))
+    except Exception:
+        pass
+
+# ── Inject shared context into extracted modules ──────────────
+# Market data needs RULES + log + shared_state
+_market_data._set_context(RULES, log, shared_state_ref=shared_state)
+# GitHub deploy only needs log
+_github_deploy._set_context(log)
+# AI clients needs log + shared_state
+_ai_clients._set_context(log, shared_state_ref=shared_state)
+# Intelligence needs ask_grok + parse_json (now from ai_clients)
+_intelligence._set_context(RULES, log,
+                            ask_grok_fn   = ask_grok_guarded,
+                            parse_json_fn = parse_json)
+# PDT manager needs log, shared_state, RULES + all trading functions
+# NOTE: smart_sell, record_trade, get_cash_thresholds defined later — see late injection below
+# NOTE: sleep_manager also injected late (needs get_cash_thresholds)
+
+# ══════════════════════════════════════════════════════════════
+# GITHUB AUTO-DEPLOY
+# Bot can push updated files to GitHub, triggering Railway redeploy.
+# Requires GITHUB_TOKEN + GITHUB_REPO env vars in Railway.
+# ══════════════════════════════════════════════════════════════
+
+_DEPLOY_FILES = [
+    "bot_with_proxy.py",
+    "binance_crypto.py",
+    "projection_engine.py",
+    "prompt_builder.py",
+    "self_repair.py",
+    "dashboard.html",
+    "thesis_manager.py",
+    "wallet_intelligence.py",
+    "NOVATRADE_MASTER.md",
+    "market_data.py",
+    "intelligence.py",
+    "github_deploy.py",
+    "ai_clients.py",
+    "sleep_manager.py",
+    "pdt_manager.py",
+    "portfolio_manager.py",
+]
+
+# [github_get_file_sha → moved to github_deploy.py]
+# [github_push_file → moved to github_deploy.py]
+# [github_push_all → moved to github_deploy.py]
+# Known crypto base symbols — used by is_crypto_symbol() to route trades
+_CRYPTO_BASES = {
+    "BTC", "ETH", "XRP", "SOL", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC",
+    "MATIC", "ATOM", "NEAR", "ALGO", "UNI", "SHIB", "PEPE", "FET", "AUDIO",
+    "KAVA", "RVN", "USDT", "USDC", "BUSD", "BNB", "BCH", "ETC", "XLM", "TRX",
+    "VET", "SAND", "MANA", "AXS", "AAVE", "GRT", "FIL", "EOS", "CHZ", "FLOW",
+    "ICP", "APE", "HBAR", "XTZ", "ZEC", "ENJ", "GALA", "DASH", "QTUM", "OMG",
+    "CRV", "1INCH", "COMP", "YFI", "MKR", "SNX", "SUSHI", "BAT", "ZIL", "ONT",
+}
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """
+    Returns True if symbol is a crypto trading pair (not a stock).
+    These must ONLY be traded via Binance.US — never through Alpaca.
+    """
+    s = (symbol or "").upper().strip()
+    if s.endswith("USDT") or s.endswith("BUSD"):
+        return True
+    if "/" in s:   # BTC/USD format
+        base = s.split("/")[0]
+        return base in _CRYPTO_BASES
+    # Plain crypto base without pair suffix (e.g. "BTC" typed alone)
+    if s in _CRYPTO_BASES and len(s) <= 5:
+        return True
+    return False
+
+def alpaca(method, path, body=None, base=None):
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET,
+        "Content-Type": "application/json",
+    }
+    res = requests.request(method, (base or BASE_URL) + path, headers=headers, json=body)
+    res.raise_for_status()
+    return res.json()
+
+# ── Fund Allocation ──────────────────────────────────────
+# [get_trading_pool → portfolio_manager.py]
+# [check_autonomy_tier → portfolio_manager.py]
+# [get_autonomy_status → portfolio_manager.py]
+# [rebalance_autonomy_funds → portfolio_manager.py]
+# [rebalance_allocations → portfolio_manager.py]
+# [_save_all_persistent_state → portfolio_manager.py]
+# [update_gain_metrics → portfolio_manager.py]
+# [format_gains → portfolio_manager.py]
+# [track_pnl → portfolio_manager.py]
+# [check_account_features → portfolio_manager.py]
+def get_full_market_intelligence():
+    """
+    Gather ALL market intelligence:
+    - Technical indicators
+    - News (24h)
+    - Politician trades (public disclosure)
+    - Top investor portfolios (13F filings)
+    - Biggest gainers today
+    - Smart money analysis (combined scoring)
+    """
+    log("📡 Gathering full market intelligence...")
+    chart_section = get_chart_section()
+    news          = get_news_context()
+    market_ctx    = get_market_context()
+
+    log("🏛️ Fetching politician trades...")
+    pol_text, pol_trades = get_politician_trades()
+    pol_signals   = analyze_politician_signals(pol_trades, chart_section)
+
+    log("💼 Fetching top investor portfolios...")
+    inv_text, inv_holdings = get_top_investor_portfolios()
+
+    log("📈 Fetching biggest gainers...")
+    gainers = get_biggest_gainers()
+
+    log("🆕 Detecting recent IPOs...")
+    ipos = get_recent_ipos()
+
+    log("🧠 Running smart money analysis...")
+    smart_money = analyze_smart_money(pol_signals, inv_holdings, gainers)
+
+    if smart_money["triple_confirmation"]:
+        log(f"🔥 TRIPLE CONFIRMATION stocks: {smart_money['triple_confirmation']}")
+    if smart_money["top_collab"]:
+        log(f"⭐ Top collaborative candidates: {smart_money['top_collab']}")
+
+    return {
+        "chart_section": chart_section,
+        "news":          news,
+        "market_ctx":    market_ctx,
+        "pol_text":      pol_text,
+        "pol_trades":    pol_trades,
+        "pol_signals":   pol_signals,
+        "inv_text":      inv_text,
+        "inv_holdings":  inv_holdings,
+        "gainers":       gainers,
+        "ipos":          ipos,
+        "smart_money":   smart_money,
+    }
+
+# [get_news_context → moved to market_data.py / intelligence.py]
+# [get_fear_greed_index → moved to market_data.py / intelligence.py]
+# [get_earnings_calendar → moved to market_data.py / intelligence.py]
+# [_trim_trade_history_to_6months → portfolio_manager.py]
+def estimate_fees(notional):
+    return round(max(notional * 0.0000278, 0.01) + min(notional * 0.000145, 7.27), 4)
+
+def min_profitable_exit(entry_price: float, fee_pct: float = 0.0003,
+                         min_profit_pct: float = 0.005) -> float:
+    """Calculate minimum sell price that covers fees and slippage."""
+    return round(entry_price * (1 + fee_pct + min_profit_pct), 2)
+
+# ── AI Calls ─────────────────────────────────────────────
+# [ask_claude → moved to ai_clients.py]
+# [ask_grok → moved to ai_clients.py]
+# [clean_json_str → moved to ai_clients.py]
+# [_expand_r1_keys → moved to ai_clients.py]
+# [parse_json → moved to ai_clients.py]
+# [ask_with_retry → moved to ai_clients.py]
+def is_market_open():
+    return alpaca("GET", "/v2/clock").get("is_open", False)
+
+# [get_market_mode → moved to market_data.py / intelligence.py]
+def get_trail_pct(symbol):
+    """Get volatility-adjusted trailing stop percentage for a stock"""
+    if symbol in RULES["volatile_stocks"]:
+        return RULES["exit_B_trail_volatile"]   # 8% for volatile
+    elif symbol in RULES["stable_stocks"]:
+        return RULES["exit_B_trail_stable"]     # 3% for stable
+    return RULES["exit_B_trail_default"]        # 5% default
+
+def stock_turtle_check_entry(symbol: str, system: int = 1) -> dict:
+    """
+    Check if a STOCK is a valid Turtle entry RIGHT NOW.
+    Fetches daily bars via existing get_bars helper.
+    Returns same shape as binance_crypto.turtle_check_entry().
+    """
+    try:
+        from turtle_math import compute_turtle_signal
+    except ImportError as e:
+        return {"eligible": False, "reason": f"turtle_math import failed: {e}",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    try:
+        # get_bars is imported at top of bot_with_proxy.py from market_data.
+        # 90 days of daily bars: plenty for 55-day Donchian + ATR(20).
+        bars = get_bars(symbol, days=90)
+    except Exception as e:
+        return {"eligible": False, "reason": f"bar fetch failed: {e}",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    if not bars or len(bars) < 56:
+        return {"eligible": False, "reason": f"insufficient history ({len(bars) if bars else 0}/56 bars)",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    sig = compute_turtle_signal(bars, system=system)
+    if sig is None:
+        return {"eligible": False, "reason": "could not compute signal",
+                "entry_level": None, "stop_price": None, "atr": None, "system": system}
+    period = 20 if system == 1 else 55
+    if sig["entry_signal"]:
+        return {"eligible": True,
+                "reason": f"{period}d breakout: ${sig['current_close']:.2f} > ${sig['entry_level']:.2f}",
+                "entry_level": sig["entry_level"], "stop_price": sig["stop_price"],
+                "atr": sig["atr"], "system": system,
+                "donchian_high": sig["entry_level"]}
+    return {"eligible": False,
+            "reason": f"no {period}d breakout: ${sig['current_close']:.2f} ≤ ${sig['entry_level']:.2f}",
+            "entry_level": sig["entry_level"], "stop_price": sig["stop_price"],
+            "atr": sig["atr"], "system": system,
+            "donchian_high": sig["entry_level"]}
+
+
+def stock_turtle_check_exit(symbol: str, entry_price: float, atr_at_entry: float,
+                           system: int = 1) -> dict:
+    """Check if a Turtle stock position should be closed now."""
+    try:
+        from turtle_math import should_turtle_exit
+    except ImportError as e:
+        return {"should_exit": False, "reason": f"turtle_math import failed: {e}",
+                "exit_level": None}
+    try:
+        bars = get_bars(symbol, days=90)
+    except Exception as e:
+        return {"should_exit": False, "reason": f"bar fetch failed: {e}", "exit_level": None}
+    if not bars:
+        return {"should_exit": False, "reason": "no bars", "exit_level": None}
+    return should_turtle_exit(bars, entry_price, atr_at_entry, system=system)
