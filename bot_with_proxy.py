@@ -1499,6 +1499,7 @@ def stock_turtle_check_exit(symbol: str, entry_price: float, atr_at_entry: float
         return {"should_exit": False, "reason": "no bars", "exit_level": None}
     return should_turtle_exit(bars, entry_price, atr_at_entry, system=system)
 
+
 def is_turtle_active_for_stocks() -> bool:
     """
     Returns True iff EITHER AI's STOCK playbook has strategy_type='turtle'.
@@ -1997,4 +1998,3 @@ def check_exit_conditions(positions, equity):
                         shared_state["grok_positions"]   = [s for s in shared_state["grok_positions"]   if s != symbol]
                         shared_state["position_exits"].pop(symbol, None)
                 else:
-
