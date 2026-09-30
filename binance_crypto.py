@@ -2504,3 +2504,458 @@ class CryptoTrader:
                     result = self._execute_exit(
                         pos, current, exit_reason,
                         record_trade_fn = record_trade_fn,
+                        prompt_builder  = prompt_builder,
+                    )
+                    if result:
+                        exits += 1
+            except Exception as e:
+                self._log(f"⚠️ Exit monitor error for {symbol}: {e}")
+
+        return exits
+
+    def _execute_exit(self, pos: CryptoPosition,
+                      current_price: float, reason: str,
+                      record_trade_fn=None,
+                      prompt_builder=None) -> bool:
+        """Execute a sell order and record the trade."""
+        try:
+            # Cancel any existing open orders for this symbol first
+            open_orders = get_open_crypto_orders(pos.symbol)
+            for order in open_orders:
+                try:
+                    cancel_crypto_order(pos.symbol, order["orderId"])
+                except Exception:
+                    pass
+
+            # ── Fee-aware floor (informational) ───────────────
+            # MARKET orders fill at current bid, so we can't enforce a
+            # price floor at the exchange. Instead, log a warning if the
+            # current market price is below entry + fees + 0.5%, since
+            # this means we're likely booking a loss.
+            min_sell = round(pos.entry_price * (1 + CRYPTO_RULES["round_trip_fee"] + 0.005), 6)
+            if "stop_loss" not in reason and current_price < min_sell:
+                self._log(f"   ⚠️ {pos.symbol}: MARKET exit at ${current_price:.4f} "
+                          f"below fee floor ${min_sell:.4f} (entry ${pos.entry_price:.4f}) — "
+                          f"reason: {reason}")
+
+            # MARKET sell — place_crypto_sell defaults to MARKET, fills at current bid
+            result = place_crypto_sell(pos.symbol, pos.qty)
+
+            # ── Handle ghost positions — wallet empty/dust/un-sellable ─
+            # ZERO_BALANCE: wallet has none of the asset
+            # DUST_BALANCE: under $1.50 — too small to sell (Binance min notional $10)
+            # QTY_ROUNDED_TO_ZERO: stepSize larger than balance — un-sellable
+            ghost_errors = ("ZERO_BALANCE", "DUST_BALANCE", "QTY_ROUNDED_TO_ZERO")
+            if isinstance(result, dict) and result.get("error") in ghost_errors:
+                err = result.get("error")
+                recon = reconcile_ghost_exit(pos.symbol, pos.entry_time)
+                if recon:
+                    pnl_usd = round(recon["gross_proceeds"] - recon["fee_usd"]
+                                     - pos.entry_price * recon["qty"], 2)
+                    pnl_pct = round((recon["avg_price"] / pos.entry_price - 1) * 100, 2)
+                    exit_price = recon["avg_price"]
+                    exit_qty   = recon["qty"]
+                    self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — reconciled "
+                              f"broker-side exit @ ${exit_price:.6f} | P&L: ${pnl_usd:+.2f} "
+                              f"({pnl_pct:+.2f}%)")
+                else:
+                    exit_price = current_price
+                    exit_qty   = pos.qty
+                    pnl_usd = round((current_price - pos.entry_price) * pos.qty, 2)
+                    pnl_pct = pos.pnl_pct(current_price)
+                    self._log(f"   🧹 {pos.symbol}: ghost position ({err}) — no Binance fill "
+                              f"found, recording ESTIMATE P&L: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)")
+                if record_trade_fn:
+                    try:
+                        record_trade_fn(
+                            action       = reason.split("(")[0].strip(),
+                            symbol       = pos.symbol,
+                            qty          = exit_qty,
+                            price        = exit_price,
+                            notional     = round(exit_price * exit_qty, 2),
+                            owner        = pos.owner,
+                            pnl_usd      = pnl_usd,
+                            pnl_pct      = pnl_pct / 100,
+                            strategy     = "crypto",
+                            entry_price  = pos.entry_price,
+                            reason       = f"crypto:{reason} (ghost, "
+                                           + ("reconciled)" if recon else "estimated)"),
+                        )
+                    except Exception as rte:
+                        self._log(f"   ⚠️ ghost-exit record_trade failed: {rte}")
+                del self.positions[pos.symbol]
+                return True  # Treat as success to prevent infinite retries
+
+            pnl_usd = round((current_price - pos.entry_price) * pos.qty, 2)
+            pnl_pct = pos.pnl_pct(current_price)
+
+            # ── Feed main trade history ───────────────────────
+            if record_trade_fn:
+                try:
+                    action_type = reason.split("(")[0].strip()
+                    record_trade_fn(
+                        action       = action_type,
+                        symbol       = pos.symbol,
+                        qty          = pos.qty,
+                        price        = current_price,
+                        notional     = round(current_price * pos.qty, 2),
+                        owner        = pos.owner,
+                        pnl_usd      = pnl_usd,
+                        pnl_pct      = pnl_pct / 100,
+                        strategy     = "crypto",
+                        entry_price  = pos.entry_price,
+                        reason       = f"crypto:{reason}",
+                    )
+                except Exception as rte:
+                    self._log(f"   ⚠️ record_trade failed: {rte}")
+
+            # ── Feed prompt builder memory ────────────────────
+            if prompt_builder:
+                try:
+                    prompt_builder.on_trade_closed(
+                        symbol       = pos.symbol,
+                        pnl_usd      = pnl_usd,
+                        pnl_pct      = pnl_pct,
+                        owner        = pos.owner,
+                        strategy     = "crypto",
+                        signals      = ["crypto", reason.split("(")[0].strip()],
+                        entry_reason = f"crypto {pos.symbol} entry",
+                    )
+                except Exception as pbe:
+                    self._log(f"   ⚠️ prompt_builder memory failed: {pbe}")
+
+            # Internal trade log
+            trade = {
+                "symbol":       pos.symbol,
+                "action":       reason.split("(")[0].strip(),
+                "entry_price":  pos.entry_price,
+                "exit_price":   current_price,
+                "qty":          pos.qty,
+                "pnl_usd":      pnl_usd,
+                "pnl_pct":      pnl_pct,
+                "hours_held":   round(pos.hours_held(), 1),
+                "owner":        pos.owner,
+                "time":         datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            self.trade_history.append(trade)
+            if len(self.trade_history) > 200:
+                self.trade_history.pop(0)
+
+            self.total_pnl += pnl_usd
+            if pnl_usd > 0:
+                self.wins += 1
+            else:
+                self.losses += 1
+
+            icon = "✅" if pnl_usd > 0 else "❌"
+            self._log(f"{icon} EXIT {pos.symbol} | {reason} | "
+                      f"P&L: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%) | "
+                      f"held {trade['hours_held']}h")
+
+            del self.positions[pos.symbol]
+            return True
+
+        except Exception as e:
+            self._log(f"❌ Exit failed for {pos.symbol}: {e}")
+            return False
+
+    # ── AI COLLABORATION CYCLE ──────────────────────────────
+    def run_crypto_cycle(self, total_equity: float,
+                         ask_claude_fn, ask_grok_fn,
+                         spy_trend: str = "neutral",
+                         # ── New: full shared context ──────────────
+                         prompt_builder=None,      # PromptBuilder instance
+                         record_trade_fn=None,     # bot record_trade()
+                         pol_text: str = "",       # Capitol Trades data
+                         pol_mimick: list = None,  # Top politician mimick symbols
+                         smart_money: dict = None, # Triple confirmation etc.
+                         stock_projections: dict = None,  # Stock proj engine output
+                         ) -> int:
+
+        """Run one full crypto trading cycle: AI decisions + execution."""
+        if not self._enabled:
+            return 0
+
+        self.cycle_count += 1
+        self._log(f"── 🪙 Crypto Cycle #{self.cycle_count} ──")
+
+        # Always run exit monitor first
+        exits = self.run_exit_monitor()
+        if exits:
+            self._log(f"   {exits} position(s) exited autonomously")
+
+        # Check if we can open new positions
+        if len(self.positions) >= CRYPTO_RULES["max_positions"]:
+            self._log(f"   Max positions ({CRYPTO_RULES['max_positions']}) reached — monitoring only")
+            self._log_positions()
+            return 0
+
+        # Get available USDT + full wallet
+        self._log("   💼 Reading full Binance.US wallet...")
+        wallet = {}
+        crypto_pool   = 0.0
+        wallet_text   = ""
+        tradeable     = []
+        crypto_equity = 0.0
+        try:
+            wallet        = get_full_wallet()
+            if wallet.get("error"):
+                self._log(f"   ⚠️ Wallet error: {wallet['error']} — retrying once...")
+                import time as _t; _t.sleep(2)
+                wallet = get_full_wallet()  # One retry
+                if wallet.get("error"):
+                    self._log(f"   ❌ Wallet read failed twice: {wallet['error']}")
+                    return 0
+
+            # Cache the wallet so effective_fees() can detect BNB downstream
+            self._wallet_cache = wallet
+            if wallet.get("bnb"):
+                _bnb_val = wallet["bnb"].get("value_usdt", 0)
+                _eff = effective_fees(has_bnb=True)
+                self._log(f"   🔶 BNB fee discount ACTIVE: holding ${_bnb_val:.2f} BNB "
+                          f"→ effective round-trip fee {_eff['round_trip']*100:.3f}%")
+
+            crypto_pool   = wallet["usdt_free"]
+            wallet_text   = wallet["wallet_summary"]
+            tradeable     = wallet["tradeable"]
+            crypto_equity = wallet.get("total_value",
+                            max(total_equity * 0.3, crypto_pool))
+
+            # ── Log full wallet ──────────────────────────────────
+            self._log(f"   💵 USDT free: ${crypto_pool:.2f} | "
+                      f"Total wallet: ${crypto_equity:.2f}")
+
+            # Show ONLY coins worth ≥ MIN_DISPLAY_VALUE — dust is collapsed
+            visible_tradeable = [h for h in tradeable
+                                 if h.get("value_usdt", 0) >= MIN_DISPLAY_VALUE]
+            dust_tradeable    = [h for h in tradeable
+                                 if h.get("value_usdt", 0) < MIN_DISPLAY_VALUE
+                                 and h.get("qty", 0) > 0.000001]
+
+            for h in visible_tradeable:
+                price_str = (f"${h['price']:.8f}" if h['price'] < 0.001
+                             else f"${h['price']:.4f}")
+                self._log(f"   🪙 {h['asset']}: {h['qty']:.4f} "
+                          f"= ${h['value_usdt']:.2f} @ {price_str}")
+
+            # Show non-tradeable / held coins (FET, AUDIO, etc.)
+            non_td = wallet.get("non_tradeable", [])
+            visible = [p for p in non_td
+                       if p.get("qty", 0) > 0
+                       and p.get("value_usdt", 0) >= MIN_DISPLAY_VALUE]
+            dust_non_td = [p for p in non_td
+                           if p.get("qty", 0) > 0
+                           and p.get("value_usdt", 0) < MIN_DISPLAY_VALUE]
+            for p in visible[:6]:
+                price_str = (f"${p['price']:.8f}" if p.get('price', 0) < 0.001
+                             else f"${p['price']:.4f}")
+                self._log(f"   📦 {p['asset']}: {p['qty']:.4f} "
+                          f"= ${p['value_usdt']:.2f} @ {price_str}")
+
+            # Single-line dust summary — keeps logs clean but still informs
+            dust_all   = dust_tradeable + dust_non_td
+            if dust_all:
+                dust_total = sum(h.get("value_usdt", 0) for h in dust_all)
+                dust_assets = ", ".join(h["asset"] for h in dust_all[:8])
+                if len(dust_all) > 8:
+                    dust_assets += f", +{len(dust_all)-8} more"
+                self._log(f"   🧹 Dust: {len(dust_all)} coins ~${dust_total:.2f} "
+                          f"({dust_assets}) — below ${MIN_DISPLAY_VALUE} threshold")
+
+            # ── Show staked coins clearly ─────────────────────
+            try:
+                staking_positions = get_staking_info()
+                if staking_positions and not staking_positions[0].get("error"):
+                    for s in staking_positions:
+                        rewards = s.get("rewards_pending", 0)
+                        unbond  = s.get("unbonding_days", "?")
+                        val     = s.get("staked_value", 0)
+                        self._log(
+                            f"   🔒 {s['asset']} STAKED: {s['staked_qty']:.4f} "
+                            f"= ${val:.2f} | rewards={rewards:.4f} | "
+                            f"unbond={unbond}d ← LOCKED, cannot sell directly"
+                        )
+            except Exception:
+                pass
+
+            if wallet.get("bnb"):
+                bnb = wallet["bnb"]
+                self._log(f"   🔶 BNB: {bnb['qty']:.4f} = ${bnb['value_usdt']:.2f}")
+
+        except Exception as e:
+            self._log(f"   ⚠️ Wallet read failed: {e}")
+            return 0
+
+        # Check if we have anything to work with
+        # Either USDT to buy directly, OR coins we can sell first
+        # Use $2 minimum for individual coins — they combine with existing USDT
+        # NOTE: FET and other coins with price lookup failures still have qty
+        # — we try to get their price live at sell time, not at filter time
+        all_holdings = wallet.get("tradeable", []) + wallet.get("non_tradeable", [])
+        min_sellable = 2.0
+
+        def _estimate_value(h: dict) -> float:
+            """Get best value estimate — try live price if stored is 0."""
+            val = h.get("value_usdt", 0)
+            if val > 0:
+                return val
+            # value=0 means price lookup failed at wallet read time
+            # Try a fresh price lookup now
+            sym = h.get("symbol", f"{h['asset']}USDT")
+            qty = h.get("free", 0) + h.get("locked", 0)
+            if qty <= 0:
+                return 0
+            try:
+                price = get_crypto_price(sym)
+                return round(qty * price, 2)
+            except Exception:
+                return 0
+
+        sellable_coins = [h for h in all_holdings
+                         if h.get("free", 0) > 0
+                         and _estimate_value(h) >= min_sellable]
+
+        total_available = crypto_pool + sum(_estimate_value(h) for h in sellable_coins)
+        has_usdt   = crypto_pool >= CRYPTO_RULES["min_trade_usdt"]
+        has_coins  = len(sellable_coins) > 0
+        can_trade  = total_available >= CRYPTO_RULES["min_trade_usdt"]
+
+        if not can_trade:
+            self._log(f"   ⚠️ Nothing to trade — USDT=${crypto_pool:.2f} "
+                      f"+ coins=${total_available - crypto_pool:.2f} "
+                      f"= ${total_available:.2f} (min ${CRYPTO_RULES['min_trade_usdt']})")
+            return 0
+
+        # ── Tier-based sizing ─────────────────────────────────
+        tier = get_crypto_tier(crypto_equity)
+        risk_pct      = tier["risk_pct"]
+        tier_max_pos  = tier["max_pos"]
+        tier_coins    = tier["coins"]  # None = all universe unlocked
+        trade_budget  = round(total_available * risk_pct, 2)
+        CRYPTO_RULES["max_positions"] = tier_max_pos
+
+        # ── Floor the suggested budget at the exchange minimum ──
+        # A raw risk_pct slice of a small wallet can round below what
+        # Binance.US will actually accept (e.g. 30% of $19.64 = $5.89
+        # vs. a $10 minimum). If the wallet can afford the floor, ask
+        # the AI for a legal order size instead of one it can't place.
+        if (trade_budget < CRYPTO_RULES["min_order_usdt"]
+                and total_available >= CRYPTO_RULES["min_order_usdt"]):
+            self._log(f"   📐 Budget floored ${trade_budget:.2f} → "
+                      f"${CRYPTO_RULES['min_order_usdt']:.2f} (wallet can afford the exchange minimum)")
+            trade_budget = CRYPTO_RULES["min_order_usdt"]
+
+        self._log(f"   📊 {tier['note']}")
+        self._log(f"   💰 Risk per trade: {risk_pct*100:.0f}% = ${trade_budget:.2f} USDT")
+
+        # ── Global drawdown check ─────────────────────────────
+        # Pause all crypto trading if wallet dropped 40% from peak
+        peak_val = self._peak_equity if hasattr(self, '_peak_equity') else crypto_equity
+        if crypto_equity > peak_val:
+            self._peak_equity = crypto_equity
+            peak_val = crypto_equity
+        drawdown = (peak_val - crypto_equity) / peak_val if peak_val > 0 else 0
+        if drawdown >= CRYPTO_RULES["global_drawdown_pause"]:
+            self._log(f"   🛑 DRAWDOWN PAUSE: wallet down {drawdown*100:.1f}% from peak "
+                      f"${peak_val:.2f} → ${crypto_equity:.2f}. "
+                      f"Pausing all trading until recovery.")
+            return 0
+
+        if not has_usdt and has_coins:
+            coin_summary = [(h["asset"], f'${h["value_usdt"]:.2f}') for h in sellable_coins[:3]]
+            self._log(f"   💡 No USDT but have sellable coins: {coin_summary}")
+            self._log(f"   🔄 AI will decide: sell weak coins → buy stronger ones")
+
+        # Get market data + crypto projections
+        self._log("   📊 Computing crypto projections...")
+        try:
+            self._projections = get_all_crypto_projections()
+            stats             = get_all_crypto_stats()
+            # Scan full Binance.US market for top movers (not just our universe)
+            market_scan       = scan_binance_market(min_volume_usdt=500_000, top_n=10)
+        except Exception as e:
+            self._log(f"   ⚠️ Market data failed: {e}")
+            return 0
+
+        proj_text  = format_crypto_projections_for_ai(self._projections)
+        stats_text = [(s["symbol"], f"{s['change_pct']:+.2f}%",
+                       f"vol={s['quote_volume']/1e6:.1f}M")
+                      for s in stats[:8]]
+
+        # Format market scan for AI — shows coins OUTSIDE our universe too
+        scan_text = ""
+        if market_scan:
+            new_discoveries = [c for c in market_scan if not c["in_universe"]]
+            scan_lines = ["MARKET SCAN — Top movers on Binance.US right now:"]
+            for c in market_scan[:8]:
+                tag = "★ NEW" if not c["in_universe"] else "  ·"
+                scan_lines.append(
+                    f"  {tag} {c['symbol']}: {c['change_pct']:+.1f}% "
+                    f"@ ${c['price']} | vol=${c['volume_m']}M"
+                )
+            if new_discoveries:
+                scan_lines.append(
+                    f"\n  ⚡ {len(new_discoveries)} coins trending OUTSIDE our normal universe — "
+                    f"AI can recommend buying any of these if setup looks good"
+                )
+            scan_text = "\n".join(scan_lines)
+
+        # ── Crypto-specific situation classification ──────────
+        # IMPORTANT: crypto uses its OWN classifier — not the stock one.
+        # Stock P&L, SPY trend, and stock cash levels are IRRELEVANT to
+        # crypto trading decisions. Crypto has its own pool (Binance USDT),
+        # trades 24/7, and dip-buying is a valid strategy.
+        situation_mode = "standard_monitoring"
+        lessons_text   = ""
+
+        try:
+            # Classify based purely on crypto signals
+            near_stop = [s for s, p in self.positions.items()
+                         if p.pnl_pct(get_crypto_price(s)) <= -3.0]
+            near_tp   = [s for s, p in self.positions.items()
+                         if p.pnl_pct(get_crypto_price(s)) >= 4.0]
+            crypto_pnl_pct = (self.total_pnl / max(crypto_equity, 1)
+                              if self.total_pnl != 0 else 0.0)
+
+            # Crypto situation modes — independent of stocks
+            # Total sellable value = USDT + all free coin holdings
+            total_sellable = crypto_pool + sum(
+                (_estimate_value(h) if _estimate_value(h) > 0 else h.get("value_usdt", 0))
+                for h in (wallet.get("tradeable", []) + wallet.get("non_tradeable", []))
+                if h.get("free", 0) > 0 and (h.get("value_usdt", 0) >= 2.0 or
+                    h.get("symbol", "") in _VERIFIED_SYMBOLS)
+            )
+
+            if near_stop:
+                situation_mode = "defensive"
+                focus = f"Crypto positions near stop: {near_stop}. Protect capital."
+            elif crypto_pnl_pct <= -0.05:
+                situation_mode = "damage_control"
+                focus = f"Crypto P&L {crypto_pnl_pct*100:.1f}%. Review positions."
+            elif near_tp:
+                situation_mode = "harvest_profits"
+                focus = f"Crypto positions near TP: {near_tp}. Lock in gains."
+            elif total_sellable >= CRYPTO_RULES["min_trade_usdt"]:
+                # Have USDT OR coins worth selling → can trade
+                situation_mode = "opportunity_seeking"
+                if crypto_pool >= CRYPTO_RULES["min_trade_usdt"]:
+                    focus = f"${crypto_pool:.2f} USDT ready. Seek best setups."
+                else:
+                    focus = f"${total_sellable:.2f} in coins. Sell weak → buy strong."
+            elif self.positions:
+                situation_mode = "standard_monitoring"
+                focus = "Managing open crypto positions."
+            else:
+                situation_mode = "capital_conservation"
+                focus = "Insufficient funds to trade."
+
+            self._log(f"   🧠 Crypto mode: {situation_mode.upper().replace('_',' ')} — {focus[:60]}")
+
+            # Get learned lessons relevant to crypto
+            if prompt_builder:
+                lessons_text = prompt_builder.memory.format_for_prompt(
+                    situation=situation_mode,
+                    spy_trend=spy_trend,
+                )
+        except Exception as pe:
+            self._log(f"   ⚠️ Crypto situation failed: {pe}")
