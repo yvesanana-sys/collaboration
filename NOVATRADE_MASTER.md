@@ -562,20 +562,6 @@ Twitter/X, Reddit (r/CryptoCurrency, r/CryptoMoonShots, r/Bitcoin), CoinDesk, Co
 
 ## Bug Fix Log
 
-### Bug Fix — 2026-10-20
-**Error:** [BEHAVIORAL] SPY price always $0.00 — indicator fetch broken (6 zero-reads/hour)
-**Root Cause:** `get_spy_trend()` in market_data.py intermittently returns price=$0.00, and bot_with_proxy.py was directly reading this invalid value into `shared_state["spy_cache"]` with no validation or fallback.
-**Fix:** Added `get_spy_price_with_cache()` function in bot_with_proxy.py that:
-  1. Validates price > 0 before accepting fresh fetch
-  2. Falls back to cached valid SPY price if fetch fails or returns $0
-  3. Cache expires after 5 minutes to prevent stale data
-  4. Always returns a dict with price, trend, timestamp, and cached flag
-  5. Defaults to trend=NEUTRAL if all sources fail
-**File:** bot_with_proxy.py
-**Impact:** Eliminates $0.00 readings; trades now use valid cached prices during market_data.py API blips
-**Status:** ✅ Ready for test
-
-
 ### Bug Fix — 2026-06-03
 **Error:** Claude/Grok proposing crypto USDT pairs in stock execution cycle
 **Fix:** Added `is_crypto_ticker()` validator function and `STOCK_EXEC_FORBIDDEN_PATTERNS` list to filter crypto stablecoins (USDT, USDC, BUSD, TUSD) before Alpaca order submission. Prevents malformed "Skip USDT" errors when AI recommends BTC/ETH crosses during market analysis spillover.
