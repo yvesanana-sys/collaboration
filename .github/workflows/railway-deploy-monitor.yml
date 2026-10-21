@@ -1,0 +1,82 @@
+name: Railway deploy monitor
+
+# Can we still ship to Railway? Checks that the current main HEAD was picked up
+# and deployed by Railway (via the commit status Railway's GitHub app posts) and
+# reads Railway's public status page. Needs no Railway credentials, so it works
+# when the Railway connector, dashboard or API is down.
+# Opens ONE "railway-deploy" issue while the path is broken; closes it on recovery.
+# See .github/scripts/railway_deploy_monitor.py.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "7,22,37,52 * * * *"   # every 15 min, offset from the health watchdog
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  statuses: read
+
+concurrency:
+  group: railway-deploy-monitor
+  cancel-in-progress: true   # a newer push supersedes an older check
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Give Railway time to pick up a fresh push
+        if: github.event_name == 'push'
+        run: sleep 660   # > PICKUP_GRACE_MIN (10 min)
+
+      - name: Check Railway pickup + platform status
+        id: mon
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python .github/scripts/railway_deploy_monitor.py
+
+      - name: Open or update the tracking issue
+        if: contains(fromJSON('["not_picked_up","stuck","deploy_failed"]'), steps.mon.outputs.decision)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DECISION: ${{ steps.mon.outputs.decision }}
+          REASON: ${{ steps.mon.outputs.reason }}
+          PLATFORM: ${{ steps.mon.outputs.platform }}
+          SHA: ${{ steps.mon.outputs.sha }}
+        run: |
+          gh label create railway-deploy --color B60205 --description "Pushes not reaching / not deploying on Railway" 2>/dev/null || true
+          OPEN=$(gh issue list --label railway-deploy --state open --json number --jq '.[0].number')
+          BODY="**${DECISION}** on main \`${SHA}\`: ${REASON}
+
+          Railway status page: ${PLATFORM}
+
+          Until this closes, merged fixes are not live. The autofix pipeline holds off merging while it is open. The health watchdog's 15-minute check keeps running. This issue closes itself when Railway deploys main again."
+          if [ -z "$OPEN" ]; then
+            gh issue create --title "🚧 Railway deploy path broken (${DECISION})" --label railway-deploy --body "$BODY"
+          else
+            # Comment only when the decision or HEAD changed, not every 15 minutes.
+            LAST=$(gh issue view "$OPEN" --json comments,body --jq '([.body] + [.comments[].body]) | last')
+            case "$LAST" in *"**${DECISION}** on main \`${SHA}\`"*) echo "No change; not commenting." ;; *) gh issue comment "$OPEN" --body "$BODY" ;; esac
+          fi
+
+      - name: Close the tracking issue on recovery
+        if: steps.mon.outputs.decision == 'ok'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REASON: ${{ steps.mon.outputs.reason }}
+        run: |
+          for n in $(gh issue list --label railway-deploy --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "✅ Recovered: ${REASON}"
+          done
+
+      - name: Summary
+        run: |
+          echo "### Railway deploy monitor" >> "$GITHUB_STEP_SUMMARY"
+          echo "- decision: \`${{ steps.mon.outputs.decision }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- reason: ${{ steps.mon.outputs.reason }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- platform: ${{ steps.mon.outputs.platform }}" >> "$GITHUB_STEP_SUMMARY"

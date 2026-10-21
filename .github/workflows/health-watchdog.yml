@@ -73,9 +73,37 @@ jobs:
           MODE: ${{ steps.mode.outputs.mode }}
         run: python .github/scripts/watchdog_health.py
 
+      # ── RAILWAY GUARD ─────────────────────────────────────────────────────
+      # Before reverting, make sure the outage is ours, not Railway's. If main
+      # HEAD never went through Railway, or Railway's status page shows a major
+      # incident, reverting code cannot help and would roll back good fixes.
+      - name: Railway guard (is this outage ours?)
+        id: guard
+        if: steps.health.outputs.decision == 'revert'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.sha }}
+          PICKUP_GRACE_MIN: "0"
+        run: python .github/scripts/railway_deploy_monitor.py
+
+      - name: Revert blocked by Railway guard
+        if: steps.health.outputs.decision == 'revert' && steps.guard.outputs.guard != 'allow'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::warning::Bot is down but NOT reverting: ${{ steps.guard.outputs.guard_reason }}"
+          gh label create watchdog --color FBCA04 2>/dev/null || true
+          gh label create incident --color B60205 2>/dev/null || true
+          if [ -z "$(gh issue list --label watchdog,incident --state open --search 'Railway-side' --json number --jq '.[0].number')" ]; then
+            gh issue create \
+              --title "🚨 Bot down, looks Railway-side, auto-revert held" \
+              --label "watchdog,incident" \
+              --body "The watchdog found the bot hard-down (${{ steps.health.outputs.reason }}) but did NOT revert to last-known-good. Reason: ${{ steps.guard.outputs.guard_reason }}. Railway status: ${{ steps.guard.outputs.platform }}. When Railway recovers, the watchdog re-checks every 15 min, and it will revert then if the bot is still down on code Railway actually deployed." || true
+          fi
+
       # ── REVERT ────────────────────────────────────────────────────────────
       - name: Auto-revert to last-known-good
-        if: steps.health.outputs.decision == 'revert'
+        if: steps.health.outputs.decision == 'revert' && steps.guard.outputs.guard == 'allow'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
