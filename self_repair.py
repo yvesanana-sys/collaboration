@@ -49,6 +49,7 @@ def _key():    return os.environ.get("ANTHROPIC_KEY", "") or os.environ.get("ANT
 GITHUB_TOKEN  = ""  # dynamically read via _tok()
 GITHUB_REPO   = ""  # dynamically read via _repo()
 ANTHROPIC_KEY = ""  # dynamically read via _key()
+GITHUB_BRANCH = _branch()  # used directly by _open_pull_request()
 
 # How many times an error must appear before triggering repair
 ERROR_THRESHOLD = 3
