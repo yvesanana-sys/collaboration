@@ -1,0 +1,114 @@
+name: main-guard
+
+# Tripwire on every push to main. Runs the same structural checks as fix-guard
+# (.github/scripts/fix_guard.py) against the commit before the push. If the push
+# broke main STRUCTURALLY, it is reverted with a forward commit (no force-push)
+# and an incident issue is opened, so Railway deploys the revert instead.
+#
+# Why: on 2026-10-20 and again on 2026-10-21 the live bot's self_repair merged a
+# "fix" straight to main that cut bot_with_proxy.py from ~4,800 lines to ~410.
+# PR checks cannot stop a direct merge; this can, and it works even while
+# Railway is down (the second incident happened during a Railway outage, before
+# the restored human gate could be deployed).
+#
+# Reverts ONLY on: a gated file shrinking, a required component missing, a file
+# that does not parse, or predeploy_check.py failing. Other fix-guard findings
+# (e.g. a non-gated file shrinking or being deleted) open an issue without
+# reverting, since a human may have intended them.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: main-guard
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Structural check of this push
+        id: check
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "verdict=skip" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          set +e
+          python .github/scripts/fix_guard.py "$BEFORE" main-push > guard.txt 2>&1
+          rc=$?
+          set -e
+          cat guard.txt
+          if [ $rc -eq 0 ]; then
+            echo "verdict=pass" >> "$GITHUB_OUTPUT"
+          elif grep -qE "gated files may shrink|required component missing|does not parse|predeploy_check.py failed" guard.txt; then
+            echo "verdict=revert" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=warn" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Revert the push
+        if: steps.check.outputs.verdict == 'revert'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          git config user.name  "novatrade-main-guard[bot]"
+          git config user.email "novatrade-main-guard@users.noreply.github.com"
+          git fetch origin main
+          git checkout -q origin/main
+          # Undo exactly what this push changed (inverse patch), so any commit
+          # that landed on main after it is kept.
+          git diff --binary "$BEFORE" "$AFTER" > push.patch
+          if ! git apply -R --index push.patch; then
+            echo "::error::Could not cleanly revert ${AFTER:0:7} (main moved and conflicts). Opening an incident instead."
+            echo "REVERT_FAILED=1" >> "$GITHUB_ENV"; exit 0
+          fi
+          rm -f push.patch guard.txt.tmp
+          git add -A
+          if git diff --cached --quiet; then echo "Nothing to revert."; exit 0; fi
+          git commit -m "main-guard: revert ${AFTER:0:7}, structural check failed" -m "$(grep -E '^  •' guard.txt | head -20)"
+          git push origin HEAD:main
+
+      - name: Open an incident issue
+        if: steps.check.outputs.verdict == 'revert' || steps.check.outputs.verdict == 'warn'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERDICT: ${{ steps.check.outputs.verdict }}
+          AFTER: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          gh label create incident --color B60205 2>/dev/null || true
+          gh label create main-guard --color 5319E7 2>/dev/null || true
+          if [ "$VERDICT" = "revert" ]; then
+            TITLE="🛑 main-guard reverted ${AFTER:0:7}: push broke main structurally"
+            LABELS="incident,main-guard"
+            LEAD="The push was **reverted automatically** (a forward commit, no force-push), so Railway deploys the restored code."
+            if [ -n "$REVERT_FAILED" ]; then LEAD="⚠️ The automatic revert FAILED (main moved and the inverse patch conflicts). **main is still broken; restore it by hand.**"; fi
+          else
+            TITLE="⚠️ main-guard: ${AFTER:0:7} failed fix-guard (not reverted)"
+            LABELS="main-guard"
+            LEAD="Not reverted, because this kind of finding can be intentional. Please confirm."
+          fi
+          BODY="${LEAD}
+
+          Pushed by: ${ACTOR}
+
+          \`\`\`
+          $(grep -E '^  •|bytes' guard.txt | head -30)
+          \`\`\`"
+          gh issue create --title "$TITLE" --label "$LABELS" --body "$BODY" || true
