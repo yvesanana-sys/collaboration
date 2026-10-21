@@ -1,0 +1,27 @@
+name: fix-guard
+
+# Structural gate on every PR into main. The automated fix pipeline merges a PR
+# only when this check is green; gated-file PRs additionally wait for the owner.
+# See .github/scripts/fix_guard.py for what it catches and why.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fix-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Structural checks (parse, truncation, markers, diff cap, predeploy)
+        run: python .github/scripts/fix_guard.py "${{ github.event.pull_request.base.sha }}" "${{ github.head_ref }}"
