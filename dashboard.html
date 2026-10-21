@@ -6,1077 +6,643 @@
 <title>NovaTrade</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Söhne&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 /* ============================================================
-   NovaTrade — financial broadsheet aesthetic
-   Light theme (warm paper) by default · OLED dark via toggle
-   Display: Fraunces (serif) · Body: IBM Plex Sans · Mono: IBM Plex Mono
-   Single warm accent (vermilion). Color used only for signal.
+   NovaTrade — one-screen operations dashboard
+   Everything fits in one viewport (no scrolling on desktop).
+   Colour is used only for status: green ok · amber attention · red action.
 ============================================================ */
 :root {
-  /* Light (cream paper) */
-  --paper:        #f5f1e8;
-  --paper-2:      #efeadd;
-  --paper-3:      #e8e1d0;
-  --ink:          #1a1816;
-  --ink-2:        #3a3530;
-  --ink-3:        #6b645b;
-  --ink-4:        #9b9389;
-  --rule:         #d4cab5;
-  --rule-soft:    rgba(26, 24, 22, 0.08);
-  --accent:       #c1421f;   /* vermilion */
-  --accent-soft:  rgba(193, 66, 31, 0.08);
-  --good:         #0f6b3e;
-  --good-soft:    rgba(15, 107, 62, 0.08);
-  --bad:          #a01d28;
-  --bad-soft:     rgba(160, 29, 40, 0.08);
-  --warn:         #c08116;
-  --warn-soft:    rgba(192, 129, 22, 0.08);
-
-  --font-display: 'Fraunces', 'Cambria', 'Georgia', serif;
-  --font-body:    'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono:    'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+  --bg:        #f4f5f7;
+  --panel:     #ffffff;
+  --panel-2:   #f8f9fb;
+  --line:      #e3e6eb;
+  --text:      #141821;
+  --text-2:    #424a57;
+  --text-3:    #6b7380;
+  --text-4:    #9aa1ab;
+  --good:      #0f7a46;
+  --good-bg:   #e7f5ee;
+  --warn:      #a86400;
+  --warn-bg:   #fdf3e2;
+  --bad:       #b42330;
+  --bad-bg:    #fbeaec;
+  --off:       #8d95a0;
+  --accent:    #2f5bd3;
+  --font:      'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono:      'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --r:         10px;
 }
 [data-theme="dark"] {
-  --paper:        #0c0b0a;
-  --paper-2:      #131210;
-  --paper-3:      #1c1a18;
-  --ink:          #ede8df;
-  --ink-2:        #c8c1b3;
-  --ink-3:        #8a8276;
-  --ink-4:        #5d5750;
-  --rule:         #2a2725;
-  --rule-soft:    rgba(237, 232, 223, 0.08);
-  --accent:       #e8744e;
-  --accent-soft:  rgba(232, 116, 78, 0.10);
-  --good:         #5cb784;
-  --good-soft:    rgba(92, 183, 132, 0.10);
-  --bad:          #e07a7a;
-  --bad-soft:     rgba(224, 122, 122, 0.10);
-  --warn:         #e0b06a;
-  --warn-soft:    rgba(224, 176, 106, 0.10);
+  --bg:        #0d1015;
+  --panel:     #151a21;
+  --panel-2:   #1a2029;
+  --line:      #252c37;
+  --text:      #e8ebf0;
+  --text-2:    #c0c6cf;
+  --text-3:    #8a929e;
+  --text-4:    #5f6773;
+  --good:      #4cc38a;
+  --good-bg:   rgba(76,195,138,.12);
+  --warn:      #e8a948;
+  --warn-bg:   rgba(232,169,72,.12);
+  --bad:       #ef6b73;
+  --bad-bg:    rgba(239,107,115,.12);
+  --off:       #6b7380;
+  --accent:    #7ea0ff;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body {
-  background: var(--paper);
-  color: var(--ink);
-  font-family: var(--font-body);
-  font-size: 14px;
-  line-height: 1.5;
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.4;
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
+  overflow: hidden;                 /* one screen: nothing scrolls */
 }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); } .muted { color: var(--text-3); }
 
-/* ─── Layout ─────────────────────────────────────────────── */
-.page {
-  max-width: 1400px;
+/* ─── App frame: header · KPIs · panels ─────────────────── */
+.app {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px 18px 16px;
+  max-width: 1680px;
   margin: 0 auto;
-  padding: 32px 40px 80px;
 }
-@media (max-width: 640px) { .page { padding: 20px 16px 60px; } }
 
-/* ─── Masthead ───────────────────────────────────────────── */
-.masthead {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--ink);
-  margin-bottom: 28px;
+/* ─── Header ─────────────────────────────────────────────── */
+.top { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.brand { font-weight: 700; font-size: 17px; letter-spacing: -.01em; white-space: nowrap; }
+.brand span { color: var(--accent); }
+.verdict {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line);
 }
-.mast-title {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 28px;
-  letter-spacing: -0.02em;
-  font-variation-settings: 'opsz' 144;
-}
-.mast-title .dot { color: var(--accent); }
-.mast-meta {
-  display: flex;
-  gap: 18px;
-  align-items: baseline;
-  font-size: 11px;
-  color: var(--ink-3);
-  font-variant-numeric: tabular-nums;
-}
-.mast-meta .live {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-2);
-}
-.mast-meta .live::before {
-  content: '';
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: var(--good);
-  display: inline-block;
-  box-shadow: 0 0 0 0 var(--good);
-  animation: pulse 2.2s ease-out infinite;
-}
-.mast-meta .live.offline::before { background: var(--bad); animation: none; }
-.mast-meta .live.warn::before    { background: var(--warn); animation: none; }
-@keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(15,107,62,0.45); }
-  70%  { box-shadow: 0 0 0 8px rgba(15,107,62,0); }
-  100% { box-shadow: 0 0 0 0 rgba(15,107,62,0); }
-}
-.mast-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
+.verdict .vdot { width: 9px; height: 9px; border-radius: 50%; background: var(--off); flex-shrink: 0; }
+.verdict.ok   { background: var(--good-bg); border-color: transparent; } .verdict.ok .vdot   { background: var(--good); }
+.verdict.warn { background: var(--warn-bg); border-color: transparent; } .verdict.warn .vdot { background: var(--warn); }
+.verdict.bad  { background: var(--bad-bg);  border-color: transparent; } .verdict.bad .vdot  { background: var(--bad); }
+.verdict .vhead { font-weight: 600; white-space: nowrap; }
+.verdict .vbody { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meta { display: flex; align-items: center; gap: 10px; color: var(--text-3); font-size: 12px; white-space: nowrap; }
 .btn {
-  background: transparent;
-  border: 1px solid var(--rule);
-  color: var(--ink-2);
-  font-family: var(--font-body);
-  font-size: 11px;
-  font-weight: 500;
-  padding: 5px 10px;
-  border-radius: 2px;
-  cursor: pointer;
-  letter-spacing: 0.02em;
-  transition: border-color 0.15s, color 0.15s;
+  background: var(--panel); border: 1px solid var(--line); color: var(--text-2);
+  font: 500 12px var(--font); padding: 6px 11px; border-radius: 7px; cursor: pointer;
 }
-.btn:hover { border-color: var(--ink-2); color: var(--ink); }
-.btn-accent { color: var(--accent); border-color: var(--accent-soft); }
-.btn-accent:hover { border-color: var(--accent); }
-
-/* ─── Hero numbers ───────────────────────────────────────── */
-.hero {
-  display: grid;
-  grid-template-columns: 1.4fr 1fr 1fr 1fr 1.1fr;
-  gap: 32px;
-  padding: 32px 0 28px;
-  border-bottom: 1px solid var(--ink);
-  margin-bottom: 0;
-}
-@media (max-width: 900px) {
-  .hero { grid-template-columns: 1fr 1fr; gap: 24px; padding: 20px 0; }
-  .hero .h-cell:first-child { grid-column: 1 / -1; }
-}
-.h-cell .h-label {
-  font-family: var(--font-body);
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-bottom: 8px;
-  font-weight: 500;
-}
-.h-cell .h-val {
-  font-family: var(--font-display);
-  font-weight: 500;
-  font-variation-settings: 'opsz' 144;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-}
-.h-cell.hero-main .h-val { font-size: 64px; }
-.h-cell .h-val        { font-size: 32px; }
-@media (max-width: 900px) {
-  .h-cell.hero-main .h-val { font-size: 52px; }
-  .h-cell .h-val        { font-size: 26px; }
-}
-.h-cell .h-sub {
-  font-size: 11px;
-  color: var(--ink-3);
-  margin-top: 6px;
-  font-variant-numeric: tabular-nums;
-}
-.h-val.good { color: var(--good); }
-.h-val.bad  { color: var(--bad);  }
-.h-val.warn { color: var(--warn); }
-
-/* ─── Health strip ───────────────────────────────────────── */
-.health {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0;
-  padding: 14px 0;
-  border-bottom: 1px solid var(--ink);
-  font-size: 12px;
-  color: var(--ink-2);
-}
-.h-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 0 18px;
-  border-right: 1px solid var(--rule-soft);
-  white-space: nowrap;
-}
-.h-item:first-child { padding-left: 0; }
-.h-item:last-child  { border-right: none; }
-@media (max-width: 700px) {
-  .h-item { padding: 4px 12px; border-right: none; }
-}
-.h-item .dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--good);
-  flex-shrink: 0;
-}
-.h-item.bad  .dot { background: var(--bad); }
-.h-item.warn .dot { background: var(--warn); }
-.h-item.off  .dot { background: var(--ink-4); }
-.h-item .h-key { color: var(--ink-3); }
-.h-item .h-val { color: var(--ink); font-weight: 500; }
-
-.banner {
-  padding: 12px 0;
-  font-size: 13px;
-  color: var(--ink-3);
-  font-style: italic;
-  font-family: var(--font-display);
-  font-variation-settings: 'opsz' 14;
-  border-bottom: 1px solid var(--rule);
-  margin-bottom: 28px;
-}
-.banner.sleep { color: var(--ink-3); }
-.banner.active { color: var(--good); font-style: normal; font-family: var(--font-body); }
-
-/* ─── Grid ───────────────────────────────────────────────── */
-.grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0;
-}
-@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-
-.card {
-  padding: 24px 32px 24px 0;
-  border-right: 1px solid var(--rule);
-  border-bottom: 1px solid var(--rule);
-  min-height: 0;
-}
-.card:nth-child(2n) { padding-right: 0; padding-left: 32px; border-right: none; }
-@media (max-width: 900px) {
-  .card { padding: 20px 0; border-right: none; }
-  .card:nth-child(2n) { padding-left: 0; }
-}
-.card-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 18px;
-}
-.card-title {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 18px;
-  letter-spacing: -0.01em;
-  color: var(--ink);
-  font-variation-settings: 'opsz' 144;
-}
-.card-title .accent { color: var(--accent); }
-.card-meta {
-  font-size: 10px;
-  color: var(--ink-3);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-/* ─── AI Battle ──────────────────────────────────────────── */
-.battle {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 24px;
-}
-.fighter-name {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 15px;
-  margin-bottom: 4px;
-}
-.fighter-name .role {
-  display: inline-block;
-  margin-left: 6px;
-  font-family: var(--font-body);
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-4);
-  font-weight: 400;
-}
-.fighter-pnl {
-  font-family: var(--font-display);
-  font-size: 36px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  margin: 6px 0 10px;
-}
-.fighter-stats {
-  display: flex;
-  gap: 18px;
-  flex-wrap: wrap;
-  font-size: 11px;
-  color: var(--ink-3);
-  font-variant-numeric: tabular-nums;
-  border-top: 1px solid var(--rule-soft);
-  padding-top: 10px;
-}
-.fighter-stats b {
-  color: var(--ink);
-  font-weight: 600;
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-.leader-tag {
-  font-size: 9px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--accent);
-  border: 1px solid var(--accent);
-  padding: 2px 6px;
-  display: inline-block;
-  margin-top: 8px;
-  border-radius: 1px;
-  font-weight: 600;
-}
-
-/* ─── Strategy / Turtle ──────────────────────────────────── */
-.strat-status {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 4px;
-  font-variation-settings: 'opsz' 144;
-}
-.strat-status .turtle { font-size: 26px; }
-.strat-status.active { color: var(--good); }
-.strat-status.classic { color: var(--ink-2); }
-.strat-detail { font-size: 12px; color: var(--ink-3); margin-bottom: 16px; }
-.gate-log { font-family: var(--font-mono); font-size: 11px; line-height: 1.7; color: var(--ink-2); }
-.gate-row { padding: 3px 0; border-bottom: 1px dotted var(--rule-soft); }
-.gate-row:last-child { border-bottom: none; }
-.gate-pass { color: var(--good); margin-right: 6px; }
-.gate-reject { color: var(--bad); margin-right: 6px; }
-
-/* ─── Positions table ────────────────────────────────────── */
-.pos-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
-}
-.pos-table th {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--ink-3);
-  font-weight: 500;
-  text-align: left;
-  padding: 6px 8px 6px 0;
-  border-bottom: 1px solid var(--ink-2);
-}
-.pos-table th.r { text-align: right; padding-right: 0; }
-.pos-table td {
-  padding: 9px 8px 9px 0;
-  font-size: 13px;
-  border-bottom: 1px solid var(--rule-soft);
-}
-.pos-table td.r { text-align: right; padding-right: 0; font-family: var(--font-mono); }
-.pos-table tr:last-child td { border-bottom: none; }
-.pos-table .sym {
-  font-weight: 600;
-  font-family: var(--font-display);
-  font-variation-settings: 'opsz' 14;
-}
-.pos-table .ownr {
-  display: inline-block;
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-4);
-  margin-left: 6px;
-}
-.empty {
-  color: var(--ink-4);
-  font-style: italic;
-  font-family: var(--font-display);
-  font-variation-settings: 'opsz' 14;
-  padding: 18px 0;
-  font-size: 13px;
-}
-.wallet-line {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px dotted var(--rule);
-  font-size: 11px;
-  color: var(--ink-3);
-  font-variant-numeric: tabular-nums;
-}
-
-/* ─── Closes table (full width) ──────────────────────────── */
-.full {
-  padding: 28px 0 8px;
-  border-bottom: 1px solid var(--rule);
-}
-.closes-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
-}
-.closes-table th {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--ink-3);
-  font-weight: 500;
-  text-align: left;
-  padding: 6px 12px 6px 0;
-  border-bottom: 1px solid var(--ink-2);
-}
-.closes-table th.r { text-align: right; padding-right: 0; }
-.closes-table td {
-  padding: 10px 12px 10px 0;
-  font-size: 12px;
-  border-bottom: 1px solid var(--rule-soft);
-  color: var(--ink-2);
-}
-.closes-table td.r { text-align: right; padding-right: 0; font-family: var(--font-mono); }
-.closes-table .sym {
-  font-weight: 600;
-  color: var(--ink);
-  font-family: var(--font-display);
-  font-variation-settings: 'opsz' 14;
-}
-.closes-table .act {
-  font-size: 10px;
-  color: var(--ink-3);
-  letter-spacing: 0.05em;
-}
-
-.good { color: var(--good); }
-.bad  { color: var(--bad); }
-
-/* ─── Footer ─────────────────────────────────────────────── */
-.foot {
-  padding: 28px 0 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  font-size: 10px;
-  color: var(--ink-4);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.foot a { color: var(--ink-3); text-decoration: none; border-bottom: 1px dotted var(--rule); }
-.foot a:hover { color: var(--ink); border-color: var(--ink); }
-
-/* ─── Bot URL input ─────────────────────────────────────── */
+.btn:hover { color: var(--text); border-color: var(--text-4); }
 .url-input {
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--rule);
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 4px 6px;
-  width: 220px;
-  outline: none;
+  background: var(--panel); border: 1px solid var(--line); color: var(--text);
+  font: 12px var(--mono); padding: 6px 8px; border-radius: 7px; width: 200px; outline: none;
 }
 .url-input:focus { border-color: var(--accent); }
-@media (max-width: 700px) { .url-input { width: 130px; } }
 
-/* ─── Pull-on-load animation ────────────────────────────── */
-.fade-in {
-  animation: fade-up 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-}
-@keyframes fade-up {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
+/* ─── KPI tiles ──────────────────────────────────────────── */
+.kpis { display: grid; grid-template-columns: 1.5fr repeat(4, 1fr); gap: 12px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 12px 16px; min-width: 0; }
+.kpi .lbl { font-size: 11px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .06em; }
+.kpi .val { font: 600 26px/1.15 var(--mono); letter-spacing: -.02em; margin-top: 4px; white-space: nowrap; }
+.kpi.main .val { font-size: 30px; }
+.kpi .sub { font-size: 12px; color: var(--text-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* Stagger child reveals */
-.hero .h-cell:nth-child(1) { animation-delay: 0.00s; }
-.hero .h-cell:nth-child(2) { animation-delay: 0.05s; }
-.hero .h-cell:nth-child(3) { animation-delay: 0.10s; }
-.hero .h-cell:nth-child(4) { animation-delay: 0.15s; }
-.hero .h-cell:nth-child(5) { animation-delay: 0.20s; }
-
-/* Theme toggle icon */
-.theme-btn {
-  background: transparent;
-  border: 1px solid var(--rule);
-  color: var(--ink-2);
-  width: 28px; height: 28px;
-  border-radius: 14px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: border-color 0.15s, color 0.15s;
+/* ─── Panels ─────────────────────────────────────────────── */
+.panels { display: grid; grid-template-columns: 1fr 1.25fr 1.05fr; gap: 12px; min-height: 0; }
+.col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 12px 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
 }
-.theme-btn:hover { border-color: var(--ink-2); color: var(--ink); }
+.panel.grow { flex: 1; }
+.ph { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.ph h2 { font-size: 13px; font-weight: 700; }
+.ph .pm { font-size: 11px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Status rows (health + automation) */
+.group-label { font-size: 10.5px; font-weight: 700; color: var(--text-4); text-transform: uppercase; letter-spacing: .08em; margin: 4px 0 2px; }
+.srow { display: grid; grid-template-columns: 14px 104px minmax(0,1fr); align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.srow:last-child { border-bottom: none; }
+.srow .d { width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
+.srow.ok .d { background: var(--good); } .srow.warn .d { background: var(--warn); } .srow.bad .d { background: var(--bad); }
+.srow .k { color: var(--text-3); white-space: nowrap; }
+.srow .v { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow .v a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--text-4); }
+
+/* Tables */
+.tbl-wrap { flex: 1; min-height: 0; overflow: hidden; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th { font-size: 10.5px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .05em; text-align: left; padding: 0 6px 6px 0; border-bottom: 1px solid var(--line); }
+td { padding: 6px 6px 6px 0; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+th.r, td.r { text-align: right; padding-right: 0; }
+tr:last-child td { border-bottom: none; }
+.sym { font-weight: 600; }
+.tag { display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--panel-2); color: var(--text-3); margin-left: 6px; vertical-align: 1px; }
+.empty td { color: var(--text-4); font-style: italic; }
+.more td { color: var(--text-3); font-size: 11.5px; text-align: center; }
+.foot-line { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* AI battle */
+.battle { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.fighter { background: var(--panel-2); border-radius: 8px; padding: 10px 12px; min-width: 0; border: 1px solid transparent; }
+.fighter.lead { border-color: var(--accent); }
+.fighter .fn { font-weight: 700; display: flex; justify-content: space-between; gap: 6px; }
+.fighter .fn small { font-weight: 600; font-size: 10.5px; color: var(--accent); white-space: nowrap; }
+.fighter .fp { font: 600 20px/1.2 var(--mono); margin: 2px 0; }
+.fighter .fs { font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Small screens: stack, and allow scrolling (a phone cannot fit it all). */
+@media (max-width: 1000px) {
+  body { overflow: auto; }
+  .app { height: auto; }
+  .kpis { grid-template-columns: 1fr 1fr; }
+  .kpi.main { grid-column: 1 / -1; }
+  .panels { grid-template-columns: 1fr; }
+  .tbl-wrap { max-height: 320px; }
+  .verdict .vbody { white-space: normal; }
+  .top { flex-wrap: wrap; }
+  .url-input { width: 140px; }
+}
+/* Short desktop screens: tighten so it still fits. */
+@media (min-width: 1001px) and (max-height: 760px) {
+  .app { gap: 9px; padding: 10px 16px 12px; }
+  .kpi { padding: 9px 14px; } .kpi .val { font-size: 22px; } .kpi.main .val { font-size: 25px; }
+  .panel { padding: 10px 14px; }
+  .srow { padding: 3px 0; } td { padding: 4px 6px 4px 0; }
+}
 </style>
 </head>
 <body data-theme="light">
+<div class="app">
 
-<div class="page">
-
-  <!-- ── Masthead ─────────────────────────────────────────── -->
-  <header class="masthead">
-    <div class="mast-title">NovaTrade<span class="dot">.</span></div>
-    <div class="mast-meta">
-      <input class="url-input" id="bot-url" type="text" placeholder="bot url"/>
-      <span class="live" id="status-live"><span id="status-text">connecting…</span></span>
-      <span id="last-update">—</span>
+  <!-- ── Header: one-sentence verdict ─────────────────────── -->
+  <header class="top">
+    <div class="brand">NovaTrade<span>.</span></div>
+    <div class="verdict" id="verdict">
+      <span class="vdot"></span>
+      <span class="vhead" id="verdict-head">Checking…</span>
+      <span class="vbody" id="verdict-body">Loading bot and deployment status</span>
     </div>
-    <div class="mast-actions">
-      <button class="btn" onclick="fetchAll()">refresh</button>
-      <button class="theme-btn" id="theme-toggle" title="toggle theme">◐</button>
+    <div class="meta">
+      <input class="url-input" id="bot-url" type="text" placeholder="bot url (optional)" title="Override the bot URL">
+      <span id="last-update">—</span>
+      <button class="btn" id="refresh-btn">Refresh</button>
+      <button class="btn" id="theme-toggle" title="Toggle light/dark">Dark</button>
     </div>
   </header>
 
-  <!-- ── Hero numbers ─────────────────────────────────────── -->
-  <section class="hero">
-    <div class="h-cell hero-main fade-in">
-      <div class="h-label">Combined Equity</div>
-      <div class="h-val" id="hero-equity">—</div>
-      <div class="h-sub" id="hero-equity-sub">stocks + crypto</div>
-    </div>
-    <div class="h-cell fade-in">
-      <div class="h-label">Day P&amp;L</div>
-      <div class="h-val" id="hero-day">—</div>
-      <div class="h-sub" id="hero-day-pct">—</div>
-    </div>
-    <div class="h-cell fade-in">
-      <div class="h-label">Closed Trades</div>
-      <div class="h-val" id="hero-closed">—</div>
-      <div class="h-sub" id="hero-closed-sub">deduped</div>
-    </div>
-    <div class="h-cell fade-in">
-      <div class="h-label">Win Rate</div>
-      <div class="h-val" id="hero-wr">—</div>
-      <div class="h-sub" id="hero-wr-sub">—</div>
-    </div>
-    <div class="h-cell fade-in">
-      <div class="h-label">Open Positions</div>
-      <div class="h-val" id="hero-pos">—</div>
-      <div class="h-sub" id="hero-pos-sub">—</div>
-    </div>
+  <!-- ── Key numbers ──────────────────────────────────────── -->
+  <section class="kpis">
+    <div class="kpi main"><div class="lbl">Total account value</div><div class="val" id="k-equity">—</div><div class="sub" id="k-equity-sub">stocks + crypto</div></div>
+    <div class="kpi"><div class="lbl">Today (stocks)</div><div class="val" id="k-day">—</div><div class="sub" id="k-day-sub">—</div></div>
+    <div class="kpi"><div class="lbl">Win rate</div><div class="val" id="k-wr">—</div><div class="sub" id="k-wr-sub">—</div></div>
+    <div class="kpi"><div class="lbl">Closed trades</div><div class="val" id="k-closed">—</div><div class="sub">all time</div></div>
+    <div class="kpi"><div class="lbl">Open positions</div><div class="val" id="k-pos">—</div><div class="sub" id="k-pos-sub">—</div></div>
   </section>
 
-  <!-- ── Health strip ─────────────────────────────────────── -->
-  <section class="health">
-    <span class="h-item" id="h-bot"><span class="dot"></span><span class="h-key">bot</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-turtle"><span class="dot"></span><span class="h-key">turtle</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-claude"><span class="dot"></span><span class="h-key">claude</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-grok"><span class="dot"></span><span class="h-key">grok</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-fees"><span class="dot"></span><span class="h-key">fees</span><span class="h-val">—</span></span>
-    <span class="h-item" id="h-data"><span class="dot"></span><span class="h-key">data</span><span class="h-val">—</span></span>
-  </section>
+  <!-- ── Panels ───────────────────────────────────────────── -->
+  <section class="panels">
 
-  <!-- ── State banner ─────────────────────────────────────── -->
-  <div class="banner" id="banner">loading…</div>
-
-  <!-- ── Two-column grid ──────────────────────────────────── -->
-  <div class="grid">
-
-    <!-- AI Battle -->
-    <div class="card">
-      <div class="card-head">
-        <h2 class="card-title">AI <span class="accent">Battle</span></h2>
-        <span class="card-meta" id="battle-meta">—</span>
+    <!-- Health -->
+    <div class="col">
+      <div class="panel grow">
+        <div class="ph"><h2>System health</h2><span class="pm" id="mode-line">—</span></div>
+        <div class="group-label">Trading</div>
+        <div id="health-trading"></div>
+        <div class="group-label" style="margin-top:8px">Deployment &amp; automation</div>
+        <div id="health-auto"></div>
       </div>
-      <div class="battle">
-        <div>
-          <div class="fighter-name">Claude <span class="role" id="claude-role">tactician</span></div>
-          <div class="fighter-pnl" id="claude-pnl">—</div>
-          <div class="fighter-stats">
-            <span><b id="claude-trades">0</b> trades</span>
-            <span><b id="claude-wr">—</b> win rate</span>
-            <span><b id="claude-wins">0</b> wins</span>
-            <span><b id="claude-open">0</b> open</span>
-          </div>
-          <div id="claude-leader-tag"></div>
+    </div>
+
+    <!-- Positions -->
+    <div class="col">
+      <div class="panel grow">
+        <div class="ph"><h2>Open positions</h2><span class="pm" id="pos-meta">—</span></div>
+        <div class="tbl-wrap">
+          <table>
+            <colgroup><col style="width:34%"><col style="width:16%"><col style="width:16%"><col style="width:17%"><col style="width:17%"></colgroup>
+            <thead><tr><th>Symbol</th><th>Market</th><th>AI</th><th class="r">Return</th><th class="r">P&amp;L</th></tr></thead>
+            <tbody id="pos-rows"><tr class="empty"><td colspan="5">Loading…</td></tr></tbody>
+          </table>
         </div>
-        <div>
-          <div class="fighter-name">Grok <span class="role" id="grok-role">tactician</span></div>
-          <div class="fighter-pnl" id="grok-pnl">—</div>
-          <div class="fighter-stats">
-            <span><b id="grok-trades">0</b> trades</span>
-            <span><b id="grok-wr">—</b> win rate</span>
-            <span><b id="grok-wins">0</b> wins</span>
-            <span><b id="grok-open">0</b> open</span>
-          </div>
-          <div id="grok-leader-tag"></div>
+        <div class="foot-line" id="wallet-line">—</div>
+      </div>
+    </div>
+
+    <!-- Performance -->
+    <div class="col">
+      <div class="panel">
+        <div class="ph"><h2>Claude vs Grok</h2><span class="pm" id="battle-meta">crypto, closed trades</span></div>
+        <div class="battle">
+          <div class="fighter" id="f-claude"><div class="fn">Claude <small id="claude-lead"></small></div><div class="fp" id="claude-pnl">—</div><div class="fs" id="claude-stats">—</div></div>
+          <div class="fighter" id="f-grok"><div class="fn">Grok <small id="grok-lead"></small></div><div class="fp" id="grok-pnl">—</div><div class="fs" id="grok-stats">—</div></div>
+        </div>
+      </div>
+      <div class="panel grow">
+        <div class="ph"><h2>Recent closed trades</h2><span class="pm" id="closes-meta">newest first</span></div>
+        <div class="tbl-wrap">
+          <table>
+            <colgroup><col style="width:30%"><col style="width:26%"><col style="width:20%"><col style="width:24%"></colgroup>
+            <thead><tr><th>When</th><th>Symbol</th><th class="r">Return</th><th class="r">P&amp;L</th></tr></thead>
+            <tbody id="close-rows"><tr class="empty"><td colspan="4">Loading…</td></tr></tbody>
+          </table>
         </div>
       </div>
     </div>
 
-    <!-- Strategy / Turtle -->
-    <div class="card">
-      <div class="card-head">
-        <h2 class="card-title">Strategy</h2>
-        <span class="card-meta" id="strat-meta">—</span>
-      </div>
-      <div class="strat-status" id="strat-status"><span class="turtle">—</span></div>
-      <div class="strat-detail" id="strat-detail">loading…</div>
-      <div class="gate-log" id="gate-log">
-        <div class="empty">no recent gate activity</div>
-      </div>
-    </div>
-
-    <!-- Stock positions -->
-    <div class="card">
-      <div class="card-head">
-        <h2 class="card-title">Stocks</h2>
-        <span class="card-meta" id="stock-meta">—</span>
-      </div>
-      <table class="pos-table" id="stock-table">
-        <thead>
-          <tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th></tr>
-        </thead>
-        <tbody id="stock-rows">
-          <tr><td colspan="3" class="empty">no open stock positions</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Crypto positions -->
-    <div class="card">
-      <div class="card-head">
-        <h2 class="card-title">Crypto</h2>
-        <span class="card-meta" id="crypto-meta">—</span>
-      </div>
-      <table class="pos-table" id="crypto-table">
-        <thead>
-          <tr><th>Symbol</th><th class="r">P&amp;L %</th><th class="r">P&amp;L $</th></tr>
-        </thead>
-        <tbody id="crypto-rows">
-          <tr><td colspan="3" class="empty">no open crypto positions</td></tr>
-        </tbody>
-      </table>
-      <div class="wallet-line" id="wallet-line">—</div>
-    </div>
-  </div>
-
-  <!-- ── Recent closes (full width) ───────────────────────── -->
-  <section class="full">
-    <div class="card-head" style="border:none;">
-      <h2 class="card-title">Recent <span class="accent">closes</span></h2>
-      <span class="card-meta">deduplicated · last 20</span>
-    </div>
-    <table class="closes-table">
-      <thead>
-        <tr>
-          <th>Time</th>
-          <th>Symbol</th>
-          <th>Action</th>
-          <th>Owner</th>
-          <th class="r">P&amp;L %</th>
-          <th class="r">P&amp;L $</th>
-        </tr>
-      </thead>
-      <tbody id="closes-rows">
-        <tr><td colspan="6" class="empty">no closes recorded</td></tr>
-      </tbody>
-    </table>
   </section>
-
-  <footer class="foot">
-    <span>NovaTrade · private terminal</span>
-    <span><a href="#" id="health-link">/health</a></span>
-  </footer>
 </div>
 
 <script>
 // ════════════════════════════════════════════════════════════
-// DATA
+// SOURCES
+//   Bot API (every 30 s): /stats /crypto_status /performance /history /leaderboard /strategy /health
+//   GitHub (public REST, every 5 min, ~4 calls → well under the 60/h unauthenticated limit):
+//     is main deployed on Railway? open Railway incidents? items waiting on the owner?
+//   Railway platform status (every 5 min): api.railwaystatus.com, best effort.
 // ════════════════════════════════════════════════════════════
 const BOT_DEFAULT = 'https://collaboration-production-cba3.up.railway.app';
+const GH = 'https://api.github.com/repos/yvesanana-sys/collaboration';
+const GH_WEB = 'https://github.com/yvesanana-sys/collaboration';
+const RAILWAY_CONTEXT = 'desirable-exploration - collaboration';
+const RAILWAY_STATUS_API = 'https://api.railwaystatus.com/status';
+const RAILWAY_STATUS_WEB = 'https://status.railway.com';
+// GitHub paths are joined from parts, never written as quoted slash-paths:
+// predeploy_check.py treats every quoted slash-path in this file as a bot route.
+const gh = (...parts) => [GH, ...parts].join('/');
+const ghWeb = (...parts) => [GH_WEB, ...parts].join('/');
+
 function getUrl() {
   const v = document.getElementById('bot-url').value.trim();
   if (v) return v.replace(/\/$/, '');
   const o = window.location.origin;
-  return (o && o !== 'null' && !o.startsWith('file://')) ? o : BOT_DEFAULT;
+  // Served from the bot itself → same origin; from GitHub Pages or a file → the Railway URL.
+  return (o && o !== 'null' && !o.startsWith('file://') && !o.includes('github.io')) ? o : BOT_DEFAULT;
 }
 async function apiFetch(path) {
   const r = await fetch(getUrl() + path, { mode: 'cors', headers: { 'Cache-Control': 'no-cache' } });
-  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  if (!r.ok) throw new Error(`${path} ${r.status}`);
+  return r.json();
+}
+async function jget(url) {
+  const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+  if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
 }
 
 // ════════════════════════════════════════════════════════════
 // FORMATTERS
 // ════════════════════════════════════════════════════════════
-const fmt$ = v => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmt$0 = v => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-const fmtSigned = v => (v >= 0 ? '+' : '') + fmt$(Math.abs(v));
-const fmtPct = v => (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
-const cls = v => v > 0 ? 'good' : v < 0 ? 'bad' : '';
-const setT = (id, txt, klass) => {
-  const e = document.getElementById(id);
-  if (!e) return;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const n = v => { const x = parseFloat(v); return isFinite(x) ? x : 0; };
+const fmt$ = v => '$' + n(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt$0 = v => '$' + n(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
+const fmtSigned = v => (n(v) >= 0 ? '+' : '−') + fmt$(Math.abs(n(v)));
+const fmtPct = v => (n(v) >= 0 ? '+' : '−') + Math.abs(n(v)).toFixed(2) + '%';
+const tone = v => n(v) > 0 ? 'good' : n(v) < 0 ? 'bad' : '';
+const $ = id => document.getElementById(id);
+function setT(id, txt, klass) {
+  const e = $(id); if (!e) return;
   e.textContent = txt;
-  if (klass !== undefined) {
-    e.classList.remove('good', 'bad', 'warn');
-    if (klass) e.classList.add(klass);
+  e.classList.remove('good', 'bad', 'warn');
+  if (klass) e.classList.add(klass);
+}
+function ago(date) {
+  if (!date) return '—';
+  const s = (Date.now() - date.getTime()) / 1000;
+  if (s < 90) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + ' min ago';
+  if (s < 86400) return Math.round(s / 3600) + ' h ago';
+  return Math.round(s / 86400) + ' d ago';
+}
+const parseTs = ts => { if (!ts) return null; const d = new Date(/Z|[+-]\d\d:?\d\d$/.test(ts) ? ts : ts + 'Z'); return isNaN(d) ? null : d; };
+const shortTime = d => d ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+
+function statusRow(state, key, valueHtml, title) {
+  return `<div class="srow ${state}" ${title ? `title="${esc(title)}"` : ''}><span class="d"></span><span class="k">${esc(key)}</span><span class="v">${valueHtml}</span></div>`;
+}
+
+// Hide rows that would overflow their panel and replace them with "+N more".
+function fitRows(tbody, colspan) {
+  const wrap = tbody.closest('.tbl-wrap');
+  if (!wrap || getComputedStyle(document.body).overflow !== 'hidden') return;
+  const rows = [...tbody.querySelectorAll('tr:not(.more)')];
+  rows.forEach(r => r.style.display = '');
+  tbody.querySelector('tr.more')?.remove();
+  const limit = wrap.getBoundingClientRect().bottom;
+  let hidden = 0;
+  for (let i = rows.length - 1; i >= 0 && rows[i].getBoundingClientRect().bottom > limit; i--) {
+    rows[i].style.display = 'none'; hidden++;
   }
-};
-const setHTML = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
-const tsToLocal = ts => {
-  if (!ts) return '—';
-  try {
-    const d = new Date(ts.endsWith('Z') ? ts : ts + 'Z');
-    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  } catch { return '—'; }
-};
+  if (hidden) {
+    // make room for the "+N more" line itself
+    const vis = rows.filter(r => r.style.display !== 'none');
+    if (vis.length) { vis[vis.length - 1].style.display = 'none'; hidden++; }
+    tbody.insertAdjacentHTML('beforeend', `<tr class="more"><td colspan="${colspan}">+${hidden} more</td></tr>`);
+  }
+}
 
 // ════════════════════════════════════════════════════════════
-// RENDERERS
+// STATE (latest results, so the verdict can combine both sources)
 // ════════════════════════════════════════════════════════════
-function renderHero(stats, crypto, perf, leaderboard) {
-  const stockEq = parseFloat(stats?.equity || 0);
-  const cryptoEq = parseFloat(crypto?.wallet?.total_value || 0);
-  const combined = stockEq + cryptoEq;
-  setT('hero-equity', fmt$(combined));
-  setT('hero-equity-sub', `stocks ${fmt$0(stockEq)} · crypto ${fmt$0(cryptoEq)}`);
+const state = { bot: null, auto: null };
 
-  // Day P&L: stock daily (claude+grok). Crypto day P&L not exposed by
-  // /crypto_status, so we label this as "stocks" to be honest.
-  const stockDay = parseFloat(stats?.claude_daily_pnl || 0) + parseFloat(stats?.grok_daily_pnl || 0);
-  const day = stockDay;
-  setT('hero-day', fmtSigned(day), day > 0 ? 'good' : day < 0 ? 'bad' : '');
-  const dayPct = stockEq ? (day / (stockEq - day)) * 100 : 0;
-  setT('hero-day-pct', `stocks · ${isFinite(dayPct) ? fmtPct(dayPct) : '—'}`);
+// ════════════════════════════════════════════════════════════
+// RENDER — trading
+// ════════════════════════════════════════════════════════════
+function renderKpis(stats, crypto, perf) {
+  const stockEq = n(stats?.equity), cryptoEq = n(crypto?.wallet?.total_value);
+  setT('k-equity', (stats?.error && crypto?.error) ? '—' : fmt$(stockEq + cryptoEq));
+  setT('k-equity-sub', `Stocks ${fmt$0(stockEq)} · Crypto ${fmt$0(cryptoEq)}`);
 
-  // Closed trades (from perf, which reads persistent trade_history only — no dupes)
-  const totalClosed = perf?.summary?.total_closed_trades || 0;
-  setT('hero-closed', totalClosed);
-  const wr = parseFloat(perf?.summary?.win_rate_pct || 0);
-  setT('hero-wr', totalClosed > 0 ? wr.toFixed(0) + '%' : '—', totalClosed > 0 ? (wr >= 50 ? 'good' : 'bad') : '');
+  const day = n(stats?.claude_daily_pnl) + n(stats?.grok_daily_pnl);
+  setT('k-day', stats?.error ? '—' : fmtSigned(day), tone(day));
+  const base = stockEq - day;
+  setT('k-day-sub', base > 0 ? `${fmtPct(day / base * 100)} of stock equity` : 'crypto day P&L not reported');
+
+  const closed = perf?.summary?.total_closed_trades || 0;
+  setT('k-closed', String(closed));
+  const wr = n(perf?.summary?.win_rate_pct);
   const wins = (perf?.by_ai?.claude?.wins || 0) + (perf?.by_ai?.grok?.wins || 0);
-  setT('hero-wr-sub', totalClosed > 0 ? `${wins} wins · ${totalClosed - wins} losses` : 'no closes yet');
+  setT('k-wr', closed ? wr.toFixed(0) + '%' : '—', closed ? (wr >= 50 ? 'good' : 'bad') : '');
+  setT('k-wr-sub', closed ? `${wins} won · ${closed - wins} lost` : 'no closed trades yet');
 
-  const stockPos = (stats?.positions || []).length;
-  const cryptoPos = crypto?.position_count || 0;
-  setT('hero-pos', (stockPos + cryptoPos));
-  setT('hero-pos-sub', `${stockPos} stock · ${cryptoPos} crypto`);
+  const sp = (stats?.positions || []).length, cp = crypto?.position_count ?? Object.keys(crypto?.bot_positions || {}).length;
+  setT('k-pos', String(sp + cp));
+  setT('k-pos-sub', `${sp} stock · ${cp} crypto`);
 }
 
-function renderHealth(stats, crypto, strategist, perf) {
-  // bot
-  const botEl = document.getElementById('h-bot');
-  botEl.querySelector('.h-val').textContent = stats?.error ? 'error' : 'online';
-  botEl.className = 'h-item ' + (stats?.error ? 'bad' : '');
+function renderTradingHealth(stats, crypto, strategist) {
+  const rows = [];
+  // Bot reachable
+  rows.push(stats?.error
+    ? statusRow('bad', 'Bot', 'Not responding', stats.error)
+    : statusRow('ok', 'Bot', 'Online'));
 
-  // turtle: are both AIs using Turtle?
-  const claudeS = strategist?.ais?.claude?.current_strategy;
-  const grokS = strategist?.ais?.grok?.current_strategy;
-  const claudeTurtle = claudeS?.strategy_type === 'turtle';
-  const grokTurtle = grokS?.strategy_type === 'turtle';
-  const turtleEl = document.getElementById('h-turtle');
-  let tStat, tCls;
-  if (claudeTurtle && grokTurtle) { tStat = 'both'; tCls = ''; }
-  else if (claudeTurtle || grokTurtle) { tStat = claudeTurtle ? 'claude only' : 'grok only'; tCls = 'warn'; }
-  else { tStat = 'classic'; tCls = 'off'; }
-  turtleEl.querySelector('.h-val').textContent = tStat;
-  turtleEl.className = 'h-item ' + tCls;
-
-  // claude credits / health
-  const cHealthy = stats?.claude_healthy && stats?.claude_credits_ok;
-  const cEl = document.getElementById('h-claude');
-  cEl.querySelector('.h-val').textContent = cHealthy ? 'ok' : (stats?.claude_fail_reason || 'unknown');
-  cEl.className = 'h-item ' + (cHealthy ? '' : 'bad');
-
-  // grok credits / health
-  const gHealthy = stats?.grok_healthy && stats?.grok_credits_ok;
-  const gEl = document.getElementById('h-grok');
-  gEl.querySelector('.h-val').textContent = gHealthy ? 'ok' : (stats?.grok_fail_reason || 'unknown');
-  gEl.className = 'h-item ' + (gHealthy ? '' : 'bad');
-
-  // fees — show effective round-trip rate + BNB discount status
-  const feesEl = document.getElementById('h-fees');
-  if (feesEl) {
-    const f = crypto?.fees;
-    if (f) {
-      const rtPct = (f.round_trip * 100).toFixed(3);
-      const bnb = f.bnb_active ? '🔶 BNB on' : 'no BNB';
-      feesEl.querySelector('.h-val').textContent = `${rtPct}% rt · ${bnb}`;
-      feesEl.className = 'h-item ' + (f.bnb_active ? '' : 'warn');
-    } else {
-      feesEl.querySelector('.h-val').textContent = 'unknown';
-      feesEl.className = 'h-item off';
-    }
-  }
-
-  // data quality — flag if leaderboard trades > perf trades (the duplicate bug)
-  const dataEl = document.getElementById('h-data');
-  const perfTrades = perf?.summary?.total_closed_trades || 0;
-  // Note: leaderboard counts CRYPTO ONLY, perf counts ALL. Hard to dedup cleanly here.
-  // Use a simpler signal: data is "ok" unless an endpoint errored.
-  const dataOk = !stats?.error && !crypto?.error;
-  dataEl.querySelector('.h-val').textContent = dataOk ? 'ok' : 'partial';
-  dataEl.className = 'h-item ' + (dataOk ? '' : 'warn');
-}
-
-function renderBanner(stats) {
-  const el = document.getElementById('banner');
-  if (!stats || stats.error) {
-    el.textContent = stats?.error || 'no data';
-    el.className = 'banner bad';
-    return;
-  }
-  if (stats.ai_sleeping) {
-    el.textContent = `sleeping — ${stats.sleep_reason || 'no reason given'}`;
-    el.className = 'banner sleep';
+  // Engine mode
+  if (!stats?.error) {
+    const sleeping = !!stats.ai_sleeping;
+    const why = sleeping ? (stats.sleep_reason || '') : (stats.wake_reason || '');
+    rows.push(statusRow(sleeping ? 'ok' : 'ok', 'Engine', `${sleeping ? 'Resting' : 'Active'}${why ? ' — ' + esc(why) : ''}`, why));
+    setT('mode-line', sleeping ? 'AIs resting (by design)' : 'AIs active');
   } else {
-    el.textContent = stats.wake_reason ? `active — ${stats.wake_reason}` : 'active';
-    el.className = 'banner active';
+    setT('mode-line', '—');
   }
-}
 
-function renderBattle(lb, crypto) {
-  if (!lb || lb.error) {
-    setT('battle-meta', 'leaderboard unavailable');
-    return;
+  // AI providers
+  for (const [name, key] of [['Claude AI', 'claude'], ['Grok AI', 'grok']]) {
+    if (stats?.error) { rows.push(statusRow('', name, 'Unknown')); continue; }
+    const ok = stats?.[`${key}_healthy`] && stats?.[`${key}_credits_ok`];
+    const reason = stats?.[`${key}_fail_reason`] || '';
+    const credit = /credit|billing|spending|balance/i.test(reason) || stats?.[`${key}_credits_ok`] === false;
+    rows.push(ok
+      ? statusRow('ok', name, 'Working')
+      : statusRow('bad', name, credit ? 'Out of credits — calls failing' : esc(reason || 'Not working'), reason));
   }
-  setT('battle-meta', `${lb.total_closed || 0} crypto closes · pool ${(lb.pool_split?.claude_pct * 100 || 50).toFixed(0)}/${(lb.pool_split?.grok_pct * 100 || 50).toFixed(0)}`);
 
-  for (const [ai, side] of [['claude', lb.claude || {}], ['grok', lb.grok || {}]]) {
-    const pnl = parseFloat(side.total_pnl || 0);
-    setT(`${ai}-pnl`, side.trades ? fmtSigned(pnl) : '—', pnl > 0 ? 'good' : pnl < 0 ? 'bad' : '');
-    setT(`${ai}-trades`, side.trades || 0);
-    // win_rate is already 0–100 from /leaderboard (single multiplication)
-    setT(`${ai}-wr`, side.trades ? (side.win_rate || 0).toFixed(0) + '%' : '—');
-    setT(`${ai}-wins`, side.wins || 0);
-    setT(`${ai}-open`, side.open_positions || 0);
-    const lt = document.getElementById(`${ai}-leader-tag`);
-    if (lb.leader === ai) {
-      lt.innerHTML = `<span class="leader-tag">leading by ${fmt$(lb.margin_usd || 0)}</span>`;
-    } else {
-      lt.innerHTML = '';
-    }
-  }
-}
-
-function renderStrategy(strategist) {
-  // Three states we care about:
-  //   1. Real error (endpoint failed, module missing)  → red "error"
-  //   2. enabled === false (Phase A by design)         → show playbook + "dormant" tag
-  //   3. enabled === true                              → full strategist info
-  // In ALL cases where we have a payload, render the current playbook —
-  // because the playbook is active even when the strategist (the thing
-  // that rewrites the playbook) is dormant.
-
-  const statusEl = document.getElementById('strat-status');
-
+  // Strategy
   if (!strategist || strategist.error) {
-    // Genuine error fetching /strategy
-    setT('strat-status', '—');
-    setT('strat-detail', strategist?.error
-      ? `endpoint error: ${strategist.error}`
-      : 'strategist unreachable');
-    setT('strat-meta', 'error');
-    return;
-  }
-
-  // Module unloaded? Show that clearly — different from "disabled by design"
-  if (strategist.reason === "module not loaded") {
-    statusEl.innerHTML = '<span>—</span> Not loaded';
-    statusEl.className = 'strat-status classic';
-    setT('strat-detail', 'strategic_brain module not imported on bot');
-    setT('strat-meta', '');
-    return;
-  }
-
-  // We have a payload. Read the current playbook (active even if strategist is dormant).
-  const cs = strategist?.ais?.claude?.current_strategy || {};
-  const gs = strategist?.ais?.grok?.current_strategy || {};
-  const cT = cs.strategy_type === 'turtle';
-  const gT = gs.strategy_type === 'turtle';
-  const isDormant = strategist.enabled === false;
-  const phaseTag  = isDormant ? ` · <span style="color:var(--ink-3);font-size:11px;font-family:var(--font-body);font-weight:400;">dormant (Phase A)</span>` : '';
-
-  if (cT && gT) {
-    statusEl.innerHTML = `<span class="turtle">🐢</span> Turtle${phaseTag}`;
-    statusEl.className = 'strat-status active';
-    setT('strat-detail', `System 1 · ${cs.rules?.entry_donchian_period || 20}d entry · ${cs.rules?.exit_donchian_period || 10}d exit · 2N stop · 1% risk`);
-    setT('strat-meta', isDormant ? `playbook frozen · v${cs.version || 1}` : `v${cs.version || 1}`);
-  } else if (cT || gT) {
-    statusEl.innerHTML = `<span class="turtle">🐢</span> Turtle (partial)${phaseTag}`;
-    statusEl.className = 'strat-status active';
-    setT('strat-detail', `Only ${cT ? 'Claude' : 'Grok'} on Turtle. Other still on classic.`);
-    setT('strat-meta', isDormant ? 'playbook frozen · partial' : 'partial');
-  } else if (cs.name || gs.name) {
-    statusEl.innerHTML = `<span>—</span> Classic${phaseTag}`;
-    statusEl.className = 'strat-status classic';
-    setT('strat-detail', cs.name || gs.name || 'Default playbook · % stops · fixed TP');
-    setT('strat-meta', isDormant ? `playbook frozen · v${cs.version || 0}` : `v${cs.version || 0}`);
+    rows.push(statusRow('warn', 'Strategy', 'Unavailable', strategist?.error));
   } else {
-    // Phase A but state files haven't been initialized yet
-    statusEl.innerHTML = `<span>—</span> No playbook yet${phaseTag}`;
-    statusEl.className = 'strat-status classic';
-    setT('strat-detail', isDormant
-      ? 'Phase A — strategist plumbing only, no playbooks written yet'
-      : 'awaiting first strategist activation');
-    setT('strat-meta', '');
+    const cT = strategist?.ais?.claude?.current_strategy?.strategy_type === 'turtle';
+    const gT = strategist?.ais?.grok?.current_strategy?.strategy_type === 'turtle';
+    const name = cT && gT ? 'Turtle (both AIs)' : cT || gT ? `Turtle (${cT ? 'Claude' : 'Grok'} only)` : 'Classic';
+    rows.push(statusRow(cT || gT ? 'ok' : '', 'Strategy', name + (strategist.enabled === false ? ' · playbook frozen' : '')));
   }
+
+  // Fees
+  const f = crypto?.fees;
+  rows.push(f
+    ? statusRow(f.bnb_active ? 'ok' : 'warn', 'Crypto fees', `${(n(f.round_trip) * 100).toFixed(3)}% per round trip · BNB discount ${f.bnb_active ? 'on' : 'off'}`)
+    : statusRow('', 'Crypto fees', 'Unknown'));
+
+  // Data completeness
+  const missing = [['stats', stats], ['crypto', crypto], ['strategy', strategist]].filter(([, d]) => d?.error).map(([k]) => k);
+  rows.push(missing.length ? statusRow('warn', 'Data', `Partial — missing ${missing.join(', ')}`) : statusRow('ok', 'Data', 'Complete'));
+
+  $('health-trading').innerHTML = rows.join('');
 }
 
-function renderStocks(stats) {
-  const positions = stats?.positions || [];
-  const tbody = document.getElementById('stock-rows');
-  if (!positions.length) {
-    tbody.innerHTML = '<tr><td colspan="3" class="empty">no open stock positions</td></tr>';
-    setT('stock-meta', '');
-    return;
-  }
-  let totalPnl = 0;
-  let rows = '';
-  for (const p of positions) {
-    const pnlPct = parseFloat(p.pnl_pct || 0);
-    const pnl = parseFloat(p.pnl || 0);
-    totalPnl += pnl;
-    const own = p.owner === 'claude' ? '<span class="ownr">claude</span>' :
-                p.owner === 'grok'   ? '<span class="ownr">grok</span>'   : '';
-    rows += `<tr>
-      <td><span class="sym">${p.symbol}</span>${own}</td>
-      <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
-      <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
-    </tr>`;
-  }
-  tbody.innerHTML = rows;
-  setT('stock-meta', `${positions.length} · total ${fmtSigned(totalPnl)}`);
-}
-
-function renderCrypto(crypto) {
-  const positions = crypto?.bot_positions || {};
-  const symbols = Object.keys(positions);
-  const tbody = document.getElementById('crypto-rows');
-  if (!symbols.length) {
-    tbody.innerHTML = '<tr><td colspan="3" class="empty">no open crypto positions</td></tr>';
-    setT('crypto-meta', '');
+function renderPositions(stats, crypto) {
+  const list = [];
+  for (const p of stats?.positions || []) list.push({ sym: p.symbol, mkt: 'Stock', ai: p.owner, pct: n(p.pnl_pct), usd: n(p.pnl), turtle: false });
+  for (const [sym, p] of Object.entries(crypto?.bot_positions || {})) list.push({ sym, mkt: 'Crypto', ai: p.owner, pct: n(p.pnl_pct), usd: n(p.pnl_usd), turtle: p.strategy_type === 'turtle' });
+  list.sort((a, b) => Math.abs(b.usd) - Math.abs(a.usd));
+  const tb = $('pos-rows');
+  if (!list.length) {
+    tb.innerHTML = `<tr class="empty"><td colspan="5">${stats?.error && crypto?.error ? 'Bot not responding' : 'No open positions'}</td></tr>`;
+    setT('pos-meta', '');
   } else {
-    let totalPnl = 0;
-    let rows = '';
-    for (const sym of symbols) {
-      const p = positions[sym];
-      const pnlPct = parseFloat(p.pnl_pct || 0);
-      const pnl = parseFloat(p.pnl_usd || 0);
-      totalPnl += pnl;
-      const isTurtle = p.strategy_type === 'turtle';
-      const own = p.owner === 'claude' ? '<span class="ownr">claude</span>' :
-                  p.owner === 'grok'   ? '<span class="ownr">grok</span>'   : '';
-      const turtleTag = isTurtle ? '<span class="ownr" style="color:var(--accent)">🐢</span>' : '';
-      rows += `<tr>
-        <td><span class="sym">${sym}</span>${own}${turtleTag}</td>
-        <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
-        <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
-      </tr>`;
-    }
-    tbody.innerHTML = rows;
-    setT('crypto-meta', `${symbols.length} · total ${fmtSigned(totalPnl)}`);
+    const total = list.reduce((s, p) => s + p.usd, 0);
+    tb.innerHTML = list.map(p => `<tr>
+      <td><span class="sym">${esc(p.sym)}</span>${p.turtle ? '<span class="tag">Turtle</span>' : ''}</td>
+      <td class="muted">${p.mkt}</td>
+      <td class="muted">${esc(p.ai ? p.ai[0].toUpperCase() + p.ai.slice(1) : '—')}</td>
+      <td class="r num ${tone(p.pct)}">${fmtPct(p.pct)}</td>
+      <td class="r num ${tone(p.usd)}">${fmtSigned(p.usd)}</td></tr>`).join('');
+    setT('pos-meta', `${list.length} open · unrealised ${fmtSigned(total)}`);
+    fitRows(tb, 5);
   }
-  // Wallet line always shown
-  const usdt = parseFloat(crypto?.wallet?.usdt_free || 0);
-  const total = parseFloat(crypto?.wallet?.total_value || 0);
-  setT('wallet-line', `${fmt$(total)} wallet · ${fmt$(usdt)} USDT free`);
+  setT('wallet-line', crypto?.error ? 'Crypto wallet: unavailable'
+    : `Crypto wallet ${fmt$(crypto?.wallet?.total_value)} · ${fmt$(crypto?.wallet?.usdt_free)} USDT available to trade`);
 }
 
-function renderCloses(history) {
-  const trades = (history || []).filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined);
-  const tbody = document.getElementById('closes-rows');
-  if (!trades.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">no closes recorded</td></tr>';
-    return;
+function renderBattle(lb) {
+  if (!lb || lb.error) { setT('battle-meta', 'unavailable'); return; }
+  const c = n(lb.pool_split?.claude_pct || .5) * 100, g = n(lb.pool_split?.grok_pct || .5) * 100;
+  setT('battle-meta', `${lb.total_closed || 0} crypto trades · capital split ${c.toFixed(0)}/${g.toFixed(0)}`);
+  for (const ai of ['claude', 'grok']) {
+    const s = lb[ai] || {};
+    const pnl = n(s.total_pnl);
+    setT(`${ai}-pnl`, s.trades ? fmtSigned(pnl) : '—', tone(pnl));
+    setT(`${ai}-stats`, s.trades ? `${s.trades} trades · ${n(s.win_rate).toFixed(0)}% won · ${s.open_positions || 0} open` : 'no closed trades yet');
+    const lead = lb.leader === ai;
+    $(`f-${ai}`).classList.toggle('lead', lead);
+    setT(`${ai}-lead`, lead ? `Leads by ${fmt$(lb.margin_usd)}` : '');
   }
-  // /history returns newest first already; just take top 20
-  const recent = trades.slice(0, 20);
-  let rows = '';
-  for (const t of recent) {
-    const pnl = parseFloat(t.pnl_usd || 0);
-    const pnlPct = parseFloat(t.pnl_pct || 0);
-    const own = t.owner === 'claude' ? '<span class="ownr">claude</span>' :
-                t.owner === 'grok'   ? '<span class="ownr">grok</span>'   :
-                t.owner === 'shared' ? '<span class="ownr">shared</span>' :
-                                       `<span class="ownr">${t.owner || 'bot'}</span>`;
-    rows += `<tr>
-      <td>${tsToLocal(t.time)}</td>
-      <td><span class="sym">${t.symbol || '—'}</span></td>
-      <td><span class="act">${t.action || '—'}</span></td>
-      <td>${own}</td>
-      <td class="r ${pnlPct > 0 ? 'good' : pnlPct < 0 ? 'bad' : ''}">${fmtPct(pnlPct)}</td>
-      <td class="r ${pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''}">${fmtSigned(pnl)}</td>
-    </tr>`;
-  }
-  tbody.innerHTML = rows;
+}
+
+function renderCloses(hist) {
+  const trades = (hist?.trades || []).filter(t => t.pnl_usd !== null && t.pnl_usd !== undefined).slice(0, 20);
+  const tb = $('close-rows');
+  if (!trades.length) { tb.innerHTML = `<tr class="empty"><td colspan="4">${hist?.error ? 'History unavailable' : 'No closed trades yet'}</td></tr>`; return; }
+  tb.innerHTML = trades.map(t => `<tr>
+    <td class="muted">${shortTime(parseTs(t.time))}</td>
+    <td><span class="sym">${esc(t.symbol || '—')}</span></td>
+    <td class="r num ${tone(t.pnl_pct)}">${fmtPct(t.pnl_pct)}</td>
+    <td class="r num ${tone(t.pnl_usd)}">${fmtSigned(t.pnl_usd)}</td></tr>`).join('');
+  fitRows(tb, 4);
 }
 
 // ════════════════════════════════════════════════════════════
-// MAIN FETCH LOOP
+// AUTOMATION — deploys, Railway, items waiting on the owner
+// Mirrors .github/scripts/railway_deploy_monitor.py
 // ════════════════════════════════════════════════════════════
-async function fetchAll() {
-  const statusText = document.getElementById('status-text');
-  const statusLive = document.getElementById('status-live');
-  statusText.textContent = 'syncing…';
-  statusLive.className = 'live warn';
+function flattenComponents(cs, out) {
+  for (const c of cs || []) {
+    const kids = c?.components || c?.children || [];
+    if (kids.length) flattenComponents(kids, out); else if (c) out.push([String(c.name || '?'), String(c.status || '').toLowerCase()]);
+  }
+  return out;
+}
+const severity = t => /major|outage|down|critical/.test(t) ? 2 : /partial|degraded|minor|maintenance|investigating|identified/.test(t) ? 1 : 0;
+
+async function fetchAutomation() {
+  const out = {};
+  // 1) Is main live on Railway?
   try {
-    const [stats, crypto, perf, hist, leaderboard, strategist] = await Promise.all([
-      apiFetch('/stats').catch(e => ({ error: e.message })),
-      apiFetch('/crypto_status').catch(e => ({ error: e.message })),
-      apiFetch('/performance').catch(e => ({ error: e.message })),
-      apiFetch('/history?limit=30').catch(e => ({ error: e.message })),
-      apiFetch('/leaderboard').catch(e => ({ error: e.message })),
-      apiFetch('/strategy').catch(e => ({ error: e.message })),
-    ]);
+    const head = await jget(gh('commits', 'main'));
+    const sts = (await jget(gh('commits', head.sha, 'statuses'))).filter(s => s.context === RAILWAY_CONTEXT)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const when = new Date(head.commit.committer.date);
+    const ageMin = (Date.now() - when) / 60000;
+    const st = sts[0];
+    out.deploy = { sha: head.sha.slice(0, 7), when, msg: head.commit.message.split('\n')[0] };
+    if (st?.state === 'success') Object.assign(out.deploy, { state: 'ok', text: `Latest code is live (${ago(new Date(st.created_at))})` });
+    else if (st && (st.state === 'failure' || st.state === 'error')) Object.assign(out.deploy, { state: 'bad', text: 'Latest deploy FAILED on Railway' });
+    else if (st) {
+      const m = (Date.now() - new Date(st.created_at)) / 60000;
+      Object.assign(out.deploy, m > 25 ? { state: 'bad', text: `Deploy stuck for ${Math.round(m)} min` } : { state: 'warn', text: 'Deploying latest code…' });
+    } else if (ageMin < 10) Object.assign(out.deploy, { state: 'warn', text: 'Waiting for Railway to start deploying' });
+    else Object.assign(out.deploy, { state: 'bad', text: `Railway has not picked up the latest code (${ago(when)})` });
+  } catch (e) { out.deploy = { state: '', text: 'Unknown (GitHub not reachable)' }; }
 
-    renderHero(stats, crypto, perf, leaderboard);
-    renderHealth(stats, crypto, strategist, perf);
-    renderBanner(stats);
-    renderBattle(leaderboard, crypto);
-    renderStrategy(strategist);
-    renderStocks(stats);
-    renderCrypto(crypto);
-    renderCloses(hist?.trades || []);
+  // 2) Railway platform
+  try {
+    const d = await jget(RAILWAY_STATUS_API);
+    let worst = 0; const notes = [];
+    for (const [name, st] of flattenComponents(d.components, [])) { const s = severity(st); if (s) notes.push(`${name}: ${st.replace(/_/g, ' ')}`); worst = Math.max(worst, s); }
+    for (const i of d.incidents || []) {
+      if (/resolved|completed|postmortem/i.test(i?.status || '')) continue;
+      worst = Math.max(worst, severity(String(i.impact || '')) || 1);
+      notes.unshift(i.name || i.title || 'Open incident');
+    }
+    const uniq = [...new Set(notes)];
+    out.platform = worst === 2 ? { state: 'bad', text: 'Outage — ' + (uniq[0] || 'major incident'), detail: uniq.join('; ') }
+      : worst === 1 ? { state: 'warn', text: 'Degraded — ' + (uniq[0] || 'minor incident'), detail: uniq.join('; ') }
+      : { state: 'ok', text: 'All systems operational' };
+  } catch (e) { out.platform = { state: '', text: 'Status unavailable from browser — open status page' }; }
 
-    statusLive.className = 'live';
-    statusText.textContent = 'live';
-    document.getElementById('last-update').textContent =
-      'updated ' + new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  } catch (e) {
-    statusLive.className = 'live offline';
-    statusText.textContent = 'offline';
-    document.getElementById('last-update').textContent = 'error: ' + e.message;
+  // 3) Items waiting on the owner, and the automation's own alerts
+  try {
+    const [issues, pulls] = await Promise.all([jget(gh('issues?state=open&per_page=100')), jget(gh('pulls?state=open&per_page=50'))]);
+    const real = issues.filter(i => !i.pull_request);
+    out.railwayIssue = real.find(i => (i.labels || []).some(l => l.name === 'railway-deploy'));
+    out.incidents = real.filter(i => (i.labels || []).some(l => l.name === 'incident'));
+    out.ownerIssues = real.filter(i => /\[autofix-needs-owner\]/i.test(i.title));
+    out.autofixPRs = pulls.filter(p => p.head?.ref?.startsWith('autofix/'));
+    out.selfRepairPRs = pulls.filter(p => p.head?.ref?.startsWith('auto-fix/'));
+  } catch (e) { out.ghError = true; }
+  return out;
+}
+
+function renderAutomation(a) {
+  const rows = [];
+  const link = (url, text) => `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(text)}</a>`;
+  const d = a.deploy || { state: '', text: 'Unknown' };
+  rows.push(statusRow(d.state, 'Deploys', d.sha ? link(ghWeb('commit', d.sha), d.text) : esc(d.text), d.msg ? `main ${d.sha}: ${d.msg}` : ''));
+  const p = a.platform || { state: '', text: 'Unknown' };
+  rows.push(statusRow(p.state, 'Railway', link(RAILWAY_STATUS_WEB, p.text), p.detail));
+  if (a.ghError) {
+    rows.push(statusRow('', 'Autofix', 'Unknown (GitHub not reachable)'));
+  } else {
+    const waiting = (a.autofixPRs?.length || 0) + (a.ownerIssues?.length || 0) + (a.selfRepairPRs?.length || 0);
+    const bits = [];
+    if (a.autofixPRs?.length) bits.push(`${a.autofixPRs.length} fix PR${a.autofixPRs.length > 1 ? 's' : ''} to review`);
+    if (a.ownerIssues?.length) bits.push(`${a.ownerIssues.length} decision${a.ownerIssues.length > 1 ? 's' : ''} needed`);
+    if (a.selfRepairPRs?.length) bits.push(`${a.selfRepairPRs.length} self-repair PR${a.selfRepairPRs.length > 1 ? 's' : ''}`);
+    rows.push(statusRow(waiting ? 'warn' : 'ok', 'Needs you',
+      waiting ? link(ghWeb('pulls'), bits.join(' · ')) : 'Nothing waiting'));
+    const inc = a.incidents || [];
+    rows.push(inc.length
+      ? statusRow('bad', 'Watchdog', link(inc[0].html_url, inc[0].title.replace(/^\W+\s*/, '')) + (inc.length > 1 ? ` (+${inc.length - 1})` : ''))
+      : statusRow('ok', 'Watchdog', 'No open incidents'));
   }
+  $('health-auto').innerHTML = rows.join('');
 }
 
 // ════════════════════════════════════════════════════════════
-// INIT
+// VERDICT — one plain-English sentence for the whole page
 // ════════════════════════════════════════════════════════════
+function renderVerdict() {
+  const red = [], amber = [];
+  const s = state.bot, a = state.auto;
+  if (s) {
+    if (s.stats?.error) red.push('the bot is not responding');
+    for (const [k, name] of [['claude', 'Claude'], ['grok', 'Grok']]) {
+      if (s.stats && !s.stats.error && !(s.stats[`${k}_healthy`] && s.stats[`${k}_credits_ok`])) amber.push(`${name} AI is not working`);
+    }
+  }
+  if (a) {
+    if (a.platform?.state === 'bad') red.push('Railway is having an outage');
+    else if (a.platform?.state === 'warn') amber.push('Railway is degraded');
+    if (a.deploy?.state === 'bad') red.push(/FAILED/.test(a.deploy.text) ? 'the latest deploy failed on Railway' : 'the latest code is not live on Railway yet');
+    else if (a.deploy?.state === 'warn') amber.push('a deploy is in progress');
+    if (a.incidents?.length) red.push('the watchdog opened an incident');
+    const waiting = (a.autofixPRs?.length || 0) + (a.ownerIssues?.length || 0);
+    if (waiting) amber.push(`${waiting} item${waiting > 1 ? 's' : ''} waiting for your review`);
+  }
+  const v = $('verdict');
+  const cap = t => t.charAt(0).toUpperCase() + t.slice(1);
+  if (!s && !a) return;
+  if (red.length) { v.className = 'verdict bad'; setT('verdict-head', 'Action needed'); setT('verdict-body', cap([...red, ...amber].join('; ')) + '.'); }
+  else if (amber.length) { v.className = 'verdict warn'; setT('verdict-head', 'Running, with warnings'); setT('verdict-body', cap(amber.join('; ')) + '.'); }
+  else { v.className = 'verdict ok'; setT('verdict-head', 'All systems normal'); setT('verdict-body', 'Bot online, AIs working, latest code live on Railway, nothing waiting on you.'); }
+  $('verdict').title = $('verdict-body').textContent;
+}
+
+// ════════════════════════════════════════════════════════════
+// LOOPS
+// ════════════════════════════════════════════════════════════
+async function fetchBot() {
+  const [stats, crypto, perf, hist, leaderboard, strategist] = await Promise.all([
+    apiFetch('/stats').catch(e => ({ error: e.message })),
+    apiFetch('/crypto_status').catch(e => ({ error: e.message })),
+    apiFetch('/performance').catch(e => ({ error: e.message })),
+    apiFetch('/history?limit=30').catch(e => ({ error: e.message })),
+    apiFetch('/leaderboard').catch(e => ({ error: e.message })),
+    apiFetch('/strategy').catch(e => ({ error: e.message })),
+  ]);
+  state.bot = { stats, crypto, perf, hist, leaderboard, strategist };
+  renderKpis(stats, crypto, perf);
+  renderTradingHealth(stats, crypto, strategist);
+  renderPositions(stats, crypto);
+  renderBattle(leaderboard);
+  renderCloses(hist);
+  renderVerdict();
+  setT('last-update', 'Updated ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
+}
+async function fetchAuto() {
+  state.auto = await fetchAutomation();
+  renderAutomation(state.auto);
+  renderVerdict();
+}
+function refreshAll() { fetchBot(); fetchAuto(); }
+
 (function init() {
-  // Restore saved bot URL & theme
-  const savedUrl = localStorage.getItem('nt-bot-url');
-  if (savedUrl) document.getElementById('bot-url').value = savedUrl;
-  document.getElementById('bot-url').addEventListener('change', e => {
-    localStorage.setItem('nt-bot-url', e.target.value.trim());
-    fetchAll();
+  try { const u = localStorage.getItem('nt-bot-url'); if (u) $('bot-url').value = u; } catch {}
+  $('bot-url').addEventListener('change', e => { try { localStorage.setItem('nt-bot-url', e.target.value.trim()); } catch {} fetchBot(); });
+  let theme = 'light'; try { theme = localStorage.getItem('nt-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); } catch {}
+  document.body.setAttribute('data-theme', theme);
+  const label = () => $('theme-toggle').textContent = document.body.getAttribute('data-theme') === 'light' ? 'Dark' : 'Light';
+  label();
+  $('theme-toggle').addEventListener('click', () => {
+    const next = document.body.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    document.body.setAttribute('data-theme', next); label(); try { localStorage.setItem('nt-theme', next); } catch {}
   });
-
-  const savedTheme = localStorage.getItem('nt-theme') || 'light';
-  document.body.setAttribute('data-theme', savedTheme);
-  document.getElementById('theme-toggle').addEventListener('click', () => {
-    const cur = document.body.getAttribute('data-theme');
-    const next = cur === 'light' ? 'dark' : 'light';
-    document.body.setAttribute('data-theme', next);
-    localStorage.setItem('nt-theme', next);
-  });
-
-  document.getElementById('health-link').href = getUrl() + '/health';
-
-  fetchAll();
-  setInterval(fetchAll, 30000);
+  $('refresh-btn').addEventListener('click', refreshAll);
+  let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (state.bot) { renderPositions(state.bot.stats, state.bot.crypto); renderCloses(state.bot.hist); } }, 150); });
+  refreshAll();
+  setInterval(fetchBot, 30000);
+  setInterval(fetchAuto, 5 * 60000);
 })();
 </script>
 </body>
