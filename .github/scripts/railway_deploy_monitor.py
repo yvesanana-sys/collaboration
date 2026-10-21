@@ -42,12 +42,11 @@ RAILWAY_CONTEXT = os.environ.get("RAILWAY_STATUS_CONTEXT", "desirable-exploratio
 PICKUP_GRACE_MIN = int(os.environ.get("PICKUP_GRACE_MIN", "10"))   # no status after this → not picked up
 STUCK_MIN = int(os.environ.get("STUCK_MIN", "25"))                 # pending longer than this → stuck
 
-# Railway's public status page. Tried in order; the first that parses wins.
-STATUS_URLS = [
-    "https://status.railway.com/api/v2/status.json",   # Atlassian Statuspage shape
-    "https://status.railway.com/summary.json",          # Instatus shape
-]
-
+# Railway platform status. status.railway.com 403s non-browser clients, and the
+# railway.instatus.com mirror is deprecated and always reports "UP" (a source
+# that always says "fine" would wave a revert through an outage). This
+# no-auth API is the reachable one (components / incidents / maintenances).
+STATUS_URL = "https://api.railwaystatus.com/status"
 
 def http_json(url, headers=None, timeout=15):
     req = urllib.request.Request(url, headers=headers or {})
@@ -66,26 +65,59 @@ def parse_ts(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
-def railway_platform_status():
-    """Return (indicator, description, source). indicator: none|minor|major|critical|unknown."""
-    for url in STATUS_URLS:
-        try:
-            d = http_json(url, {"Accept": "application/json"})
-        except Exception:
+def _flatten(components, out):
+    for c in components or []:
+        if not isinstance(c, dict):
             continue
-        # Statuspage: {"status": {"indicator": "none", "description": "All Systems Operational"}}
-        st = d.get("status") if isinstance(d, dict) else None
-        if isinstance(st, dict) and "indicator" in st:
-            return st.get("indicator") or "unknown", st.get("description", ""), url
-        # Instatus: {"page": {"status": "UP" | "HASISSUES" | "UNDERMAINTENANCE"}, "activeIncidents": [...]}
-        page = d.get("page") if isinstance(d, dict) else None
-        if isinstance(page, dict) and "status" in page:
-            raw = str(page.get("status", "")).upper()
-            incidents = d.get("activeIncidents") or []
-            names = "; ".join(i.get("name", "") for i in incidents if isinstance(i, dict))
-            indicator = {"UP": "none", "UNDERMAINTENANCE": "minor"}.get(raw, "major")
-            return indicator, names or raw, url
-    return "unknown", "status page unreadable", ""
+        kids = c.get("components") or c.get("children") or []
+        if kids:
+            _flatten(kids, out)
+        else:
+            out.append((str(c.get("name", "?")), str(c.get("status", "")).lower()))
+    return out
+
+
+def _severity(text):
+    t = text.lower()
+    if any(w in t for w in ("major", "outage", "down", "critical")):
+        return "major"
+    if any(w in t for w in ("partial", "degraded", "minor", "maintenance", "investigating", "identified")):
+        return "minor"
+    if t in ("operational", "up", "none", "resolved", "completed", ""):
+        return "none"
+    return "unknown"
+
+
+def railway_platform_status():
+    """Return (indicator, description, source). indicator: none|minor|major|unknown."""
+    try:
+        d = http_json(STATUS_URL, {"Accept": "application/json", "User-Agent": "novatrade-deploy-monitor"})
+    except Exception as e:
+        return "unknown", f"status API unreachable ({type(e).__name__})", STATUS_URL
+    if not isinstance(d, dict):
+        return "unknown", "status API returned an unexpected shape", STATUS_URL
+    rank = {"none": 0, "unknown": 0, "minor": 1, "major": 2}
+    worst, notes = "none", []
+    for name, st in _flatten(d.get("components"), []):
+        sev = _severity(st)
+        if rank[sev] > 0:
+            notes.append(f"{name}: {st}")
+        if rank[sev] > rank[worst]:
+            worst = sev
+    for inc in d.get("incidents") or []:
+        if not isinstance(inc, dict):
+            continue
+        st = str(inc.get("status", "")).lower()
+        if st in ("resolved", "completed", "postmortem"):
+            continue
+        sev = _severity(str(inc.get("impact", ""))) or "minor"
+        sev = sev if rank.get(sev, 0) > 0 else "minor"   # an open incident is at least minor
+        notes.append(f"incident: {inc.get('name') or inc.get('title') or '?'} ({st or 'open'})")
+        if rank[sev] > rank[worst]:
+            worst = sev
+    if not d.get("components") and "incidents" not in d:
+        return "unknown", f"status API shape not recognised (keys: {sorted(d)[:8]})", STATUS_URL
+    return worst, "; ".join(notes[:6]) or "all components operational", STATUS_URL
 
 
 def decide(statuses, commit_time, now, pickup_grace_min, stuck_min):
