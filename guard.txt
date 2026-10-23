@@ -1,0 +1,33 @@
+Changed files:
+  bot_with_proxy.py: 233491 → 14281 bytes, +40/−4475 lines [GATED]
+
+❌ FIX GUARD FAILED — do not merge:
+  • bot_with_proxy.py: shrank 233491 → 14281 bytes (−219210); gated files may shrink at most 1000 — probable truncation
+  • bot_with_proxy.py: required component missing: 'def trading_loop'
+  • bot_with_proxy.py: required component missing: 'app.run('
+  • predeploy_check.py failed:
+  Checking bot_with_proxy.py: 383 lines, 14,281 bytes
+  Found 2 Flask routes
+  All .py files parse cleanly
+
+  ⚠️  Warnings (not blocking, but worth fixing):
+     - bot_with_proxy.py:282 requests.get() has no timeout= (can hang forever on a slow/unreachable API)
+
+======================================================================
+  ❌ PRE-DEPLOY CHECK FAILED — DO NOT DEPLOY
+======================================================================
+  • bot_with_proxy.py is only 383 lines (floor 1500). Looks TRUNCATED — the complete file is ~3,800 lines.
+  • bot_with_proxy.py is only 14,281 bytes (floor 60,000). Looks TRUNCATED — the complete file is ~140 KB.
+  • bot_with_proxy.py is MISSING: __main__ guard (program entry point)
+  • bot_with_proxy.py is MISSING: app.run() — Flask server bind (without this the URL is dead)
+  • bot_with_proxy.py is MISSING: app.run host=0.0.0.0 (Railway needs external bind)
+  • bot_with_proxy.py is MISSING: trading_loop() definition (the trading engine)
+  • bot_with_proxy.py is MISSING: trading_loop started in a thread (engine actually launches)
+  • Only 2 @app.route handlers found (floor 12). The complete file has ~30. Likely truncated.
+  • dashboard.html calls endpoints with no matching route in bot_with_proxy.py: /crypto_status, /history, /leaderboard, /performance, /stats, /strategy
+======================================================================
+  Most likely cause: a file was truncated during a web-editor paste.
+  Restore the complete file (git history / local backup / drag-drop)
+  and run this check again.
+
+
